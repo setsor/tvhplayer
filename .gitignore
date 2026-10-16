@@ -11,3 +11,4 @@ tvhplayer/__pycache__/resources_rc.cpython-313.pyc
 /macos/*.log
 /macos/TVHplayer-*.spec
 /macos/tvhplayer/__pycache__/
+/macos/tests/__pycache__/
