@@ -251,7 +251,7 @@ class DVRStatusDialog(QDialog):
                     self.upcoming_table.setItem(i, 3, QTableWidgetItem(str(duration)))
                     
                     # Add status column
-                    status = "Recording" if is_recording else entry.get('sched_status', 'scheduled').capitalize()
+                    status = "Recording" if is_recording else "Scheduled"
                     self.upcoming_table.setItem(i, 4, QTableWidgetItem(status))
                     
                     # Highlight currently recording entries
@@ -2573,7 +2573,10 @@ class EPGDialog(QDialog):
                 "start": entry['start'],
                 "stop": entry['stop'],
                 "channel": entry['channelUuid'],
-                "title": entry.get('title', {"eng": "Scheduled Recording"}),
+                "title": (
+                    entry["title"] if isinstance(entry.get("title"), dict)
+                    else {"eng": entry.get("title") or "Scheduled Recording"}
+                ),
                 "description": entry.get('description', {"eng": ""}),
                 "comment": "Scheduled via TVHplayer"
             }
@@ -2583,7 +2586,7 @@ class EPGDialog(QDialog):
             print(f"Debug: Recording data: {data}")
             
             # Make recording request
-            record_url = f'http://{self.server["url"]}/api/dvr/entry/create'
+            record_url = f'{self.server["url"].rstrip("/")}/api/dvr/entry/create'
             print(f"Debug: Sending recording request to: {record_url}")
             
             response = requests.post(record_url, data=data, auth=auth)
