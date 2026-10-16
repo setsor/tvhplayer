@@ -15,7 +15,13 @@ python -m pip install -r macos/requirements-build.txt
 bash macos/build-macos.sh
 ```
 
-The output is `macos/dist/TVHplayer-MacOS-Intel.app`.
+The output is `macos/dist/TVHplayer-MacOS-Intel.app`. To prepare a drag-and-drop disk image, run:
+
+```bash
+bash macos/package-dmg.sh
+```
+
+This generates `macos/dist/TVHplayer-MacOS-Intel.dmg` and an accompanying `.sha256` manifest. The disk image contains the `.app`, an Applications shortcut and installation instructions.
 
 **Runtime dependency:** The generated `.app` bundles Python/Qt and VLC plugins, but does **not** bundle the native `libvlc.dylib` and `libvlccore.dylib`. VLC 3.0.24 must therefore remain installed at `/Applications/VLC.app` on the destination Mac. This is a development application bundle, not a self-contained VLC distribution.
 
@@ -37,14 +43,24 @@ Do not copy an existing `plugins.dat` into the completed bundle. The VLC install
 
 The dedicated [Build TVHplayer (macOS Intel)](../.github/workflows/build-macos.yml) workflow runs on `macos-15-intel`. Because the Python 3.15 stable package may not be available through `actions/setup-python` yet, the workflow instead downloads and verifies the official Python 3.15.0 macOS installer. It also downloads and SHA-256-verifies the official VLC 3.0.24 Intel DMG.
 
-After building and checking the bundle, GitHub Actions uploads `TVHplayer-MacOS-Intel.zip` as a downloadable workflow artifact, preserving the `.app` directory structure. The workflow runs on pushes to the packaging branch and matching pull requests. Once the workflow is on the default branch, it can also be launched manually from GitHub's **Actions** tab.
+After building and checking the bundle, GitHub Actions produces `TVHplayer-MacOS-Intel.dmg`, its SHA-256 manifest, and a ZIP archive of the `.app`. All are attached to the workflow's downloadable artifact.
 
-Builds use ad-hoc signing, not Apple Developer ID signing/notarization. The CI runner uses macOS 15; compatibility with the user's macOS Ventura 13.7.8 must be confirmed by testing the GitHub-built archive on that Mac.
+An explicitly marked `release(macos):` commit on the fork's `release/macos-intel-all-improvements` branch also publishes the verified DMG to [fork Releases](https://github.com/setsor/tvhplayer/releases), as a prerelease tied to the exact commit. Regular builds and pull requests do **not** publish releases. The workflow runs on pushes to the packaging branch and matching pull requests. Once the workflow is on the default branch, it can also be launched manually from GitHub's **Actions** tab.
 
-The workflow packages the **exact branch/commit it runs on**. Building `main` before PRs #32 and #33 are merged does not include those application fixes. For integration testing, apply the packaging changes on a local test branch that already contains those fixes.
+Builds use ad-hoc signing, not Apple Developer ID signing/notarization. The CI runner uses macOS 15. The preceding combined-fixes GitHub-generated build was tested successfully on Intel macOS Ventura 13.7.8; the **new DMG revision** still requires an actual Mac launch/playback test.
+
+The workflow packages the **exact branch/commit it runs on**. The fork's integration/release branch includes both the EPG scheduling and DVR Status fixes. A clean `main` build will not include those changes before they are merged.
+
+The build also runs standard-library regression tests:
+
+```bash
+python -m unittest discover -s macos/tests -v
+```
+
+The `File missing` and `Time missed` DVR statuses are placed in the Failed tab. Diagnostic output is quiet by default. For redacted technical diagnostics, launch with `TVHPLAYER_DEBUG=1`; configuration dumps, stream URLs and raw server-response bodies are excluded, and passwords/URL credentials are masked.
 
 ## Notes
 
-- The existing multi-platform tag-release workflow is unchanged by this independent Intel macOS workflow.
+- The older multi-platform tag workflow is separate; the packaging PR only corrects invalid matrix artifact expressions and does not modernize those other platform builds.
 - Local output is confined to `macos/build/` and `macos/dist/`; the installed VLC and TVHplayer applications are not overwritten.
 - Application runtime logs may contain TVHeadend credentials. Never attach unredacted logs or `~/.tvhplayer.conf` to a public GitHub issue or PR.
