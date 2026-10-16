@@ -30,11 +30,15 @@ def categorize_recording(entry):
         "aborted", "cancelled", "canceled", "no input", "no data",
         "missed", "tuner unavailable",
     )
-    is_failure = (
+    explicitly_failed = (
         any(term in s for term in failure_terms)
         or sched in {"completederror", "completedrerecord", "missed", "invalid"}
-        or _nonzero(entry.get("errors"))
-        or _nonzero(entry.get("errorcode"))
+    )
+    # "Completed OK" remains Finished even if TVHeadend reports
+    # non-fatal stream errors. The server's explicit status takes priority.
+    is_failure = explicitly_failed or (
+        s not in {"completed ok", "finished"}
+        and (_nonzero(entry.get("errors")) or _nonzero(entry.get("errorcode")))
     )
     if is_failure:
         error_text = entry.get("error")
