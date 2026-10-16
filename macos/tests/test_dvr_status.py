@@ -30,8 +30,12 @@ class DVRStatusTests(unittest.TestCase):
     def test_time_missed(self):
         self.assertEqual(categorize_recording({"status": "Time missed", "sched_status": "completedrerecord"}), ("failed", "Time missed"))
 
-    def test_recorded_with_errors(self):
-        self.assertEqual(categorize_recording({"status": "Completed OK", "errors": 2}), ("failed", "Completed OK"))
+    def test_completed_ok_with_nonfatal_errors(self):
+        self.assertEqual(categorize_recording({"status": "Completed OK", "errors": 2}), ("finished", "Completed"))
+
+    def test_errors_with_no_completed_ok(self):
+        section, _ = categorize_recording({"status": "Stopped", "errors": 2})
+        self.assertEqual(section, "failed")
 
     def test_explicit_error(self):
         self.assertEqual(categorize_recording({"status": "Failed", "error": "No input"}), ("failed", "No input"))
