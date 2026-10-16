@@ -7,6 +7,7 @@ on:
       - main
       - build/macos-intel-reproducible
       - test/macos-integration-build
+      - release/macos-intel-all-improvements
     paths:
       - 'macos/**'
       - '.github/workflows/build-macos.yml'
@@ -51,6 +52,12 @@ jobs:
           "$RUNNER_TEMP/tvhplayer-venv/bin/python" -c 'import ast, pathlib; ast.parse(pathlib.Path("macos/tvhplayer/tvhplayer.py").read_text(encoding="utf-8"))'
           echo "$RUNNER_TEMP/tvhplayer-venv/bin" >> "$GITHUB_PATH"
 
+      - name: Test DVR classification and diagnostic redaction
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/tvhplayer-venv/bin/python" -m unittest discover -s macos/tests -v
+
       - name: Download verified VLC 3.0.24 (Intel)
         shell: bash
         run: |
@@ -79,11 +86,71 @@ jobs:
           test -f "$APP/Contents/Frameworks/icons/play.svg"
           codesign --verify --deep --verbose=2 "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" macos/dist/TVHplayer-MacOS-Intel.zip
+          bash macos/package-dmg.sh
+          test -s macos/dist/TVHplayer-MacOS-Intel.dmg
+          test -s macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
 
       - name: Upload app archive
         uses: actions/upload-artifact@v7
         with:
           name: TVHplayer-MacOS-Intel-${{ github.sha }}
-          path: macos/dist/TVHplayer-MacOS-Intel.zip
+          path: |
+            macos/dist/TVHplayer-MacOS-Intel.zip
+            macos/dist/TVHplayer-MacOS-Intel.dmg
+            macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
           if-no-files-found: error
           retention-days: 14
+
+  publish-preview:
+    name: Publish macOS Intel DMG to fork Releases
+    needs: macos-intel
+    if: >-
+      github.repository == 'setsor/tvhplayer' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/release/macos-intel-all-improvements' &&
+      startsWith(github.event.head_commit.message, 'release(macos):')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - name: Download verified build artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: TVHplayer-MacOS-Intel-${{ github.sha }}
+          path: artifacts
+
+      - name: Validate checksum and publish pre-release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd artifacts
+          shasum -a 256 -c TVHplayer-MacOS-Intel.dmg.sha256
+          TAG="macos-intel-preview-${GITHUB_SHA:0:8}"
+          cat > release-notes.md <<'NOTES'
+          ### TVHplayer for Intel macOS (development preview)
+
+          Download **TVHplayer-MacOS-Intel.dmg**. Open it and drag the app to
+          Applications. Install **VLC 3.0.24** in /Applications first; it supplies
+          native playback libraries not included with TVHplayer.
+
+          Includes the tested EPG scheduling fixes, accurate DVR statuses
+          (including missed and missing-file recordings), quieter redacted
+          diagnostics, and improved macOS icon/font handling.
+
+          Built with Python 3.15 and PyInstaller 6.22.3. Tested on macOS
+          Ventura 13.7.8 for the earlier integration build. This exact revision
+          must still be verified on a real Mac.
+
+          Ad-hoc signed; not Apple Developer ID signed or notarized.
+          NOTES
+          gh release create "$TAG" \
+            TVHplayer-MacOS-Intel.dmg \
+            TVHplayer-MacOS-Intel.dmg.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "TVHplayer macOS Intel preview (${GITHUB_SHA:0:8})" \
+            --notes-file release-notes.md \
+            --prerelease --latest=false
