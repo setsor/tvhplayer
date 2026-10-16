@@ -64,3 +64,11 @@ The `File missing` and `Time missed` DVR statuses are placed in the Failed tab. 
 - The older multi-platform tag workflow is separate; the packaging PR only corrects invalid matrix artifact expressions and does not modernize those other platform builds.
 - Local output is confined to `macos/build/` and `macos/dist/`; the installed VLC and TVHplayer applications are not overwritten.
 - Application runtime logs may contain TVHeadend credentials. Never attach unredacted logs or `~/.tvhplayer.conf` to a public GitHub issue or PR.
+
+## Preview distribution
+
+An installation-ready development DMG is published as a **prerelease** in the
+[fork's Releases page](https://github.com/setsor/tvhplayer/releases). Each
+published prerelease uses a unique source-commit tag. The DMG includes an
+Applications shortcut, is checksum-verified by GitHub Actions, and must be
+installed alongside VLC 3.0.24 on Intel macOS. This release is not Apple-notarized.
