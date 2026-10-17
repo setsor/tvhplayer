@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tvhplayer"))
 
-from recording_poll import RecordingPollWorker
+from recording_poll import RecordingPollWorker, RecordingStopWorker
 
 
 class RecordingPollTests(unittest.TestCase):
@@ -31,6 +31,8 @@ class RecordingPollTests(unittest.TestCase):
         self.assertEqual(len(results[0]["recordings"]), 6)
         self.assertEqual(get.call_args.kwargs["timeout"], (2, 4))
         self.assertEqual(get.call_args.args[0], "http://tvh.invalid:9981/api/dvr/entry/grid")
+        self.assertEqual(get.call_args.kwargs["params"], {"start": 0, "limit": 500})
+        self.assertEqual(results[0]["entries"], entries)
 
     def test_server_error_does_not_falsely_report_zero_recordings(self):
         from requests.exceptions import Timeout
@@ -53,6 +55,72 @@ class RecordingPollTests(unittest.TestCase):
             worker.run()
         self.assertEqual(get.call_args.kwargs["auth"], ("tester", "example-only"))
         self.assertNotIn("example-only", get.call_args.args[0])
+
+
+
+class RecordingStopTests(unittest.TestCase):
+    server = {"name": "test", "url": "http://tvh.invalid:9981"}
+
+    def test_only_one_uuid_posted_for_selected_recording(self):
+        worker = RecordingStopWorker(self.server, {"uuid": "selected-uuid"})
+        results = []
+        worker.signals.completed.connect(results.append)
+        reply = Mock(status_code=200)
+        with patch("recording_poll.requests.post", return_value=reply) as post:
+            worker.run()
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(
+            post.call_args.args[0], "http://tvh.invalid:9981/api/dvr/entry/stop"
+        )
+        self.assertEqual(post.call_args.kwargs["data"], {"uuid": "selected-uuid"})
+        self.assertEqual(post.call_args.kwargs["timeout"], (2, 7))
+        self.assertEqual(results[0]["outcome"], "accepted")
+        self.assertEqual(results[0]["http_status"], 200)
+
+    def test_non_200_is_rejected_without_retries(self):
+        worker = RecordingStopWorker(self.server, {"uuid": "selected-uuid"})
+        results = []
+        worker.signals.completed.connect(results.append)
+        with patch(
+            "recording_poll.requests.post", return_value=Mock(status_code=403)
+        ) as post:
+            worker.run()
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(results[0]["outcome"], "rejected")
+        self.assertEqual(results[0]["http_status"], 403)
+
+    def test_timeout_has_unknown_result_and_never_retries(self):
+        from requests.exceptions import ReadTimeout
+        worker = RecordingStopWorker(self.server, {"uuid": "selected-uuid"})
+        results = []
+        worker.signals.completed.connect(results.append)
+        with patch(
+            "recording_poll.requests.post",
+            side_effect=ReadTimeout("No response from server")
+        ) as post:
+            worker.run()
+        self.assertEqual(post.call_count, 1)
+        self.assertEqual(results[0]["outcome"], "unknown")
+        self.assertIsNone(results[0]["http_status"])
+
+    def test_stop_uuid_required(self):
+        with self.assertRaises(ValueError):
+            RecordingStopWorker(self.server, {"uuid": None})
+
+    def test_auth_not_embedded_in_stop_url_or_result(self):
+        server = dict(self.server, username="example", password="not-a-real-secret")
+        worker = RecordingStopWorker(server, {"uuid": "selected"})
+        results = []
+        worker.signals.completed.connect(results.append)
+        with patch(
+            "recording_poll.requests.post", return_value=Mock(status_code=200)
+        ) as post:
+            worker.run()
+        self.assertEqual(
+            post.call_args.kwargs["auth"], ("example", "not-a-real-secret")
+        )
+        self.assertNotIn("not-a-real-secret", post.call_args.args[0])
+        self.assertNotIn("not-a-real-secret", repr(results))
 
 
 if __name__ == "__main__":
