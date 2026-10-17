@@ -145,267 +145,226 @@ class Logger:
         self.logger.exception(msg)
 
 class DVRStatusDialog(QDialog):
+    """Render one shared asynchronous DVR snapshot; never call HTTP directly."""
+
     def __init__(self, server, parent=None):
         super().__init__(parent)
         self.server = server
+        self._fresh = False
+        self._stop_pending = False
         self.setWindowTitle("DVR Status")
         self.resize(800, 600)
         self.setup_ui()
-        
-        # Update timer
-        self.update_timer = QTimer()
-        self.update_timer.timeout.connect(self.update_status)
-        self.update_timer.start(5000)  # Update every 5 seconds
-        
-        # Initial update
-        self.update_status()
-        
+        self.request_refresh()
+
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        
-        # Create tab widget
+        self.status_hint = QLabel("Loading current DVR status...")
+        layout.addWidget(self.status_hint)
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
-        
-        # Upcoming/Current recordings tab
+
         self.upcoming_table = QTableWidget()
-        self.upcoming_table.setColumnCount(5)  # Added one more column for status
-        self.upcoming_table.setHorizontalHeaderLabels(['Channel', 'Title', 'Start Time', 'Duration', 'Status'])
+        self.upcoming_table.setColumnCount(5)
+        self.upcoming_table.setHorizontalHeaderLabels(
+            ["Channel", "Title", "Start Time", "Duration", "Status"]
+        )
         self.upcoming_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.upcoming_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.upcoming_table.setSelectionMode(QTableWidget.SingleSelection)
         self.upcoming_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.upcoming_table.itemSelectionChanged.connect(self._update_stop_button)
 
-        # Keep the stop action alongside the specific entry it will affect.
-        upcoming_page = QWidget()
-        upcoming_layout = QVBoxLayout(upcoming_page)
-        upcoming_layout.setContentsMargins(0, 0, 0, 0)
-        upcoming_layout.addWidget(self.upcoming_table)
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.addWidget(self.upcoming_table)
         controls = QHBoxLayout()
+        refresh = QPushButton("Refresh")
+        refresh.clicked.connect(self.request_refresh)
+        controls.addWidget(refresh)
         controls.addStretch()
         self.stop_selected_btn = QPushButton("Stop Selected Recording...")
         self.stop_selected_btn.setEnabled(False)
-        self.stop_selected_btn.setToolTip("Stops only the selected active DVR entry")
         self.stop_selected_btn.clicked.connect(self.stop_selected_recording)
         controls.addWidget(self.stop_selected_btn)
-        upcoming_layout.addLayout(controls)
-        self.tabs.addTab(upcoming_page, "Upcoming/Current")
-        
-        # Finished recordings tab
+        page_layout.addLayout(controls)
+        self.tabs.addTab(page, "Upcoming/Current")
+
         self.finished_table = QTableWidget()
         self.finished_table.setColumnCount(4)
-        self.finished_table.setHorizontalHeaderLabels(['Channel', 'Title', 'Start Time', 'Duration'])
+        self.finished_table.setHorizontalHeaderLabels(
+            ["Channel", "Title", "Start Time", "Duration"]
+        )
         self.finished_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tabs.addTab(self.finished_table, "Finished")
-        
-        # Failed recordings tab
+
         self.failed_table = QTableWidget()
         self.failed_table.setColumnCount(4)
-        self.failed_table.setHorizontalHeaderLabels(['Channel', 'Title', 'Start Time', 'Error'])
+        self.failed_table.setHorizontalHeaderLabels(
+            ["Channel", "Title", "Start Time", "Error"]
+        )
         self.failed_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.tabs.addTab(self.failed_table, "Failed")
-        
-        # Close button
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
-        
+
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(self.accept)
+        layout.addWidget(close_button)
+
+    def request_refresh(self):
+        parent = self.parent()
+        if parent and hasattr(parent, "refresh_recording_summary"):
+            self.status_hint.setText("Refreshing current DVR state...")
+            parent.refresh_recording_summary()
+
     def update_status(self):
-        try:
-            # Create auth if needed
-            auth = None
-            if self.server.get('username') or self.server.get('password'):
-                auth = (self.server.get('username', ''), self.server.get('password', ''))
-            
-            # Get DVR entries
-            api_url = f'{self.server["url"]}/api/dvr/entry/grid'
-            response = requests.get(api_url, auth=auth, timeout=(2, 5))
+        """Kept for legacy callers; only queues an asynchronous read."""
+        self.request_refresh()
 
-            if response.status_code == 200:
-                data = response.json()
-                entries = data.get('entries', [])
-                debug_print(f"Debug: Found {len(entries)} DVR entries")
-                
-                # Sort entries by status
-                upcoming = []
-                finished = []
-                failed = []
-                
-                for entry in entries:
-                    section, status_text = categorize_recording(entry)
-                    channel = entry.get('channelname') or 'Unknown'
-                    title = entry.get('disp_title') or 'Untitled'
-                    start_time = datetime.fromtimestamp(entry.get('start', 0))
-                    duration = timedelta(seconds=entry.get('duration', 0))
-
-                    if section == 'upcoming':
-                        upcoming.append((channel, title, start_time, duration,
-                                         status_text == 'Recording', entry.get('uuid')))
-                    elif section == 'finished':
-                        finished.append((channel, title, start_time, duration))
-                    elif section == 'failed':
-                        failed.append((channel, title, start_time, status_text))
-                        debug_print(f"Debug: DVR failure: {title} - {status_text}")
-
-                debug_print(f"\nDebug: Sorted entries - Upcoming: {len(upcoming)}, "
-                      f"Finished: {len(finished)}, Failed: {len(failed)}")
-                
-                # Preserve a selected recording as the DVR timer refreshes.
-                selected = self._selected_recording()
-                selected_uuid = selected.get("uuid") if selected else None
-
-                # Sort upcoming recordings by start time
-                upcoming.sort(key=lambda x: x[2])  # Sort by start_time
-                
-                # Never let a stale row selection silently target a different
-                # UUID when entries are added/removed during a 5-second refresh.
-                self.upcoming_table.clearSelection()
-
-                # Update tables
-                self.upcoming_table.setRowCount(len(upcoming))
-                reselect_row = None
-                for i, (channel, title, start, duration, is_recording, uuid) in enumerate(upcoming):
-                    channel_item = QTableWidgetItem(channel)
-                    channel_item.setData(Qt.UserRole, uuid)
-                    self.upcoming_table.setItem(i, 0, channel_item)
-                    if uuid and uuid == selected_uuid:
-                        reselect_row = i
-                    self.upcoming_table.setItem(i, 1, QTableWidgetItem(title))
-                    self.upcoming_table.setItem(i, 2, QTableWidgetItem(start.strftime('%Y-%m-%d %H:%M')))
-                    self.upcoming_table.setItem(i, 3, QTableWidgetItem(str(duration)))
-                    
-                    # Add status column
-                    status = "Recording" if is_recording else "Scheduled"
-                    self.upcoming_table.setItem(i, 4, QTableWidgetItem(status))
-                    
-                    # Highlight currently recording entries
-                    if is_recording:
-                        for col in range(5):  # Update range to include new column
-                            self.upcoming_table.item(i, col).setBackground(Qt.green)
-                
-                if reselect_row is not None:
-                    self.upcoming_table.selectRow(reselect_row)
-                self._update_stop_button()
-
-                # Sort finished recordings by start time (most recent first)
-                finished.sort(key=lambda x: x[2], reverse=True)
-                
-                self.finished_table.setRowCount(len(finished))
-                for i, (channel, title, start, duration) in enumerate(finished):
-                    self.finished_table.setItem(i, 0, QTableWidgetItem(channel))
-                    self.finished_table.setItem(i, 1, QTableWidgetItem(title))
-                    self.finished_table.setItem(i, 2, QTableWidgetItem(start.strftime('%Y-%m-%d %H:%M')))
-                    self.finished_table.setItem(i, 3, QTableWidgetItem(str(duration)))
-                
-                # Sort failed recordings by start time (most recent first)
-                failed.sort(key=lambda x: x[2], reverse=True)
-                
-                self.failed_table.setRowCount(len(failed))
-                for i, (channel, title, start, error) in enumerate(failed):
-                    self.failed_table.setItem(i, 0, QTableWidgetItem(channel))
-                    self.failed_table.setItem(i, 1, QTableWidgetItem(title))
-                    self.failed_table.setItem(i, 2, QTableWidgetItem(start.strftime('%Y-%m-%d %H:%M')))
-                    self.failed_table.setItem(i, 3, QTableWidgetItem(error))
-                    # Highlight failed entries in red
-                    for col in range(4):
-                        self.failed_table.item(i, col).setBackground(Qt.red)
-                
+    def apply_entries(self, entries, total=None):
+        if not isinstance(entries, list):
+            self.mark_unavailable()
+            return
+        selected = self._selected_recording()
+        selected_uuid = selected.get("uuid") if selected else None
+        upcoming, finished, failed = [], [], []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            section, state = categorize_recording(entry)
+            channel = str(entry.get("channelname") or "Unknown channel")
+            title = str(entry.get("disp_title") or "Untitled")
+            try:
+                date = datetime.fromtimestamp(int(entry.get("start") or 0))
+                duration = timedelta(seconds=int(entry.get("duration") or 0))
+            except (ValueError, TypeError, OverflowError, OSError):
+                continue
+            if section == "upcoming":
+                upcoming.append((channel, title, date, duration,
+                                 state == "Recording", entry.get("uuid")))
+            elif section == "finished":
+                finished.append((channel, title, date, duration))
             else:
-                debug_print(f"Debug: Failed to fetch DVR entries. Status code: {response.status_code}")
-                
-        except Exception as e:
-            debug_print(f"Debug: Error updating DVR status: {str(e)}")
-            debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-    
+                failed.append((channel, title, date, state))
+        upcoming.sort(key=lambda v: v[2])
+        finished.sort(key=lambda v: v[2], reverse=True)
+        failed.sort(key=lambda v: v[2], reverse=True)
+
+        self.upcoming_table.blockSignals(True)
+        try:
+            self.upcoming_table.clearSelection()
+            self.upcoming_table.setRowCount(len(upcoming))
+            restore_index = None
+            for i, (channel, title, date, duration, recording, uuid) in enumerate(upcoming):
+                cell = QTableWidgetItem(channel)
+                cell.setData(Qt.UserRole, uuid)
+                self.upcoming_table.setItem(i, 0, cell)
+                self.upcoming_table.setItem(i, 1, QTableWidgetItem(title))
+                self.upcoming_table.setItem(i, 2, QTableWidgetItem(date.strftime("%Y-%m-%d %H:%M")))
+                self.upcoming_table.setItem(i, 3, QTableWidgetItem(str(duration)))
+                self.upcoming_table.setItem(i, 4, QTableWidgetItem("Recording" if recording else "Scheduled"))
+                if recording:
+                    for col in range(5):
+                        self.upcoming_table.item(i, col).setBackground(Qt.green)
+                if uuid and uuid == selected_uuid:
+                    restore_index = i
+            if restore_index is not None:
+                self.upcoming_table.selectRow(restore_index)
+        finally:
+            self.upcoming_table.blockSignals(False)
+
+        self.finished_table.setRowCount(len(finished))
+        for i, (channel, title, date, duration) in enumerate(finished):
+            for col, text in enumerate((channel, title, date.strftime("%Y-%m-%d %H:%M"), str(duration))):
+                self.finished_table.setItem(i, col, QTableWidgetItem(text))
+
+        self.failed_table.setRowCount(len(failed))
+        for i, (channel, title, date, error) in enumerate(failed):
+            for col, text in enumerate((channel, title, date.strftime("%Y-%m-%d %H:%M"), error)):
+                cell = QTableWidgetItem(text)
+                cell.setBackground(Qt.red)
+                self.failed_table.setItem(i, col, cell)
+
+        self._fresh = True
+        suffix = " (partial list)" if isinstance(total, int) and total > len(entries) else ""
+        self.status_hint.setText(f"Updated: {len(entries)} DVR entries{suffix}")
+        self._update_stop_button()
+
+    def mark_unavailable(self):
+        self._fresh = False
+        self.upcoming_table.clearSelection()
+        self.status_hint.setText("DVR status unavailable; Stop disabled until fresh data arrives.")
+        self._update_stop_button()
+
     def _selected_recording(self):
-        """Return the selected row, with the server's immutable DVR UUID."""
-        selection = self.upcoming_table.selectionModel().selectedRows()
-        if not selection:
+        rows = self.upcoming_table.selectionModel().selectedRows()
+        if not rows:
             return None
-        row = selection[0].row()
-        channel_item = self.upcoming_table.item(row, 0)
-        title_item = self.upcoming_table.item(row, 1)
-        status_item = self.upcoming_table.item(row, 4)
-        if channel_item is None or status_item is None:
+        row = rows[0].row()
+        channel = self.upcoming_table.item(row, 0)
+        title = self.upcoming_table.item(row, 1)
+        status = self.upcoming_table.item(row, 4)
+        if not channel or not status:
             return None
         return {
-            "uuid": channel_item.data(Qt.UserRole),
-            "channel": channel_item.text(),
-            "title": title_item.text() if title_item else "Untitled",
-            "is_recording": status_item.text() == "Recording",
+            "uuid": channel.data(Qt.UserRole),
+            "channel": channel.text(),
+            "title": title.text() if title else "Untitled",
+            "is_recording": status.text() == "Recording",
         }
 
     def _update_stop_button(self):
         selected = self._selected_recording()
-        self.stop_selected_btn.setEnabled(
-            bool(selected and selected.get("is_recording") and selected.get("uuid"))
-        )
+        blocked = getattr(self.parent(), "_uncertain_stop_uuids", set())
+        self.stop_selected_btn.setEnabled(bool(
+            self._fresh and not self._stop_pending
+            and selected and selected.get("is_recording")
+            and selected.get("uuid") and selected["uuid"] not in blocked
+        ))
 
     def stop_selected_recording(self):
-        """Stop precisely one confirmed TVHeadend DVR entry, never all."""
         selected = self._selected_recording()
-        if not selected or not selected.get("is_recording"):
-            self._update_stop_button()
+        if not self._fresh or not selected or not selected.get("is_recording"):
             return
         try:
-            payload = stop_payload(selected)
+            stop_payload(selected)
         except ValueError:
-            QMessageBox.warning(self, "Recording unavailable",
-                                "This recording cannot be stopped without its DVR UUID.")
+            self.status_hint.setText("Cannot stop an entry without a valid UUID.")
             return
-
-        question = (
-            f"Stop only this recording?\\n\\n"
-            f"Channel: {selected['channel']}\\n"
-            f"Programme: {selected['title']}\\n\\n"
-            "Other active recordings will continue."
+        message = (
+            f"Stop only this recording?\n\nChannel: {selected['channel']}"
+            f"\nProgramme: {selected['title']}\n\nOther recordings will continue."
         )
-        confirmation = QMessageBox.question(
-            self, "Confirm recording stop", question,
+        if QMessageBox.question(
+            self, "Confirm recording stop", message,
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-        )
-        if confirmation != QMessageBox.Yes:
+        ) != QMessageBox.Yes:
             return
+        parent = self.parent()
+        if parent and parent.request_stop_recording(selected):
+            self._stop_pending = True
+            self._fresh = False
+            self.upcoming_table.clearSelection()
+            self.status_hint.setText(f"Sending one Stop request for {selected['channel']}...")
+            self._update_stop_button()
+        else:
+            self.status_hint.setText("A Stop request is pending or its result is unknown.")
 
-        self.stop_selected_btn.setEnabled(False)
-        base_url = self.server['url'].rstrip('/')
-        if not base_url.startswith(('http://', 'https://')):
-            base_url = 'http://' + base_url
-        auth = None
-        if self.server.get('username') or self.server.get('password'):
-            auth = (self.server.get('username', ''), self.server.get('password', ''))
-        try:
-            response = requests.post(
-                f"{base_url}/api/dvr/entry/stop",
-                data=payload, auth=auth, timeout=(2, 7)
+    def stop_request_finished(self, outcome, http_status=None):
+        self._stop_pending = False
+        self._fresh = False
+        self.upcoming_table.clearSelection()
+        if outcome == "accepted":
+            self.status_hint.setText("Stop accepted; checking DVR state...")
+        elif outcome == "unknown":
+            self.status_hint.setText(
+                "Stop outcome UNKNOWN. Do not repeat the command; check TVHeadend first."
             )
-            if response.status_code == 200:
-                parent = self.parent()
-                if parent and hasattr(parent, "show_status"):
-                    parent.show_status(
-                        f"Stopped recording: {selected['channel']} — {selected['title']}"
-                    )
-                self.upcoming_table.clearSelection()
-                self.update_status()
-                if parent and hasattr(parent, "refresh_recording_summary"):
-                    parent.refresh_recording_summary()
-            else:
-                QMessageBox.warning(
-                    self, "Recording not stopped",
-                    f"TVHeadend returned HTTP {response.status_code}. "
-                    "Other recordings have not been modified."
-                )
-        except requests.RequestException:
-            QMessageBox.warning(
-                self, "Connection error",
-                "Unable to confirm that this recording was stopped. "
-                "Refresh DVR Status before retrying."
-            )
+        else:
+            self.status_hint.setText(f"Stop rejected (HTTP {http_status}).")
         self._update_stop_button()
 
     def closeEvent(self, event):
-        self.update_timer.stop()
         super().closeEvent(event)
 
 class RecordingDurationDialog(QDialog):
