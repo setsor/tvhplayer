@@ -45,7 +45,7 @@ class DVRThreadSafetyTests(unittest.TestCase):
 
     def test_stop_is_only_implemented_by_one_background_worker(self):
         source = WORKER.read_text(encoding="utf-8")
-        self.assertEqual(source.count('"/api/dvr/entry/stop"'), 1)
+        self.assertEqual(source.count('/api/dvr/entry/stop'), 1)
         method = function_text(source, "RecordingStopWorker", "run")
         self.assertIn("data={", method)
         self.assertIn('"uuid": self.uuid', method)
