@@ -74,3 +74,17 @@ An installation-ready development DMG is published as a **prerelease** in the
 published prerelease uses a unique source-commit tag. The DMG includes an
 Applications shortcut, is checksum-verified by GitHub Actions, and must be
 installed alongside VLC 3.0.24 on Intel macOS. This release is not Apple-notarized.
+
+## Concurrent TVHeadend recordings
+
+The macOS status bar has three independent areas:
+
+- **LIVE:** the currently playing channel (persistent, including after fullscreen).
+- **Notice:** temporary feedback (automatically expires).
+- **REC N:** the number of *server-side* active TVHeadend DVR entries, refreshed every 15 seconds without blocking the playback UI. Click to open the DVR Status dialog. The tooltip shows the channels and programme titles. **REC ?** indicates that the server status could not be retrieved; it never means there are zero recordings.
+
+The old **Stop Recording** button no longer stops all currently running DVR entries. Instead, it opens **DVR Status → Upcoming/Current**. Select one row displaying **Recording** and click **Stop Selected Recording...**. The confirmation names its channel and programme, and only that entry's UUID is sent to `/api/dvr/entry/stop`. Scheduled entries cannot be stopped using this action. Other concurrent recordings continue.
+
+TVHplayer does not limit recordings to three or four; a DVB-C tuner can service multiple subscriptions on the same multiplex. The **LOCAL REC** indicator refers to FFmpeg local-file recording and is separate from server DVR count.
+
+Test selective Stop only on a disposable recording. This UI change must be manually verified on macOS Ventura before the updated DMG is published.
