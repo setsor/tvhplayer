@@ -8,7 +8,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-APP_NAME="${TVHPLAYER_APP_NAME:-TVHplayer-MacOS-Intel}"
+APP_NAME="${TVHPLAYER_APP_NAME:-TVHplayer}"
 APP="$ROOT/dist/$APP_NAME.app"
 OUTPUT="$ROOT/dist/$APP_NAME.dmg"
 
@@ -34,7 +34,7 @@ TVHplayer — Intel macOS development build
 
 1. Install VLC 3.0.24 for Intel macOS into /Applications/VLC.app first.
    TVHplayer requires VLC's native playback libraries.
-2. Drag TVHplayer-MacOS-Intel.app onto the Applications shortcut.
+2. Drag TVHplayer.app onto the Applications shortcut.
 3. Launch the installed app from /Applications.
 
 The application is ad-hoc signed but not notarized by Apple.
@@ -44,7 +44,7 @@ Do not upload application log files that contain private server information.
 INSTRUCTIONS
 
 rm -f "$OUTPUT"
-hdiutil create -volname 'TVHplayer Intel' \
+hdiutil create -volname 'TVHplayer' \
   -srcfolder "$STAGE" -format UDZO -ov "$OUTPUT" >/dev/null
 
 hdiutil verify "$OUTPUT" >/dev/null

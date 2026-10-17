@@ -12,7 +12,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 MACOS_DIR="$ROOT/macos"
 VLC_APP="${VLC_APP:-/Applications/VLC.app}"
 PYTHON="${PYTHON:-python3}"
-APP_NAME="${TVHPLAYER_APP_NAME:-TVHplayer-MacOS-Intel}"
+APP_NAME="${TVHPLAYER_APP_NAME:-TVHplayer}"
 
 if [[ ! "$APP_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "ERROR: TVHPLAYER_APP_NAME must contain only letters, digits, dots, dashes or underscores." >&2

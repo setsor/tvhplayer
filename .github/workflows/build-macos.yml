@@ -80,24 +80,26 @@ jobs:
         run: |
           set -euo pipefail
           bash macos/build-macos.sh
-          APP='macos/dist/TVHplayer-MacOS-Intel.app'
-          file "$APP/Contents/MacOS/TVHplayer-MacOS-Intel"
+          APP='macos/dist/TVHplayer.app'
+          file "$APP/Contents/MacOS/TVHplayer"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleName' "$APP/Contents/Info.plist")" = TVHplayer
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")" = TVHplayer
           test ! -e "$APP/Contents/Frameworks/vlc/plugins/plugins.dat"
           test -f "$APP/Contents/Frameworks/icons/play.svg"
           codesign --verify --deep --verbose=2 "$APP"
-          ditto -c -k --sequesterRsrc --keepParent "$APP" macos/dist/TVHplayer-MacOS-Intel.zip
+          ditto -c -k --sequesterRsrc --keepParent "$APP" macos/dist/TVHplayer.zip
           bash macos/package-dmg.sh
-          test -s macos/dist/TVHplayer-MacOS-Intel.dmg
-          test -s macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
+          test -s macos/dist/TVHplayer.dmg
+          test -s macos/dist/TVHplayer.dmg.sha256
 
       - name: Upload app archive
         uses: actions/upload-artifact@v7
         with:
-          name: TVHplayer-MacOS-Intel-${{ github.sha }}
+          name: TVHplayer-macOS-Intel-${{ github.sha }}
           path: |
-            macos/dist/TVHplayer-MacOS-Intel.zip
-            macos/dist/TVHplayer-MacOS-Intel.dmg
-            macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
+            macos/dist/TVHplayer.zip
+            macos/dist/TVHplayer.dmg
+            macos/dist/TVHplayer.dmg.sha256
           if-no-files-found: error
           retention-days: 14
 
@@ -117,7 +119,7 @@ jobs:
       - name: Download verified build artifacts
         uses: actions/download-artifact@v7
         with:
-          name: TVHplayer-MacOS-Intel-${{ github.sha }}
+          name: TVHplayer-macOS-Intel-${{ github.sha }}
           path: artifacts
 
       - name: Validate checksum and publish pre-release
@@ -127,12 +129,12 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts
-          shasum -a 256 -c TVHplayer-MacOS-Intel.dmg.sha256
+          shasum -a 256 -c TVHplayer.dmg.sha256
           TAG="macos-intel-preview-${GITHUB_SHA:0:8}"
           cat > release-notes.md <<'NOTES'
           ### TVHplayer for Intel macOS (development preview)
 
-          Download **TVHplayer-MacOS-Intel.dmg**. Open it and drag the app to
+          Download **TVHplayer.dmg**. Open it and drag the app to
           Applications. Install **VLC 3.0.24** in /Applications first; it supplies
           native playback libraries not included with TVHplayer.
 
@@ -147,8 +149,8 @@ jobs:
           Ad-hoc signed; not Apple Developer ID signed or notarized.
           NOTES
           gh release create "$TAG" \
-            TVHplayer-MacOS-Intel.dmg \
-            TVHplayer-MacOS-Intel.dmg.sha256 \
+            TVHplayer.dmg \
+            TVHplayer.dmg.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "TVHplayer macOS Intel preview (${GITHUB_SHA:0:8})" \

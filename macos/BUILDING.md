@@ -15,20 +15,22 @@ python -m pip install -r macos/requirements-build.txt
 bash macos/build-macos.sh
 ```
 
-The output is `macos/dist/TVHplayer-MacOS-Intel.app`. To prepare a drag-and-drop disk image, run:
+The output is `macos/dist/TVHplayer.app`. To prepare a drag-and-drop disk image, run:
 
 ```bash
 bash macos/package-dmg.sh
 ```
 
-This generates `macos/dist/TVHplayer-MacOS-Intel.dmg` and an accompanying `.sha256` manifest. The disk image contains the `.app`, an Applications shortcut and installation instructions.
+This generates `macos/dist/TVHplayer.dmg` and an accompanying `.sha256` manifest. The disk image contains the `.app`, an Applications shortcut and installation instructions.
+
+**Installation note:** The bundle uses the standard application name `TVHplayer.app`. Dragging it into `/Applications` may replace an existing `TVHplayer.app`; back up the original first if you want to retain it. The DMG includes an Applications shortcut.
 
 **Runtime dependency:** The generated `.app` bundles Python/Qt and VLC plugins, but does **not** bundle the native `libvlc.dylib` and `libvlccore.dylib`. VLC 3.0.24 must therefore remain installed at `/Applications/VLC.app` on the destination Mac. This is a development application bundle, not a self-contained VLC distribution.
 
 Start it from Terminal to see diagnostic output:
 
 ```bash
-./macos/dist/TVHplayer-MacOS-Intel.app/Contents/MacOS/TVHplayer-MacOS-Intel
+./macos/dist/TVHplayer.app/Contents/MacOS/TVHplayer
 ```
 
 ## VLC plugin cache correction
@@ -43,7 +45,7 @@ Do not copy an existing `plugins.dat` into the completed bundle. The VLC install
 
 The dedicated [Build TVHplayer (macOS Intel)](../.github/workflows/build-macos.yml) workflow runs on `macos-15-intel`. Because the Python 3.15 stable package may not be available through `actions/setup-python` yet, the workflow instead downloads and verifies the official Python 3.15.0 macOS installer. It also downloads and SHA-256-verifies the official VLC 3.0.24 Intel DMG.
 
-After building and checking the bundle, GitHub Actions produces `TVHplayer-MacOS-Intel.dmg`, its SHA-256 manifest, and a ZIP archive of the `.app`. All are attached to the workflow's downloadable artifact.
+After building and checking the bundle, GitHub Actions produces `TVHplayer.dmg`, its SHA-256 manifest, and a ZIP archive of the `.app`. All are attached to the workflow's downloadable artifact.
 
 An explicitly marked `release(macos):` commit on the fork's `release/macos-intel-all-improvements` branch also publishes the verified DMG to [fork Releases](https://github.com/setsor/tvhplayer/releases), as a prerelease tied to the exact commit. Regular builds and pull requests do **not** publish releases. The workflow runs on pushes to the packaging branch and matching pull requests. Once the workflow is on the default branch, it can also be launched manually from GitHub's **Actions** tab.
 
@@ -57,7 +59,7 @@ The build also runs standard-library regression tests:
 python -m unittest discover -s macos/tests -v
 ```
 
-The `File missing` and `Time missed` DVR statuses are placed in the Failed tab. Diagnostic output is quiet by default. For redacted technical diagnostics, launch with `TVHPLAYER_DEBUG=1`; configuration dumps, stream URLs and raw server-response bodies are excluded, and passwords/URL credentials are masked.
+The `File missing` and `Time missed` DVR statuses are placed in the Failed tab. The status bar shows the currently playing channel as a persistent baseline, while action messages automatically expire after 4.5 seconds and fullscreen restores the channel display. Server Info distinguishes the locally configured server name from the HTTP API's software name. Diagnostic output is quiet by default. For redacted technical diagnostics, launch with `TVHPLAYER_DEBUG=1`; configuration dumps, stream URLs and raw server-response bodies are excluded, and passwords/URL credentials are masked.
 
 ## Notes
 
