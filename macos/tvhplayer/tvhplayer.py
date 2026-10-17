@@ -258,6 +258,10 @@ class DVRStatusDialog(QDialog):
                 # Sort upcoming recordings by start time
                 upcoming.sort(key=lambda x: x[2])  # Sort by start_time
                 
+                # Never let a stale row selection silently target a different
+                # UUID when entries are added/removed during a 5-second refresh.
+                self.upcoming_table.clearSelection()
+
                 # Update tables
                 self.upcoming_table.setRowCount(len(upcoming))
                 reselect_row = None
@@ -382,6 +386,7 @@ class DVRStatusDialog(QDialog):
                     parent.show_status(
                         f"Stopped recording: {selected['channel']} — {selected['title']}"
                     )
+                self.upcoming_table.clearSelection()
                 self.update_status()
                 if parent and hasattr(parent, "refresh_recording_summary"):
                     parent.refresh_recording_summary()
