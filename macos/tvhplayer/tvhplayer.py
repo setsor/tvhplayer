@@ -973,6 +973,10 @@ class TVHeadendClient(QMainWindow):
         
         self.is_fullscreen = False
         self._playback_status = PlaybackStatus()
+        self._active_recordings = []
+        self._recordings_worker = None
+        self._recording_query_inflight = False
+        self._recording_refresh_after_current = False
  
         
         # Add recording indicator variables
@@ -1023,6 +1027,10 @@ class TVHeadendClient(QMainWindow):
         
         # Update to use config for last server
         self.server_combo.setCurrentIndex(self.config.get('last_server', 0))
+        self._recording_summary_timer = QTimer(self)
+        self._recording_summary_timer.timeout.connect(self.refresh_recording_summary)
+        self._recording_summary_timer.start(15000)
+        QTimer.singleShot(150, self.refresh_recording_summary)
         
         #Set player window - with proper type conversion
 
@@ -1093,26 +1101,91 @@ class TVHeadendClient(QMainWindow):
         return str(icon_path)
 
     def show_status(self, message, timeout_ms=4500):
-        """Display a temporary action/result without losing the live channel."""
+        """Show a short notice *beside* the persistent LIVE channel."""
         self._playback_status.notify(message)
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_notice_label.setText(str(message))
         self._status_notice_timer.start(max(100, int(timeout_ms)))
 
     def restore_playback_status(self):
-        """Restore the channel name (or Ready) after a temporary notice."""
+        """Expire the notice; do not modify LIVE or the REC count."""
         self._status_notice_timer.stop()
         self._playback_status.restore()
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_notice_label.clear()
+        self.status_label.setText(self._playback_status.persistent_text)
 
     def set_playback_channel(self, name):
-        self._status_notice_timer.stop()
         self._playback_status.start_playback(name)
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_label.setText(self._playback_status.persistent_text)
 
     def clear_playback_channel(self):
-        self._status_notice_timer.stop()
         self._playback_status.stop_playback()
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_label.setText(self._playback_status.persistent_text)
+
+    def refresh_recording_summary(self):
+        """Fetch the server's real DVR status without blocking Qt/video."""
+        if self._recording_query_inflight:
+            self._recording_refresh_after_current = True
+            return
+        index = self.server_combo.currentIndex()
+        if index < 0 or index >= len(self.servers):
+            self.recordings_summary_btn.setText("REC —")
+            self.recordings_summary_btn.setToolTip("No TVHeadend server configured")
+            self._active_recordings = []
+            return
+
+        self._recording_query_inflight = True
+        self._recording_refresh_after_current = False
+        self._recordings_worker = RecordingPollWorker(self.servers[index])
+        self._recordings_worker.signals.completed.connect(
+            self._on_recording_summary
+        )
+        QThreadPool.globalInstance().start(self._recordings_worker)
+
+    def _on_recording_summary(self, result):
+        """Render latest async status, ignoring an obsolete server response."""
+        self._recording_query_inflight = False
+        self._recordings_worker = None
+        index = self.server_combo.currentIndex()
+        current_url = (
+            self.servers[index].get("url")
+            if 0 <= index < len(self.servers) else None
+        )
+        if current_url != result.get("url"):
+            self.refresh_recording_summary()
+            return
+
+        if result.get("success"):
+            active = result.get("recordings") or []
+            self._active_recordings = active
+            count = len(active)
+            self.recordings_summary_btn.setText(
+                f"● REC {count}" if count else "REC 0"
+            )
+            if count:
+                self.recordings_summary_btn.setStyleSheet(
+                    "QPushButton { color: #bf1b1b; font-weight: bold; }"
+                )
+                lines = [f"{r['channel']} — {r['title']}" for r in active]
+                self.recordings_summary_btn.setToolTip(
+                    "Recording on TVHeadend (click to manage):\\n"
+                    + "\\n".join(lines)
+                )
+            else:
+                self.recordings_summary_btn.setStyleSheet("")
+                self.recordings_summary_btn.setToolTip(
+                    "No server recordings currently active. Click for DVR Status."
+                )
+        else:
+            self._active_recordings = []
+            self.recordings_summary_btn.setText("REC ?")
+            self.recordings_summary_btn.setStyleSheet("")
+            self.recordings_summary_btn.setToolTip(
+                "DVR status unavailable; click to inspect recordings."
+            )
+
+        if self._recording_refresh_after_current:
+            self._recording_refresh_after_current = False
+            self.refresh_recording_summary()
 
     def setup_ui(self):
         """Setup the UI elements"""
@@ -1407,20 +1480,29 @@ class TVHeadendClient(QMainWindow):
             }
         """)
         self.recording_indicator.setProperty("recording", False)
-        
-        # Create status message label
-        self.status_label = QLabel(self._playback_status.visible_text)
-        
-        # Add widgets to horizontal layout
-        status_layout.addWidget(self.recording_indicator)
+        self.recording_indicator.setToolTip("Local FFmpeg recording")
+        self.recording_indicator.setVisible(False)
+        self.local_record_label = QLabel("LOCAL REC")
+        self.local_record_label.setVisible(False)
+
+        # Three independent regions: persistent LIVE, temporary feedback,
+        # and server-verified REC count (including recordings started elsewhere).
+        self.status_label = QLabel(self._playback_status.persistent_text)
+        self.status_label.setMinimumWidth(150)
+        self.status_notice_label = QLabel("")
         status_layout.addWidget(self.status_label)
-        status_layout.addStretch()  # This pushes everything to the left
-        
-        # Add the container to the status bar
-        self.statusbar.addWidget(status_container)
-        
-        # Temporary notices are not persistent playback state. Return to the
-        # currently playing channel after the notice expires.
+        status_layout.addWidget(self.status_notice_label, 1)
+        status_layout.addWidget(self.recording_indicator)
+        status_layout.addWidget(self.local_record_label)
+        self.statusbar.addWidget(status_container, 1)
+
+        self.recordings_summary_btn = QPushButton("REC —")
+        self.recordings_summary_btn.setToolTip(
+            "TVHeadend recordings: checking server status. Click to manage."
+        )
+        self.recordings_summary_btn.clicked.connect(self.show_dvr_status)
+        self.statusbar.addPermanentWidget(self.recordings_summary_btn)
+
         self._status_notice_timer = QTimer(self)
         self._status_notice_timer.setSingleShot(True)
         self._status_notice_timer.timeout.connect(self.restore_playback_status)
@@ -1981,6 +2063,8 @@ class TVHeadendClient(QMainWindow):
         """Start the recording indicator with smooth pulsing animation"""
         debug_print("Debug: Starting recording indicator")
         self.is_recording = True
+        self.recording_indicator.setVisible(True)
+        self.local_record_label.setVisible(True)
         self.recording_indicator.setProperty("recording", True)
         self.recording_indicator.style().polish(self.recording_indicator)
         
@@ -2003,6 +2087,8 @@ class TVHeadendClient(QMainWindow):
         """Stop the recording indicator and its animation"""
         debug_print("Debug: Stopping recording indicator")
         self.is_recording = False
+        self.recording_indicator.setVisible(False)
+        self.local_record_label.setVisible(False)
         if self.recording_animation:
             self.recording_animation.stop()
             self.recording_animation = None
