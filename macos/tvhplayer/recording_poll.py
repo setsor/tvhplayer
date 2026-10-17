@@ -21,6 +21,8 @@ class RecordingPollSignals(QObject):
 class RecordingPollWorker(QRunnable):
     def __init__(self, server):
         super().__init__()
+        # Keep the Python-owned signal object alive until Qt delivers the result.
+        self.setAutoDelete(False)
         self.server = dict(server)
         self.signals = RecordingPollSignals()
 
