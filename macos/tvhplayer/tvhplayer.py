@@ -35,9 +35,11 @@ import logging
 try:
     from .diagnostics import debug_print, report_error
     from .dvr_status import categorize_recording
+    from .recording_metadata import current_epg_event, recording_config
 except ImportError:
     from diagnostics import debug_print, report_error
     from dvr_status import categorize_recording
+    from recording_metadata import current_epg_event, recording_config
 
 
 class Logger:
@@ -1497,100 +1499,87 @@ class TVHeadendClient(QMainWindow):
         
 
     def start_recording(self):
-        debug_print("Debug: Starting recording")
+        """Start a manual-duration recording, using live EPG metadata if found."""
+        # Use the channel UUID stored with the selected row. Channel names
+        # may be duplicated; querying by name can choose the wrong station.
+        row = self.channel_list.currentRow()
+        channel_item = self.channel_list.item(row, 1) if row >= 0 else None
+        channel_data = channel_item.data(Qt.UserRole) if channel_item else None
+        if not isinstance(channel_data, dict) or not channel_data.get("uuid"):
+            self.statusbar.showMessage("Please select a channel to record")
+            return
+
+        channel_uuid = channel_data["uuid"]
+        channel_name = channel_data.get("name") or channel_item.text()
+
+        duration_dialog = RecordingDurationDialog(self)
+        if duration_dialog.exec_() != QDialog.Accepted:
+            return
+        duration = duration_dialog.get_duration()
+        if duration <= 0:
+            self.statusbar.showMessage("Please select a recording duration")
+            return
+
         try:
-            # Get selected channel
-            current_channel = self.channel_list.currentItem()
-            if not current_channel:
-                debug_print("Debug: No channel selected for recording")
-                self.statusbar.showMessage("Please select a channel to record")
-                return
-
-            # Show duration dialog
-            duration_dialog = RecordingDurationDialog(self)
-            if duration_dialog.exec_() != QDialog.Accepted:
-                debug_print("Debug: Recording cancelled by user")
-                return
-            
-            duration = duration_dialog.get_duration()
-            debug_print(f"Debug: Selected recording duration: {duration} seconds")
-
-            channel_name = current_channel.text()
-            debug_print(f"Debug: Attempting to record channel: {channel_name}")
-            
-            # Get current server
             server = self.servers[self.server_combo.currentIndex()]
-            debug_print(f"Debug: Using server: {server['url']}")
-            
-            # Create auth if needed
+            base_url = server["url"].rstrip("/")
+            if not base_url.startswith(("http://", "https://")):
+                base_url = "http://" + base_url
             auth = None
-            if server.get('username') or server.get('password'):
-                auth = (server.get('username', ''), server.get('password', ''))
-                debug_print(f"Debug: Using authentication with username: {server.get('username', '')}")
-            
-            # First, get channel UUID
-            api_url = f'{server["url"]}/api/channel/grid?limit=10000'
-            debug_print(f"Debug: Getting channel UUID from: {api_url}")
-            
-            response = requests.get(api_url, auth=auth)
-            debug_print(f"Debug: Channel list response status: {response.status_code}")
-            
-            channels = response.json()['entries']
-            channel_uuid = None
-            for channel in channels:
-                if channel['name'] == channel_name:
-                    channel_uuid = channel['uuid']
-                    debug_print(f"Debug: Found channel UUID: {channel_uuid}")
-                    break
-                
-            if not channel_uuid:
-                debug_print(f"Debug: Channel UUID not found for: {channel_name}")
-                self.statusbar.showMessage("Channel not found")
-                return
-            
-            # Prepare recording request
-            now = int(datetime.now().timestamp())
-            stop_time = now + duration
-            
-            # Format exactly as in the working curl command
-            conf_data = {
-                "start": now,
-                "stop": stop_time,
-                "channel": channel_uuid,
-                "title": {"eng": "Instant Recording"},
-                "subtitle": {"eng": "Recorded via TVHplayer"}
-            }
-            
-            # Convert to string format as expected by the API
-            data = {'conf': json.dumps(conf_data)}
-            debug_print(f"Debug: Recording data: {data}")
-            
-            # Make recording request
-            record_url = f'{server["url"]}/api/dvr/entry/create'
-            debug_print(f"Debug: Sending recording request to: {record_url}")
-            
-            response = requests.post(record_url, data=data, auth=auth)
-            debug_print(f"Debug: Recording response status: {response.status_code}")
-            debug_print(f"Debug: Recording HTTP response: {response.status_code}")
-            
-            if response.status_code == 200:
-                duration_minutes = duration // 60
-                self.statusbar.showMessage(
-                    f"Recording started for: {channel_name} ({duration_minutes} minutes)"
+            if server.get("username") or server.get("password"):
+                auth = (server.get("username", ""), server.get("password", ""))
+
+            # The chosen duration remains authoritative, even if the EPG
+            # programme finishes sooner. Record the start before fetching EPG.
+            start_time = int(time.time())
+            stop_time = start_time + duration
+
+            event = None
+            try:
+                epg_response = requests.get(
+                    f"{base_url}/api/epg/events/grid",
+                    params={"mode": "now", "channel": channel_uuid, "limit": 50},
+                    auth=auth,
+                    timeout=3,
                 )
-                debug_print("Debug: Recording started successfully")
-                self.start_recording_indicator()  # Start the recording indicator
+                epg_response.raise_for_status()
+                events = epg_response.json().get("entries", [])
+                event = current_epg_event(events, channel_uuid, start_time)
+            except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
+                # EPG is best-effort: it must never prevent instant recording.
+                debug_print(f"Debug: Current EPG metadata unavailable: {e}")
+
+            conf_data = recording_config(
+                channel_uuid, start_time, stop_time, event, instant=True
+            )
+            debug_print(
+                "Debug: Instant DVR metadata from EPG: "
+                + ("yes" if event else "no (generic title used)")
+            )
+
+            response = requests.post(
+                f"{base_url}/api/dvr/entry/create",
+                data={"conf": json.dumps(conf_data)},
+                auth=auth,
+                timeout=10,
+            )
+            if response.status_code == 200:
+                title = next(iter(conf_data["title"].values()))
+                self.statusbar.showMessage(
+                    f"Recording started: {title} ({duration // 60} minutes)"
+                )
+                self.start_recording_indicator()
             else:
-                self.statusbar.showMessage("Failed to start recording")
-                debug_print(f"Debug: Recording failed with status {response.status_code}")
-                
+                self.statusbar.showMessage(
+                    f"Failed to start recording (HTTP {response.status_code})"
+                )
+                debug_print(
+                    f"Debug: Instant DVR create returned HTTP {response.status_code}"
+                )
         except Exception as e:
-            debug_print(f"Debug: Recording error: {str(e)}")
-            debug_print(f"Debug: Error type: {type(e)}")
-            import traceback
-            debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage(f"Recording error: {str(e)}")
-            
+            debug_print(f"Debug: Instant recording error: {e}")
+            self.statusbar.showMessage("Unable to start recording")
+
     def stop_playback(self):
         debug_print("Debug: Stopping playback")
         """Stop current playback"""
@@ -2552,19 +2541,15 @@ class EPGDialog(QDialog):
             if self.server.get('username') or self.server.get('password'):
                 auth = (self.server.get('username', ''), self.server.get('password', ''))
             
-            # Prepare recording request
-            conf_data = {
-                "start": entry['start'],
-                "stop": entry['stop'],
-                "channel": entry['channelUuid'],
-                "title": (
-                    entry["title"] if isinstance(entry.get("title"), dict)
-                    else {"eng": entry.get("title") or "Scheduled Recording"}
-                ),
-                "description": entry.get('description', {"eng": ""}),
-                "comment": "Scheduled via TVHplayer"
-            }
-            
+            # Share the same metadata format with Instant Recording.
+            conf_data = recording_config(
+                entry["channelUuid"],
+                entry["start"],
+                entry["stop"],
+                entry,
+                instant=False,
+            )
+
             # Convert to string format as expected by the API
             data = {'conf': json.dumps(conf_data)}
             debug_print(f"Debug: Recording data: {data}")
