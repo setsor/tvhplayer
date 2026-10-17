@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QSlider, QStatusBar, QGridLayout, QMenuBar, QRadioButton, QSpinBox, QGraphicsOpacityEffect, QFileDialog,
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox  # Added QGroupBox here
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect
+from PyQt5.QtCore import Qt, QSize, QTimer, QThreadPool, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect
 from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QFont
 import json
 import requests
@@ -38,12 +38,16 @@ try:
     from .recording_metadata import current_epg_event, recording_config
     from .playback_status import PlaybackStatus
     from .server_info import format_server_information
+    from .recording_activity import active_recordings, stop_payload
+    from .recording_poll import RecordingPollWorker
 except ImportError:
     from diagnostics import debug_print, report_error
     from dvr_status import categorize_recording
     from recording_metadata import current_epg_event, recording_config
     from playback_status import PlaybackStatus
     from server_info import format_server_information
+    from recording_activity import active_recordings, stop_payload
+    from recording_poll import RecordingPollWorker
 
 
 class Logger:
@@ -168,7 +172,25 @@ class DVRStatusDialog(QDialog):
         self.upcoming_table.setColumnCount(5)  # Added one more column for status
         self.upcoming_table.setHorizontalHeaderLabels(['Channel', 'Title', 'Start Time', 'Duration', 'Status'])
         self.upcoming_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.tabs.addTab(self.upcoming_table, "Upcoming/Current")  # Changed tab title
+        self.upcoming_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.upcoming_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.upcoming_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.upcoming_table.itemSelectionChanged.connect(self._update_stop_button)
+
+        # Keep the stop action alongside the specific entry it will affect.
+        upcoming_page = QWidget()
+        upcoming_layout = QVBoxLayout(upcoming_page)
+        upcoming_layout.setContentsMargins(0, 0, 0, 0)
+        upcoming_layout.addWidget(self.upcoming_table)
+        controls = QHBoxLayout()
+        controls.addStretch()
+        self.stop_selected_btn = QPushButton("Stop Selected Recording...")
+        self.stop_selected_btn.setEnabled(False)
+        self.stop_selected_btn.setToolTip("Stops only the selected active DVR entry")
+        self.stop_selected_btn.clicked.connect(self.stop_selected_recording)
+        controls.addWidget(self.stop_selected_btn)
+        upcoming_layout.addLayout(controls)
+        self.tabs.addTab(upcoming_page, "Upcoming/Current")
         
         # Finished recordings tab
         self.finished_table = QTableWidget()
@@ -198,8 +220,8 @@ class DVRStatusDialog(QDialog):
             
             # Get DVR entries
             api_url = f'{self.server["url"]}/api/dvr/entry/grid'
-            response = requests.get(api_url, auth=auth)
-            
+            response = requests.get(api_url, auth=auth, timeout=(2, 5))
+
             if response.status_code == 200:
                 data = response.json()
                 entries = data.get('entries', [])
@@ -219,7 +241,7 @@ class DVRStatusDialog(QDialog):
 
                     if section == 'upcoming':
                         upcoming.append((channel, title, start_time, duration,
-                                         status_text == 'Recording'))
+                                         status_text == 'Recording', entry.get('uuid')))
                     elif section == 'finished':
                         finished.append((channel, title, start_time, duration))
                     elif section == 'failed':
@@ -229,13 +251,26 @@ class DVRStatusDialog(QDialog):
                 debug_print(f"\nDebug: Sorted entries - Upcoming: {len(upcoming)}, "
                       f"Finished: {len(finished)}, Failed: {len(failed)}")
                 
+                # Preserve a selected recording as the DVR timer refreshes.
+                selected = self._selected_recording()
+                selected_uuid = selected.get("uuid") if selected else None
+
                 # Sort upcoming recordings by start time
                 upcoming.sort(key=lambda x: x[2])  # Sort by start_time
                 
+                # Never let a stale row selection silently target a different
+                # UUID when entries are added/removed during a 5-second refresh.
+                self.upcoming_table.clearSelection()
+
                 # Update tables
                 self.upcoming_table.setRowCount(len(upcoming))
-                for i, (channel, title, start, duration, is_recording) in enumerate(upcoming):
-                    self.upcoming_table.setItem(i, 0, QTableWidgetItem(channel))
+                reselect_row = None
+                for i, (channel, title, start, duration, is_recording, uuid) in enumerate(upcoming):
+                    channel_item = QTableWidgetItem(channel)
+                    channel_item.setData(Qt.UserRole, uuid)
+                    self.upcoming_table.setItem(i, 0, channel_item)
+                    if uuid and uuid == selected_uuid:
+                        reselect_row = i
                     self.upcoming_table.setItem(i, 1, QTableWidgetItem(title))
                     self.upcoming_table.setItem(i, 2, QTableWidgetItem(start.strftime('%Y-%m-%d %H:%M')))
                     self.upcoming_table.setItem(i, 3, QTableWidgetItem(str(duration)))
@@ -249,6 +284,10 @@ class DVRStatusDialog(QDialog):
                         for col in range(5):  # Update range to include new column
                             self.upcoming_table.item(i, col).setBackground(Qt.green)
                 
+                if reselect_row is not None:
+                    self.upcoming_table.selectRow(reselect_row)
+                self._update_stop_button()
+
                 # Sort finished recordings by start time (most recent first)
                 finished.sort(key=lambda x: x[2], reverse=True)
                 
@@ -279,6 +318,92 @@ class DVRStatusDialog(QDialog):
             debug_print(f"Debug: Error updating DVR status: {str(e)}")
             debug_print(f"Debug: Traceback: {traceback.format_exc()}")
     
+    def _selected_recording(self):
+        """Return the selected row, with the server's immutable DVR UUID."""
+        selection = self.upcoming_table.selectionModel().selectedRows()
+        if not selection:
+            return None
+        row = selection[0].row()
+        channel_item = self.upcoming_table.item(row, 0)
+        title_item = self.upcoming_table.item(row, 1)
+        status_item = self.upcoming_table.item(row, 4)
+        if channel_item is None or status_item is None:
+            return None
+        return {
+            "uuid": channel_item.data(Qt.UserRole),
+            "channel": channel_item.text(),
+            "title": title_item.text() if title_item else "Untitled",
+            "is_recording": status_item.text() == "Recording",
+        }
+
+    def _update_stop_button(self):
+        selected = self._selected_recording()
+        self.stop_selected_btn.setEnabled(
+            bool(selected and selected.get("is_recording") and selected.get("uuid"))
+        )
+
+    def stop_selected_recording(self):
+        """Stop precisely one confirmed TVHeadend DVR entry, never all."""
+        selected = self._selected_recording()
+        if not selected or not selected.get("is_recording"):
+            self._update_stop_button()
+            return
+        try:
+            payload = stop_payload(selected)
+        except ValueError:
+            QMessageBox.warning(self, "Recording unavailable",
+                                "This recording cannot be stopped without its DVR UUID.")
+            return
+
+        question = (
+            f"Stop only this recording?\\n\\n"
+            f"Channel: {selected['channel']}\\n"
+            f"Programme: {selected['title']}\\n\\n"
+            "Other active recordings will continue."
+        )
+        confirmation = QMessageBox.question(
+            self, "Confirm recording stop", question,
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if confirmation != QMessageBox.Yes:
+            return
+
+        self.stop_selected_btn.setEnabled(False)
+        base_url = self.server['url'].rstrip('/')
+        if not base_url.startswith(('http://', 'https://')):
+            base_url = 'http://' + base_url
+        auth = None
+        if self.server.get('username') or self.server.get('password'):
+            auth = (self.server.get('username', ''), self.server.get('password', ''))
+        try:
+            response = requests.post(
+                f"{base_url}/api/dvr/entry/stop",
+                data=payload, auth=auth, timeout=(2, 7)
+            )
+            if response.status_code == 200:
+                parent = self.parent()
+                if parent and hasattr(parent, "show_status"):
+                    parent.show_status(
+                        f"Stopped recording: {selected['channel']} — {selected['title']}"
+                    )
+                self.upcoming_table.clearSelection()
+                self.update_status()
+                if parent and hasattr(parent, "refresh_recording_summary"):
+                    parent.refresh_recording_summary()
+            else:
+                QMessageBox.warning(
+                    self, "Recording not stopped",
+                    f"TVHeadend returned HTTP {response.status_code}. "
+                    "Other recordings have not been modified."
+                )
+        except requests.RequestException:
+            QMessageBox.warning(
+                self, "Connection error",
+                "Unable to confirm that this recording was stopped. "
+                "Refresh DVR Status before retrying."
+            )
+        self._update_stop_button()
+
     def closeEvent(self, event):
         self.update_timer.stop()
         super().closeEvent(event)
@@ -853,6 +978,10 @@ class TVHeadendClient(QMainWindow):
         
         self.is_fullscreen = False
         self._playback_status = PlaybackStatus()
+        self._active_recordings = []
+        self._recordings_worker = None
+        self._recording_query_inflight = False
+        self._recording_refresh_after_current = False
  
         
         # Add recording indicator variables
@@ -903,6 +1032,10 @@ class TVHeadendClient(QMainWindow):
         
         # Update to use config for last server
         self.server_combo.setCurrentIndex(self.config.get('last_server', 0))
+        self._recording_summary_timer = QTimer(self)
+        self._recording_summary_timer.timeout.connect(self.refresh_recording_summary)
+        self._recording_summary_timer.start(15000)
+        QTimer.singleShot(150, self.refresh_recording_summary)
         
         #Set player window - with proper type conversion
 
@@ -973,26 +1106,91 @@ class TVHeadendClient(QMainWindow):
         return str(icon_path)
 
     def show_status(self, message, timeout_ms=4500):
-        """Display a temporary action/result without losing the live channel."""
+        """Show a short notice *beside* the persistent LIVE channel."""
         self._playback_status.notify(message)
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_notice_label.setText(str(message))
         self._status_notice_timer.start(max(100, int(timeout_ms)))
 
     def restore_playback_status(self):
-        """Restore the channel name (or Ready) after a temporary notice."""
+        """Expire the notice; do not modify LIVE or the REC count."""
         self._status_notice_timer.stop()
         self._playback_status.restore()
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_notice_label.clear()
+        self.status_label.setText(self._playback_status.persistent_text)
 
     def set_playback_channel(self, name):
-        self._status_notice_timer.stop()
         self._playback_status.start_playback(name)
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_label.setText(self._playback_status.persistent_text)
 
     def clear_playback_channel(self):
-        self._status_notice_timer.stop()
         self._playback_status.stop_playback()
-        self.status_label.setText(self._playback_status.visible_text)
+        self.status_label.setText(self._playback_status.persistent_text)
+
+    def refresh_recording_summary(self):
+        """Fetch the server's real DVR status without blocking Qt/video."""
+        if self._recording_query_inflight:
+            self._recording_refresh_after_current = True
+            return
+        index = self.server_combo.currentIndex()
+        if index < 0 or index >= len(self.servers):
+            self.recordings_summary_btn.setText("REC —")
+            self.recordings_summary_btn.setToolTip("No TVHeadend server configured")
+            self._active_recordings = []
+            return
+
+        self._recording_query_inflight = True
+        self._recording_refresh_after_current = False
+        self._recordings_worker = RecordingPollWorker(self.servers[index])
+        self._recordings_worker.signals.completed.connect(
+            self._on_recording_summary
+        )
+        QThreadPool.globalInstance().start(self._recordings_worker)
+
+    def _on_recording_summary(self, result):
+        """Render latest async status, ignoring an obsolete server response."""
+        self._recording_query_inflight = False
+        self._recordings_worker = None
+        index = self.server_combo.currentIndex()
+        current_url = (
+            self.servers[index].get("url")
+            if 0 <= index < len(self.servers) else None
+        )
+        if current_url != result.get("url"):
+            self.refresh_recording_summary()
+            return
+
+        if result.get("success"):
+            active = result.get("recordings") or []
+            self._active_recordings = active
+            count = len(active)
+            self.recordings_summary_btn.setText(
+                f"● REC {count}" if count else "REC 0"
+            )
+            if count:
+                self.recordings_summary_btn.setStyleSheet(
+                    "QPushButton { color: #bf1b1b; font-weight: bold; }"
+                )
+                lines = [f"{r['channel']} — {r['title']}" for r in active]
+                self.recordings_summary_btn.setToolTip(
+                    "Recording on TVHeadend (click to manage):\\n"
+                    + "\\n".join(lines)
+                )
+            else:
+                self.recordings_summary_btn.setStyleSheet("")
+                self.recordings_summary_btn.setToolTip(
+                    "No server recordings currently active. Click for DVR Status."
+                )
+        else:
+            self._active_recordings = []
+            self.recordings_summary_btn.setText("REC ?")
+            self.recordings_summary_btn.setStyleSheet("")
+            self.recordings_summary_btn.setToolTip(
+                "DVR status unavailable; click to inspect recordings."
+            )
+
+        if self._recording_refresh_after_current:
+            self._recording_refresh_after_current = False
+            self.refresh_recording_summary()
 
     def setup_ui(self):
         """Setup the UI elements"""
@@ -1140,7 +1338,7 @@ class TVHeadendClient(QMainWindow):
         self.stop_btn.setIcon(QIcon(f"{self.icons_dir}/stop.svg"))
         self.stop_btn.setIconSize(QSize(48, 48))
         self.stop_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_btn.clicked.connect(self.media_player.stop)
+        self.stop_btn.clicked.connect(self.stop_playback)
         self.stop_btn.setToolTip("Stop playback")
         playback_layout.addWidget(self.stop_btn)
         
@@ -1170,7 +1368,7 @@ class TVHeadendClient(QMainWindow):
         self.stop_record_btn.setIcon(QIcon(f"{self.icons_dir}/stoprec.svg"))
         self.stop_record_btn.setIconSize(QSize(48, 48))
         self.stop_record_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_record_btn.setToolTip("Stop Recording")
+        self.stop_record_btn.setToolTip("Choose one active recording to stop")
         self.stop_record_btn.clicked.connect(self.stop_recording)
         record_layout.addWidget(self.stop_record_btn)
         
@@ -1287,20 +1485,29 @@ class TVHeadendClient(QMainWindow):
             }
         """)
         self.recording_indicator.setProperty("recording", False)
-        
-        # Create status message label
-        self.status_label = QLabel(self._playback_status.visible_text)
-        
-        # Add widgets to horizontal layout
-        status_layout.addWidget(self.recording_indicator)
+        self.recording_indicator.setToolTip("Local FFmpeg recording")
+        self.recording_indicator.setVisible(False)
+        self.local_record_label = QLabel("LOCAL REC")
+        self.local_record_label.setVisible(False)
+
+        # Three independent regions: persistent LIVE, temporary feedback,
+        # and server-verified REC count (including recordings started elsewhere).
+        self.status_label = QLabel(self._playback_status.persistent_text)
+        self.status_label.setMinimumWidth(150)
+        self.status_notice_label = QLabel("")
         status_layout.addWidget(self.status_label)
-        status_layout.addStretch()  # This pushes everything to the left
-        
-        # Add the container to the status bar
-        self.statusbar.addWidget(status_container)
-        
-        # Temporary notices are not persistent playback state. Return to the
-        # currently playing channel after the notice expires.
+        status_layout.addWidget(self.status_notice_label, 1)
+        status_layout.addWidget(self.recording_indicator)
+        status_layout.addWidget(self.local_record_label)
+        self.statusbar.addWidget(status_container, 1)
+
+        self.recordings_summary_btn = QPushButton("REC —")
+        self.recordings_summary_btn.setToolTip(
+            "TVHeadend recordings: checking server status. Click to manage."
+        )
+        self.recordings_summary_btn.clicked.connect(self.show_dvr_status)
+        self.statusbar.addPermanentWidget(self.recordings_summary_btn)
+
         self._status_notice_timer = QTimer(self)
         self._status_notice_timer.setSingleShot(True)
         self._status_notice_timer.timeout.connect(self.restore_playback_status)
@@ -1593,7 +1800,8 @@ class TVHeadendClient(QMainWindow):
                 self.show_status(
                     f"Recording started: {title} ({duration // 60} minutes)"
                 )
-                self.start_recording_indicator()
+                # The REC indicator is driven by the server's actual DVR grid.
+                QTimer.singleShot(800, self.refresh_recording_summary)
             else:
                 self.show_status(
                     f"Failed to start recording (HTTP {response.status_code})"
@@ -1678,8 +1886,9 @@ class TVHeadendClient(QMainWindow):
                 debug_print(f"Debug: Adding server to combo: {server['name']}")
                 self.server_combo.addItem(server['name'])
             
-            # Refresh channels
+            # Refresh channels and the newly selected server's DVR count
             self.fetch_channels()
+            self.refresh_recording_summary()
 
     def save_config(self):
         """Save current configuration"""
@@ -1769,8 +1978,9 @@ class TVHeadendClient(QMainWindow):
             except Exception as e:
                 debug_print(f"Debug: Error saving config: {e}")
                 
-            # Load channels from newly selected server
+            # Load channels and refresh server-side recordings on this server
             self.fetch_channels()
+            self.refresh_recording_summary()
 
     def on_volume_changed(self, value):
         debug_print(f"Debug: Volume changed to {value}")
@@ -1853,72 +2063,15 @@ class TVHeadendClient(QMainWindow):
             self.stop_recording()
 
     def stop_recording(self):
-        """Stop active recordings"""
-        debug_print("Debug: Attempting to stop recordings")
-        try:
-            # Get current server
-            server = self.servers[self.server_combo.currentIndex()]
-            debug_print(f"Debug: Using server: {server['url']}")
-            
-            # Create auth if needed
-            auth = None
-            if server.get('username') or server.get('password'):
-                auth = (server.get('username', ''), server.get('password', ''))
-                debug_print(f"Debug: Using authentication with username: {server.get('username', '')}")
-            
-            # Get list of active recordings
-            api_url = f'{server["url"]}/api/dvr/entry/grid'
-            debug_print(f"Debug: Getting recordings from: {api_url}")
-            
-            response = requests.get(api_url, auth=auth)
-            debug_print(f"Debug: Recording list response status: {response.status_code}")
-            
-            recordings = response.json()['entries']
-            debug_print(f"Debug: Total recordings found: {len(recordings)}")
-            
-            # Print all recordings and their statuses for debugging
-            for recording in recordings:
-                debug_print(f"Debug: Recording '{recording.get('disp_title', 'Unknown')}' - Status: {recording.get('status', 'unknown')}")
-            
-            # Look for recordings with status 'Running' (this seems to be the actual status used by TVHeadend)
-            active_recordings = [r for r in recordings if r['status'] in ['Running', 'recording']]
-            if not active_recordings:
-                debug_print("Debug: No active recordings found")
-                self.show_status("No active recordings to stop")
-                self.stop_recording_indicator()  # Make sure to hide indicator
-                return
-                
-            debug_print(f"Debug: Found {len(active_recordings)} active recordings")
-            
-            # Stop each active recording
-            for recording in active_recordings:
-                stop_url = f'{server["url"]}/api/dvr/entry/stop'
-                data = {'uuid': recording['uuid']}
-                
-                debug_print(f"Debug: Stopping recording: {recording.get('disp_title', 'Unknown')} ({recording['uuid']})")
-                stop_response = requests.post(stop_url, data=data, auth=auth)
-                
-                if stop_response.status_code == 200:
-                    debug_print(f"Debug: Successfully stopped recording: {recording['uuid']}")
-                else:
-                    debug_print(f"Debug: Failed to stop recording: {recording['uuid']}")
-                    debug_print(f"Debug: Stop recording response status: {stop_response.status_code}")
-            
-            self.stop_recording_indicator()  # Hide the indicator after stopping recordings
-            self.show_status(f"Stopped {len(active_recordings)} recording(s)")
-            
-        except Exception as e:
-            debug_print(f"Debug: Error stopping recordings: {str(e)}")
-            debug_print(f"Debug: Error type: {type(e)}")
-            import traceback
-            debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.show_status(f"Error stopping recordings: {str(e)}")
-            self.stop_recording_indicator()  # Make sure to hide indicator even on error
+        """Open the DVR list: never send Stop to multiple recordings."""
+        self.show_dvr_status()
 
     def start_recording_indicator(self):
         """Start the recording indicator with smooth pulsing animation"""
         debug_print("Debug: Starting recording indicator")
         self.is_recording = True
+        self.recording_indicator.setVisible(True)
+        self.local_record_label.setVisible(True)
         self.recording_indicator.setProperty("recording", True)
         self.recording_indicator.style().polish(self.recording_indicator)
         
@@ -1941,6 +2094,8 @@ class TVHeadendClient(QMainWindow):
         """Stop the recording indicator and its animation"""
         debug_print("Debug: Stopping recording indicator")
         self.is_recording = False
+        self.recording_indicator.setVisible(False)
+        self.local_record_label.setVisible(False)
         if self.recording_animation:
             self.recording_animation.stop()
             self.recording_animation = None
@@ -1951,64 +2106,25 @@ class TVHeadendClient(QMainWindow):
         self.recording_indicator.style().polish(self.recording_indicator)
 
     def show_dvr_status(self):
-        """Show DVR status dialog"""
+        """Manage TVHeadend recordings, with explicit single-UUID stopping."""
+        index = self.server_combo.currentIndex()
+        if index < 0 or index >= len(self.servers):
+            self.show_status("No TVHeadend server configured")
+            return
         try:
-            debug_print("\nDebug: Opening DVR Status Dialog")
-            server = self.servers[self.server_combo.currentIndex()]
-            debug_print(f"Debug: Using server: {server.get('name', 'configured server')}")
-
-            # Test connection first
-            test_url = f"{server['url']}/api/status/connections"
-            auth = None
-            if server.get('username') or server.get('password'):
-                auth = (server.get('username', ''), server.get('password', ''))
-                debug_print(f"Debug: Using authentication with username: {server.get('username', '')}")
-
-            debug_print(f"Debug: Testing connection to: {test_url}")
-            try:
-                test_response = requests.get(test_url, auth=auth, timeout=5)
-                debug_print(f"Debug: Connection test response: {test_response.status_code}")
-                if test_response.status_code == 200:
-                    debug_print("Debug: Server connection successful")
-                else:
-                    debug_print(f"Debug: Server connection failed with status {test_response.status_code}")
-                    self.show_status("Failed to connect to server")
+            if getattr(self, "_dvr_dialog", None) and self._dvr_dialog.isVisible():
+                if self._dvr_dialog.server == self.servers[index]:
+                    self._dvr_dialog.tabs.setCurrentIndex(0)
+                    self._dvr_dialog.raise_()
+                    self._dvr_dialog.activateWindow()
                     return
-            except Exception as conn_err:
-                debug_print(f"Debug: Connection test failed: {str(conn_err)}")
-                self.show_status("Failed to connect to server")
-                return
-
-            # Now try to get DVR data
-            dvr_url = f"{server['url']}/api/dvr/entry/grid"
-            debug_print(f"Debug: Fetching DVR data from: {dvr_url}")
-            try:
-                dvr_response = requests.get(dvr_url, auth=auth, timeout=5)
-                debug_print(f"Debug: DVR data response: {dvr_response.status_code}")
-                if dvr_response.status_code == 200:
-                    dvr_data = dvr_response.json()
-                    debug_print(f"Debug: DVR data received: {len(dvr_data.get('entries', []))} entries")
-                    # Print first entry as sample if available
-                    if dvr_data.get('entries'):
-                        debug_print("Debug: Sample DVR entry:")
-                        debug_print("Debug: Sample DVR entry omitted")
-                else:
-                    debug_print(f"Debug: Failed to get DVR data: HTTP {dvr_response.status_code}")
-                    self.show_status("Failed to get DVR data")
-                    return
-            except Exception as dvr_err:
-                debug_print(f"Debug: DVR data fetch failed: {str(dvr_err)}")
-                self.show_status("Failed to get DVR data")
-                return
-
-            # If we got here, show the dialog
-            dialog = DVRStatusDialog(server, self)
-            dialog.show()
-            
+                self._dvr_dialog.close()
+            self._dvr_dialog = DVRStatusDialog(self.servers[index], self)
+            self._dvr_dialog.tabs.setCurrentIndex(0)
+            self._dvr_dialog.show()
         except Exception as e:
-            debug_print(f"Debug: Error showing DVR status: {str(e)}")
-            debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.show_status("Error showing DVR status")
+            debug_print(f"Debug: Could not open DVR Status: {e}")
+            self.show_status("Could not open recording manager")
 
     def play_url(self, url):
         """Play media from URL"""
@@ -2304,7 +2420,9 @@ class TVHeadendClient(QMainWindow):
         }
 
     def closeEvent(self, event):
-        """Save configuration when closing the application"""
+        """Save configuration and stop periodic DVR polling on exit."""
+        if hasattr(self, "_recording_summary_timer"):
+            self._recording_summary_timer.stop()
         self.save_config()
         super().closeEvent(event)
 
