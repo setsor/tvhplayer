@@ -1881,8 +1881,9 @@ class TVHeadendClient(QMainWindow):
                 debug_print(f"Debug: Adding server to combo: {server['name']}")
                 self.server_combo.addItem(server['name'])
             
-            # Refresh channels
+            # Refresh channels and the newly selected server's DVR count
             self.fetch_channels()
+            self.refresh_recording_summary()
 
     def save_config(self):
         """Save current configuration"""
@@ -1972,8 +1973,9 @@ class TVHeadendClient(QMainWindow):
             except Exception as e:
                 debug_print(f"Debug: Error saving config: {e}")
                 
-            # Load channels from newly selected server
+            # Load channels and refresh server-side recordings on this server
             self.fetch_channels()
+            self.refresh_recording_summary()
 
     def on_volume_changed(self, value):
         debug_print(f"Debug: Volume changed to {value}")
@@ -2413,7 +2415,9 @@ class TVHeadendClient(QMainWindow):
         }
 
     def closeEvent(self, event):
-        """Save configuration when closing the application"""
+        """Save configuration and stop periodic DVR polling on exit."""
+        if hasattr(self, "_recording_summary_timer"):
+            self._recording_summary_timer.stop()
         self.save_config()
         super().closeEvent(event)
 
