@@ -36,10 +36,14 @@ try:
     from .diagnostics import debug_print, report_error
     from .dvr_status import categorize_recording
     from .recording_metadata import current_epg_event, recording_config
+    from .playback_status import PlaybackStatus
+    from .server_info import format_server_information
 except ImportError:
     from diagnostics import debug_print, report_error
     from dvr_status import categorize_recording
     from recording_metadata import current_epg_event, recording_config
+    from playback_status import PlaybackStatus
+    from server_info import format_server_information
 
 
 class Logger:
@@ -629,29 +633,26 @@ class ServerStatusDialog(QDialog):
             if self.server.get('username') or self.server.get('password'):
                 auth = (self.server.get('username', ''), self.server.get('password', ''))
 
-            # 1. Update Server Info Tab
-            server_info = f"Server Information:\n\n"
-            server_info += f"Name: {self.server.get('name', 'Unknown')}\n"
-            server_info += f"URL: {self.server.get('url', 'Unknown')}\n"
-            
-            # Get server version and capabilities
-            version_url = f"{self.server['url']}/api/serverinfo"
+            # 1. Update Server Info Tab. The HTTP API reports the software
+            # as "name"; "server_name" belongs to the HTSP protocol instead.
+            server_info = format_server_information(self.server)
+            version_url = f"{self.server['url'].rstrip('/')}/api/serverinfo"
             try:
-                version_response = requests.get(version_url, auth=auth)
+                version_response = requests.get(version_url, auth=auth, timeout=5)
                 if version_response.status_code == 200:
-                    server_data = version_response.json()
-                    server_info += f"\nServer Version: {server_data.get('sw_version', 'Unknown')}\n"
-                    server_info += f"API Version: {server_data.get('api_version', 'Unknown')}\n"
-                    server_info += f"Server Name: {server_data.get('server_name', 'Unknown')}\n"
-                    
-                    if 'capabilities' in server_data:
-                        server_info += "\nCapabilities:\n"
-                        for cap in server_data['capabilities']:
-                            server_info += f"- {cap}\n"
-            except Exception as e:
-                server_info += f"\nError fetching server info: {str(e)}\n"
-            
-            self.info_text.setText(server_info)
+                    server_info = format_server_information(
+                        self.server, version_response.json()
+                    )
+                else:
+                    server_info += (
+                        f"\n\nServer details unavailable "
+                        f"(HTTP {version_response.status_code})"
+                    )
+            except (requests.RequestException, ValueError) as e:
+                debug_print(f"Debug: Unable to fetch server info: {e}")
+                server_info += "\n\nServer details unavailable"
+
+            self.info_text.setPlainText(server_info)
 
             # 2. Update Signal Status Tab
             inputs_url = f"{self.server['url']}/api/status/inputs"
@@ -851,6 +852,7 @@ class TVHeadendClient(QMainWindow):
         self.channels = []
         
         self.is_fullscreen = False
+        self._playback_status = PlaybackStatus()
  
         
         # Add recording indicator variables
@@ -969,7 +971,29 @@ class TVHeadendClient(QMainWindow):
             debug_print(f"Warning: Icon not found: {icon_path}")
             return None
         return str(icon_path)
-    
+
+    def show_status(self, message, timeout_ms=4500):
+        """Display a temporary action/result without losing the live channel."""
+        self._playback_status.notify(message)
+        self.status_label.setText(self._playback_status.visible_text)
+        self._status_notice_timer.start(max(100, int(timeout_ms)))
+
+    def restore_playback_status(self):
+        """Restore the channel name (or Ready) after a temporary notice."""
+        self._status_notice_timer.stop()
+        self._playback_status.restore()
+        self.status_label.setText(self._playback_status.visible_text)
+
+    def set_playback_channel(self, name):
+        self._status_notice_timer.stop()
+        self._playback_status.start_playback(name)
+        self.status_label.setText(self._playback_status.visible_text)
+
+    def clear_playback_channel(self):
+        self._status_notice_timer.stop()
+        self._playback_status.stop_playback()
+        self.status_label.setText(self._playback_status.visible_text)
+
     def setup_ui(self):
         """Setup the UI elements"""
 
@@ -1265,7 +1289,7 @@ class TVHeadendClient(QMainWindow):
         self.recording_indicator.setProperty("recording", False)
         
         # Create status message label
-        self.status_label = QLabel("Ready")
+        self.status_label = QLabel(self._playback_status.visible_text)
         
         # Add widgets to horizontal layout
         status_layout.addWidget(self.recording_indicator)
@@ -1275,10 +1299,11 @@ class TVHeadendClient(QMainWindow):
         # Add the container to the status bar
         self.statusbar.addWidget(status_container)
         
-        # Override showMessage to update our custom label
-        def custom_show_message(message, timeout=0):
-            self.status_label.setText(message)
-        self.statusbar.showMessage = custom_show_message
+        # Temporary notices are not persistent playback state. Return to the
+        # currently playing channel after the notice expires.
+        self._status_notice_timer = QTimer(self)
+        self._status_notice_timer.setSingleShot(True)
+        self._status_notice_timer.timeout.connect(self.restore_playback_status)
         
         # Initialize
         self.fetch_channels()
@@ -1361,7 +1386,7 @@ class TVHeadendClient(QMainWindow):
         try:
             if not self.servers:
                 debug_print("Debug: No servers configured")
-                self.statusbar.showMessage("No servers configured")
+                self.show_status("No servers configured")
                 return
                 
             server = self.servers[self.server_combo.currentIndex()]
@@ -1371,7 +1396,7 @@ class TVHeadendClient(QMainWindow):
             channel_verification = []
             
             # Update status bar
-            self.statusbar.showMessage("Connecting to server...")
+            self.show_status("Connecting to server...")
             
             # Clean and format the URL properly
             url = server['url']
@@ -1475,7 +1500,7 @@ class TVHeadendClient(QMainWindow):
                 else:
                     debug_print(f"Row {row}: Missing items")
             
-            self.statusbar.showMessage("Channels loaded successfully")
+            self.show_status("Channels loaded successfully")
             
         except Exception as e:
             debug_print(f"Debug: Error in fetch_channels: {str(e)}")
@@ -1494,7 +1519,7 @@ class TVHeadendClient(QMainWindow):
                 self.fetch_channels()
             else:
                 debug_print("Debug: Connection attempt aborted by user")
-                self.statusbar.showMessage("Connection aborted")
+                self.show_status("Connection aborted")
                 self.channel_list.clear()
         
 
@@ -1506,7 +1531,7 @@ class TVHeadendClient(QMainWindow):
         channel_item = self.channel_list.item(row, 1) if row >= 0 else None
         channel_data = channel_item.data(Qt.UserRole) if channel_item else None
         if not isinstance(channel_data, dict) or not channel_data.get("uuid"):
-            self.statusbar.showMessage("Please select a channel to record")
+            self.show_status("Please select a channel to record")
             return
 
         channel_uuid = channel_data["uuid"]
@@ -1517,7 +1542,7 @@ class TVHeadendClient(QMainWindow):
             return
         duration = duration_dialog.get_duration()
         if duration <= 0:
-            self.statusbar.showMessage("Please select a recording duration")
+            self.show_status("Please select a recording duration")
             return
 
         try:
@@ -1565,12 +1590,12 @@ class TVHeadendClient(QMainWindow):
             )
             if response.status_code == 200:
                 title = next(iter(conf_data["title"].values()))
-                self.statusbar.showMessage(
+                self.show_status(
                     f"Recording started: {title} ({duration // 60} minutes)"
                 )
                 self.start_recording_indicator()
             else:
-                self.statusbar.showMessage(
+                self.show_status(
                     f"Failed to start recording (HTTP {response.status_code})"
                 )
                 debug_print(
@@ -1578,13 +1603,14 @@ class TVHeadendClient(QMainWindow):
                 )
         except Exception as e:
             debug_print(f"Debug: Instant recording error: {e}")
-            self.statusbar.showMessage("Unable to start recording")
+            self.show_status("Unable to start recording")
 
     def stop_playback(self):
         debug_print("Debug: Stopping playback")
         """Stop current playback"""
         self.media_player.stop()
-        self.statusbar.showMessage("Playback stopped")
+        self.clear_playback_channel()
+        self.show_status("Playback stopped")
 
                 # Create a new fullscreen window
     def toggle_fullscreen(self):
@@ -1619,6 +1645,7 @@ class TVHeadendClient(QMainWindow):
                 self.media_player.set_nsobject(self.video_frame.winId().__int__())
         
         self.is_fullscreen = not self.is_fullscreen
+        self.restore_playback_status()
 
     def load_servers(self):
         """Load TVHeadend server configurations"""
@@ -1686,7 +1713,7 @@ class TVHeadendClient(QMainWindow):
             current_row = self.channel_list.currentRow()
             if current_row < 0:
                 debug_print("Debug: No channel selected")
-                self.statusbar.showMessage("Please select a channel to play")
+                self.show_status("Please select a channel to play")
                 return
             
             # Get channel data directly from the table
@@ -1857,7 +1884,7 @@ class TVHeadendClient(QMainWindow):
             active_recordings = [r for r in recordings if r['status'] in ['Running', 'recording']]
             if not active_recordings:
                 debug_print("Debug: No active recordings found")
-                self.statusbar.showMessage("No active recordings to stop")
+                self.show_status("No active recordings to stop")
                 self.stop_recording_indicator()  # Make sure to hide indicator
                 return
                 
@@ -1878,14 +1905,14 @@ class TVHeadendClient(QMainWindow):
                     debug_print(f"Debug: Stop recording response status: {stop_response.status_code}")
             
             self.stop_recording_indicator()  # Hide the indicator after stopping recordings
-            self.statusbar.showMessage(f"Stopped {len(active_recordings)} recording(s)")
+            self.show_status(f"Stopped {len(active_recordings)} recording(s)")
             
         except Exception as e:
             debug_print(f"Debug: Error stopping recordings: {str(e)}")
             debug_print(f"Debug: Error type: {type(e)}")
             import traceback
             debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage(f"Error stopping recordings: {str(e)}")
+            self.show_status(f"Error stopping recordings: {str(e)}")
             self.stop_recording_indicator()  # Make sure to hide indicator even on error
 
     def start_recording_indicator(self):
@@ -1945,11 +1972,11 @@ class TVHeadendClient(QMainWindow):
                     debug_print("Debug: Server connection successful")
                 else:
                     debug_print(f"Debug: Server connection failed with status {test_response.status_code}")
-                    self.statusbar.showMessage("Failed to connect to server")
+                    self.show_status("Failed to connect to server")
                     return
             except Exception as conn_err:
                 debug_print(f"Debug: Connection test failed: {str(conn_err)}")
-                self.statusbar.showMessage("Failed to connect to server")
+                self.show_status("Failed to connect to server")
                 return
 
             # Now try to get DVR data
@@ -1967,11 +1994,11 @@ class TVHeadendClient(QMainWindow):
                         debug_print("Debug: Sample DVR entry omitted")
                 else:
                     debug_print(f"Debug: Failed to get DVR data: HTTP {dvr_response.status_code}")
-                    self.statusbar.showMessage("Failed to get DVR data")
+                    self.show_status("Failed to get DVR data")
                     return
             except Exception as dvr_err:
                 debug_print(f"Debug: DVR data fetch failed: {str(dvr_err)}")
-                self.statusbar.showMessage("Failed to get DVR data")
+                self.show_status("Failed to get DVR data")
                 return
 
             # If we got here, show the dialog
@@ -1981,7 +2008,7 @@ class TVHeadendClient(QMainWindow):
         except Exception as e:
             debug_print(f"Debug: Error showing DVR status: {str(e)}")
             debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage("Error showing DVR status")
+            self.show_status("Error showing DVR status")
 
     def play_url(self, url):
         """Play media from URL"""
@@ -1997,7 +2024,7 @@ class TVHeadendClient(QMainWindow):
         try:
             if not channel_name:
                 debug_print("Debug: No channel selected for recording")
-                self.statusbar.showMessage("Please select a channel to record")
+                self.show_status("Please select a channel to record")
                 return
 
             debug_print(f"Debug: Starting local recording for channel: {channel_name}")
@@ -2038,7 +2065,7 @@ class TVHeadendClient(QMainWindow):
                     
             if not channel_uuid:
                 debug_print(f"Debug: Channel UUID not found for: {channel_name}")
-                self.statusbar.showMessage("Channel not found")
+                self.show_status("Channel not found")
                 return
                 
             # Create stream URL
@@ -2114,7 +2141,7 @@ class TVHeadendClient(QMainWindow):
                 lambda: self.check_recording_status(file_path))  # Close parenthesis here
             self.recording_monitor.start(2000)  # Check every 2 seconds
             
-            self.statusbar.showMessage(f"Local recording started: {file_path}")
+            self.show_status(f"Local recording started: {file_path}")
             self.start_recording_indicator()
             
             # After starting ffmpeg process successfully:
@@ -2127,7 +2154,7 @@ class TVHeadendClient(QMainWindow):
             debug_print(f"Debug: Error type: {type(e)}")
             import traceback
             debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage(f"Local recording error: {str(e)}")
+            self.show_status(f"Local recording error: {str(e)}")
 
     def check_recording_status(self, file_path):
         """Check if the recording is actually working"""
@@ -2231,12 +2258,12 @@ class TVHeadendClient(QMainWindow):
             if hasattr(self, 'stall_count'):
                 del self.stall_count
             
-            self.statusbar.showMessage("Local recording stopped")
+            self.show_status("Local recording stopped")
             self.stop_recording_indicator()
             
         except Exception as e:
             debug_print(f"Debug: Error stopping local recording: {str(e)}")
-            self.statusbar.showMessage(f"Error stopping local recording: {str(e)}")
+            self.show_status(f"Error stopping local recording: {str(e)}")
             self.stop_recording_indicator()
 
     def load_config(self):
@@ -2341,7 +2368,7 @@ class TVHeadendClient(QMainWindow):
             
             if not channel_uuid:
                 debug_print(f"Debug: Channel UUID not found for: {channel_name}")
-                self.statusbar.showMessage("Channel not found")
+                self.show_status("Channel not found")
                 return
             
             # Get EPG data for the channel
@@ -2362,13 +2389,13 @@ class TVHeadendClient(QMainWindow):
                     dialog = EPGDialog(channel_name, epg_data, server, self)
                     dialog.show()
                 else:
-                    self.statusbar.showMessage("No EPG data available")
+                    self.show_status("No EPG data available")
             else:
-                self.statusbar.showMessage("Failed to fetch EPG data")
+                self.show_status("Failed to fetch EPG data")
                 
         except Exception as e:
             debug_print(f"Debug: Error fetching EPG: {str(e)}")
-            self.statusbar.showMessage(f"Error fetching EPG: {str(e)}")
+            self.show_status(f"Error fetching EPG: {str(e)}")
 
     def play_channel_from_table(self, item):
         """Play channel from table selection"""
@@ -2415,14 +2442,14 @@ class TVHeadendClient(QMainWindow):
                 self.media_player.set_media(media)
                 self.media_player.play()
                 debug_print(f"Debug: Started playback")
-                self.statusbar.showMessage(f"Playing: {channel_data['name']}")
+                self.set_playback_channel(channel_data.get('name') or 'Unknown channel')
             else:
                 debug_print(f"Debug: Channel not found: {channel_data['name']}")
-                self.statusbar.showMessage("Channel not found")
+                self.show_status("Channel not found")
                 
         except Exception as e:
             debug_print(f"Debug: Error in play_channel: {str(e)}")
-            self.statusbar.showMessage(f"Playback error: {str(e)}")
+            self.show_status(f"Playback error: {str(e)}")
 
     def show_server_status(self):
         """Show server status dialog"""
@@ -2432,7 +2459,7 @@ class TVHeadendClient(QMainWindow):
             dialog.show()
         except Exception as e:
             debug_print(f"Debug: Error showing server status: {str(e)}")
-            self.statusbar.showMessage("Error showing server status")
+            self.show_status("Error showing server status")
 
     def filter_channels(self, search_text):
         """Filter channel list based on search text"""
