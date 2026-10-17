@@ -39,7 +39,7 @@ try:
     from .playback_status import PlaybackStatus
     from .server_info import format_server_information
     from .recording_activity import active_recordings, stop_payload
-    from .recording_poll import RecordingPollWorker
+    from .recording_poll import RecordingPollWorker, RecordingStopWorker
 except ImportError:
     from diagnostics import debug_print, report_error
     from dvr_status import categorize_recording
@@ -47,7 +47,7 @@ except ImportError:
     from playback_status import PlaybackStatus
     from server_info import format_server_information
     from recording_activity import active_recordings, stop_payload
-    from recording_poll import RecordingPollWorker
+    from recording_poll import RecordingPollWorker, RecordingStopWorker
 
 
 class Logger:
@@ -941,6 +941,15 @@ class TVHeadendClient(QMainWindow):
         self._recordings_worker = None
         self._recording_query_inflight = False
         self._recording_refresh_after_current = False
+        # This application's single DVR queue serializes grid reads and STOPs.
+        self._dvr_pool = QThreadPool(self)
+        self._dvr_pool.setMaxThreadCount(1)
+        self._dvr_stop_inflight = False
+        self._pending_stop = None
+        self._dvr_stop_worker = None
+        self._uncertain_stop_uuids = set()
+        self._dvr_read_suspended = False
+        self._verify_stop_uuid = None
  
         
         # Add recording indicator variables
@@ -1085,8 +1094,13 @@ class TVHeadendClient(QMainWindow):
         self._playback_status.stop_playback()
         self.status_label.setText(self._playback_status.persistent_text)
 
-    def refresh_recording_summary(self):
-        """Fetch the server's real DVR status without blocking Qt/video."""
+    def refresh_recording_summary(self, manual=False):
+        """Fetch DVR grid once through the shared, non-blocking request queue."""
+        if self._dvr_read_suspended and not manual:
+            return
+        if self._pending_stop or self._dvr_stop_inflight:
+            # During STOP no concurrent DVR queries or retries are allowed.
+            return
         if self._recording_query_inflight:
             self._recording_refresh_after_current = True
             return
@@ -1096,6 +1110,8 @@ class TVHeadendClient(QMainWindow):
             self.recordings_summary_btn.setToolTip("No TVHeadend server configured")
             self._active_recordings = []
             return
+        if manual:
+            self._dvr_read_suspended = False
 
         self._recording_query_inflight = True
         self._recording_refresh_after_current = False
@@ -1103,10 +1119,10 @@ class TVHeadendClient(QMainWindow):
         self._recordings_worker.signals.completed.connect(
             self._on_recording_summary
         )
-        QThreadPool.globalInstance().start(self._recordings_worker)
+        self._dvr_pool.start(self._recordings_worker)
 
     def _on_recording_summary(self, result):
-        """Render latest async status, ignoring an obsolete server response."""
+        """Update both UI regions from a single background DVR snapshot."""
         self._recording_query_inflight = False
         self._recordings_worker = None
         index = self.server_combo.currentIndex()
@@ -1115,8 +1131,14 @@ class TVHeadendClient(QMainWindow):
             if 0 <= index < len(self.servers) else None
         )
         if current_url != result.get("url"):
-            self.refresh_recording_summary()
+            if self._pending_stop:
+                self._start_pending_stop()
+            else:
+                self.refresh_recording_summary(manual=True)
             return
+
+        dialog = getattr(self, "_dvr_dialog", None)
+        visible_dialog = bool(dialog and dialog.isVisible())
 
         if result.get("success"):
             active = result.get("recordings") or []
@@ -1131,25 +1153,116 @@ class TVHeadendClient(QMainWindow):
                 )
                 lines = [f"{r['channel']} — {r['title']}" for r in active]
                 self.recordings_summary_btn.setToolTip(
-                    "Recording on TVHeadend (click to manage):\\n"
-                    + "\\n".join(lines)
+                    "Recording on TVHeadend (click to manage):\n"
+                    + "\n".join(lines)
                 )
             else:
                 self.recordings_summary_btn.setStyleSheet("")
                 self.recordings_summary_btn.setToolTip(
-                    "No server recordings currently active. Click for DVR Status."
+                    "No server recordings active. Click for DVR Status."
                 )
+            if visible_dialog:
+                dialog.apply_entries(result.get("entries"), result.get("total"))
+            if self._verify_stop_uuid:
+                uuid = self._verify_stop_uuid
+                self._verify_stop_uuid = None
+                remaining = any(r.get("uuid") == uuid for r in active)
+                if remaining:
+                    self.show_status(
+                        "Stop acknowledged, but DVR still reports the entry as Recording."
+                    )
+                else:
+                    self.show_status("Selected DVR entry is no longer recording.")
         else:
             self._active_recordings = []
             self.recordings_summary_btn.setText("REC ?")
             self.recordings_summary_btn.setStyleSheet("")
             self.recordings_summary_btn.setToolTip(
-                "DVR status unavailable; click to inspect recordings."
+                "DVR status unavailable; click to inspect."
             )
+            if visible_dialog:
+                dialog.mark_unavailable()
 
-        if self._recording_refresh_after_current:
+        if self._pending_stop:
+            self._start_pending_stop()
+            return
+        if self._recording_refresh_after_current and not self._dvr_read_suspended:
             self._recording_refresh_after_current = False
             self.refresh_recording_summary()
+
+    def request_stop_recording(self, selected):
+        """Queue exactly one explicitly confirmed UUID-based STOP."""
+        try:
+            payload = stop_payload(selected)
+        except ValueError:
+            return False
+        uuid = payload["uuid"]
+        if (
+            uuid in self._uncertain_stop_uuids
+            or self._pending_stop
+            or self._dvr_stop_inflight
+        ):
+            return False
+        index = self.server_combo.currentIndex()
+        if index < 0 or index >= len(self.servers):
+            return False
+        self._pending_stop = {
+            "server": dict(self.servers[index]),
+            "uuid": uuid,
+            "channel": selected.get("channel") or "Unknown channel",
+        }
+        self._recording_refresh_after_current = False
+        if not self._recording_query_inflight:
+            self._start_pending_stop()
+        return True
+
+    def _start_pending_stop(self):
+        if not self._pending_stop or self._dvr_stop_inflight:
+            return
+        queued = self._pending_stop
+        self._pending_stop = None
+        self._dvr_stop_inflight = True
+        self._dvr_stop_worker = RecordingStopWorker(
+            queued["server"], {"uuid": queued["uuid"]}
+        )
+        self._dvr_stop_worker.signals.completed.connect(self._on_stop_result)
+        self._dvr_pool.start(self._dvr_stop_worker)
+
+    def _on_stop_result(self, result):
+        self._dvr_stop_inflight = False
+        self._dvr_stop_worker = None
+        outcome = result.get("outcome")
+        uuid = result.get("uuid")
+        dialog = getattr(self, "_dvr_dialog", None)
+        if dialog and dialog.isVisible():
+            dialog.stop_request_finished(
+                outcome, result.get("http_status")
+            )
+
+        if outcome == "accepted":
+            # HTTP success acknowledges the API request, not its visible effect.
+            self._verify_stop_uuid = uuid
+            self.show_status("TVHeadend acknowledged Stop; verifying DVR status.")
+            self.refresh_recording_summary(manual=True)
+        elif outcome == "unknown":
+            # A timeout may occur AFTER TVHeadend accepted the POST. Never
+            # reissue the request. Suspend all background DVR polling until
+            # the user explicitly requests a read-only refresh.
+            self._uncertain_stop_uuids.add(uuid)
+            self._dvr_read_suspended = True
+            self._recording_refresh_after_current = False
+            self.recordings_summary_btn.setText("REC ?")
+            self.recordings_summary_btn.setToolTip(
+                "STOP result unknown. Check TVHeadend before another action."
+            )
+            self.show_status(
+                "Stop outcome UNKNOWN; do not repeat it. Check TVHeadend."
+            )
+        else:
+            self.show_status(
+                f"Stop was not accepted (HTTP {result.get('http_status')})."
+            )
+            self.refresh_recording_summary(manual=True)
 
     def setup_ui(self):
         """Setup the UI elements"""
