@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QPushButton, QLabel, QSlider, QStatusBar, QGridLayout, QMenuBar, QRadioButton, QSpinBox, QGraphicsOpacityEffect, QFileDialog,
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton, QShortcut, QCheckBox, QGroupBox  # Added QGroupBox here
 )
-from PyQt5.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect
+from PyQt5.QtCore import Qt, QSize, QTimer, QThreadPool, QPropertyAnimation, QEasingCurve, QAbstractAnimation, QRect
 from PyQt5.QtGui import QIcon, QPainter, QColor, QKeySequence, QFont
 import json
 import requests
@@ -39,6 +39,7 @@ try:
     from .playback_status import PlaybackStatus
     from .server_info import format_server_information
     from .recording_activity import active_recordings, stop_payload
+    from .recording_poll import RecordingPollWorker
 except ImportError:
     from diagnostics import debug_print, report_error
     from dvr_status import categorize_recording
@@ -46,6 +47,7 @@ except ImportError:
     from playback_status import PlaybackStatus
     from server_info import format_server_information
     from recording_activity import active_recordings, stop_payload
+    from recording_poll import RecordingPollWorker
 
 
 class Logger:
@@ -1258,7 +1260,7 @@ class TVHeadendClient(QMainWindow):
         self.stop_btn.setIcon(QIcon(f"{self.icons_dir}/stop.svg"))
         self.stop_btn.setIconSize(QSize(48, 48))
         self.stop_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_btn.clicked.connect(self.media_player.stop)
+        self.stop_btn.clicked.connect(self.stop_playback)
         self.stop_btn.setToolTip("Stop playback")
         playback_layout.addWidget(self.stop_btn)
         
@@ -1288,7 +1290,7 @@ class TVHeadendClient(QMainWindow):
         self.stop_record_btn.setIcon(QIcon(f"{self.icons_dir}/stoprec.svg"))
         self.stop_record_btn.setIconSize(QSize(48, 48))
         self.stop_record_btn.setStyleSheet("QPushButton { border-radius: 24px; }")
-        self.stop_record_btn.setToolTip("Stop Recording")
+        self.stop_record_btn.setToolTip("Choose one active recording to stop")
         self.stop_record_btn.clicked.connect(self.stop_recording)
         record_layout.addWidget(self.stop_record_btn)
         
@@ -1711,7 +1713,8 @@ class TVHeadendClient(QMainWindow):
                 self.show_status(
                     f"Recording started: {title} ({duration // 60} minutes)"
                 )
-                self.start_recording_indicator()
+                # The REC indicator is driven by the server's actual DVR grid.
+                QTimer.singleShot(800, self.refresh_recording_summary)
             else:
                 self.show_status(
                     f"Failed to start recording (HTTP {response.status_code})"
@@ -1971,67 +1974,8 @@ class TVHeadendClient(QMainWindow):
             self.stop_recording()
 
     def stop_recording(self):
-        """Stop active recordings"""
-        debug_print("Debug: Attempting to stop recordings")
-        try:
-            # Get current server
-            server = self.servers[self.server_combo.currentIndex()]
-            debug_print(f"Debug: Using server: {server['url']}")
-            
-            # Create auth if needed
-            auth = None
-            if server.get('username') or server.get('password'):
-                auth = (server.get('username', ''), server.get('password', ''))
-                debug_print(f"Debug: Using authentication with username: {server.get('username', '')}")
-            
-            # Get list of active recordings
-            api_url = f'{server["url"]}/api/dvr/entry/grid'
-            debug_print(f"Debug: Getting recordings from: {api_url}")
-            
-            response = requests.get(api_url, auth=auth)
-            debug_print(f"Debug: Recording list response status: {response.status_code}")
-            
-            recordings = response.json()['entries']
-            debug_print(f"Debug: Total recordings found: {len(recordings)}")
-            
-            # Print all recordings and their statuses for debugging
-            for recording in recordings:
-                debug_print(f"Debug: Recording '{recording.get('disp_title', 'Unknown')}' - Status: {recording.get('status', 'unknown')}")
-            
-            # Look for recordings with status 'Running' (this seems to be the actual status used by TVHeadend)
-            active_recordings = [r for r in recordings if r['status'] in ['Running', 'recording']]
-            if not active_recordings:
-                debug_print("Debug: No active recordings found")
-                self.show_status("No active recordings to stop")
-                self.stop_recording_indicator()  # Make sure to hide indicator
-                return
-                
-            debug_print(f"Debug: Found {len(active_recordings)} active recordings")
-            
-            # Stop each active recording
-            for recording in active_recordings:
-                stop_url = f'{server["url"]}/api/dvr/entry/stop'
-                data = {'uuid': recording['uuid']}
-                
-                debug_print(f"Debug: Stopping recording: {recording.get('disp_title', 'Unknown')} ({recording['uuid']})")
-                stop_response = requests.post(stop_url, data=data, auth=auth)
-                
-                if stop_response.status_code == 200:
-                    debug_print(f"Debug: Successfully stopped recording: {recording['uuid']}")
-                else:
-                    debug_print(f"Debug: Failed to stop recording: {recording['uuid']}")
-                    debug_print(f"Debug: Stop recording response status: {stop_response.status_code}")
-            
-            self.stop_recording_indicator()  # Hide the indicator after stopping recordings
-            self.show_status(f"Stopped {len(active_recordings)} recording(s)")
-            
-        except Exception as e:
-            debug_print(f"Debug: Error stopping recordings: {str(e)}")
-            debug_print(f"Debug: Error type: {type(e)}")
-            import traceback
-            debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.show_status(f"Error stopping recordings: {str(e)}")
-            self.stop_recording_indicator()  # Make sure to hide indicator even on error
+        """Open the DVR list: never send Stop to multiple recordings."""
+        self.show_dvr_status()
 
     def start_recording_indicator(self):
         """Start the recording indicator with smooth pulsing animation"""
@@ -2069,64 +2013,25 @@ class TVHeadendClient(QMainWindow):
         self.recording_indicator.style().polish(self.recording_indicator)
 
     def show_dvr_status(self):
-        """Show DVR status dialog"""
+        """Manage TVHeadend recordings, with explicit single-UUID stopping."""
+        index = self.server_combo.currentIndex()
+        if index < 0 or index >= len(self.servers):
+            self.show_status("No TVHeadend server configured")
+            return
         try:
-            debug_print("\nDebug: Opening DVR Status Dialog")
-            server = self.servers[self.server_combo.currentIndex()]
-            debug_print(f"Debug: Using server: {server.get('name', 'configured server')}")
-
-            # Test connection first
-            test_url = f"{server['url']}/api/status/connections"
-            auth = None
-            if server.get('username') or server.get('password'):
-                auth = (server.get('username', ''), server.get('password', ''))
-                debug_print(f"Debug: Using authentication with username: {server.get('username', '')}")
-
-            debug_print(f"Debug: Testing connection to: {test_url}")
-            try:
-                test_response = requests.get(test_url, auth=auth, timeout=5)
-                debug_print(f"Debug: Connection test response: {test_response.status_code}")
-                if test_response.status_code == 200:
-                    debug_print("Debug: Server connection successful")
-                else:
-                    debug_print(f"Debug: Server connection failed with status {test_response.status_code}")
-                    self.show_status("Failed to connect to server")
+            if getattr(self, "_dvr_dialog", None) and self._dvr_dialog.isVisible():
+                if self._dvr_dialog.server == self.servers[index]:
+                    self._dvr_dialog.tabs.setCurrentIndex(0)
+                    self._dvr_dialog.raise_()
+                    self._dvr_dialog.activateWindow()
                     return
-            except Exception as conn_err:
-                debug_print(f"Debug: Connection test failed: {str(conn_err)}")
-                self.show_status("Failed to connect to server")
-                return
-
-            # Now try to get DVR data
-            dvr_url = f"{server['url']}/api/dvr/entry/grid"
-            debug_print(f"Debug: Fetching DVR data from: {dvr_url}")
-            try:
-                dvr_response = requests.get(dvr_url, auth=auth, timeout=5)
-                debug_print(f"Debug: DVR data response: {dvr_response.status_code}")
-                if dvr_response.status_code == 200:
-                    dvr_data = dvr_response.json()
-                    debug_print(f"Debug: DVR data received: {len(dvr_data.get('entries', []))} entries")
-                    # Print first entry as sample if available
-                    if dvr_data.get('entries'):
-                        debug_print("Debug: Sample DVR entry:")
-                        debug_print("Debug: Sample DVR entry omitted")
-                else:
-                    debug_print(f"Debug: Failed to get DVR data: HTTP {dvr_response.status_code}")
-                    self.show_status("Failed to get DVR data")
-                    return
-            except Exception as dvr_err:
-                debug_print(f"Debug: DVR data fetch failed: {str(dvr_err)}")
-                self.show_status("Failed to get DVR data")
-                return
-
-            # If we got here, show the dialog
-            dialog = DVRStatusDialog(server, self)
-            dialog.show()
-            
+                self._dvr_dialog.close()
+            self._dvr_dialog = DVRStatusDialog(self.servers[index], self)
+            self._dvr_dialog.tabs.setCurrentIndex(0)
+            self._dvr_dialog.show()
         except Exception as e:
-            debug_print(f"Debug: Error showing DVR status: {str(e)}")
-            debug_print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.show_status("Error showing DVR status")
+            debug_print(f"Debug: Could not open DVR Status: {e}")
+            self.show_status("Could not open recording manager")
 
     def play_url(self, url):
         """Play media from URL"""
