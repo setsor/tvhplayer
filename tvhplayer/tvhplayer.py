@@ -36,6 +36,7 @@ try:
         recording_titles,
     )
     from .core.config import ConfigStore
+    from .core.qt_platform import prepare_qt_platform
     from .core.dvr import instant_recording_title
     from .core.errors import TvhError
     from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
@@ -59,6 +60,7 @@ except ImportError:
         recording_titles,
     )
     from core.config import ConfigStore
+    from core.qt_platform import prepare_qt_platform
     from core.dvr import instant_recording_title
     from core.errors import TvhError
     from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
@@ -3994,9 +3996,21 @@ class EPGDialog(QDialog):
 def main():
     """Main entry point for the application"""
     try:
-        # VLC's window embedding is still more reliable on X11 than on Wayland.
-        os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
-        app = QApplication(sys.argv)
+        # VLC 3 uses X11 embedding on Linux; macOS must load Qt's Cocoa plugin.
+        prepare_qt_platform()
+
+        # Allows CI to verify the *packaged* Qt Cocoa plugin without loading
+        # settings, connecting to TVHeadend, or displaying the main window.
+        smoke_flag = "--tvhplayer-qt-smoke-test"
+        smoke_test = smoke_flag in sys.argv
+        args = [item for item in sys.argv if item != smoke_flag]
+        app = QApplication(args)
+        if smoke_test:
+            platform_name = app.platformName()
+            print(f"Qt platform: {platform_name}", flush=True)
+            if sys.platform == "darwin" and platform_name != "cocoa":
+                raise RuntimeError(f"Unexpected Qt platform on macOS: {platform_name}")
+            return
         app.setApplicationName("TVHplayer")
         app.setApplicationDisplayName("TVHplayer")
         app.setDesktopFileName("io.github.mfat.tvhplayer")
