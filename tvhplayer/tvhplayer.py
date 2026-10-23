@@ -2737,7 +2737,8 @@ class TVHeadendClient(QMainWindow):
             )
             duration_minutes = duration // 60
             self.show_status(
-                f"Recording started for: {channel.name} ({duration_minutes} minutes)"
+                f"Recording started for: {channel.name} ({duration_minutes} minutes)",
+                timeout_ms=6000,
             )
             # The actual server DVR grid, not this success notice, sets REC.
             self._refresh_tasks()
@@ -3632,7 +3633,7 @@ class TVHeadendClient(QMainWindow):
             self.recording_monitor = QTimer()
             self.recording_monitor.timeout.connect(self.check_recording_status)
             self.recording_monitor.start(2000)
-            self.show_status(f"Local recording started: {file_path}")
+            self.show_status(f"Local recording started: {file_path}", timeout_ms=6000)
             self.start_recording_indicator()
             self._refresh_tasks(server=False)
             
