@@ -129,6 +129,15 @@ class StatusWiringTests(unittest.TestCase):
         self.assertIn("self._refresh_tasks()", method)
         self.assertNotIn("self.start_recording_indicator()", method)
 
+    def test_recording_start_notice_last_six_seconds(self):
+        for method in ("start_recording", "start_local_recording"):
+            with self.subTest(method=method):
+                source = gui_method("TVHeadendClient", method)
+                self.assertIn("timeout_ms=6000", source)
+        general = gui_method("TVHeadendClient", "show_status")
+        self.assertIn("timeout_ms=4500", general)
+
+
 
 if __name__ == "__main__":
     unittest.main()
