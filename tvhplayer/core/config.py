@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import tempfile
 from copy import deepcopy
 from pathlib import Path
 
@@ -29,6 +30,13 @@ def default_config_dir():
 
 def default_config_path():
     return default_config_dir() / 'tvhplayer.conf'
+
+
+def legacy_macos_config_path():
+    """Previous Intel macOS builds stored settings in ~/.tvhplayer.conf."""
+    if sys.platform != 'darwin':
+        return None
+    return Path.home() / '.tvhplayer.conf'
 
 
 def default_config():
@@ -77,28 +85,58 @@ def _normalize(data):
 
 class ConfigStore:
     def __init__(self, path=None):
-        self.path = Path(path) if path else default_config_path()
+        self._uses_default_path = path is None
+        self.path = Path(path) if path is not None else default_config_path()
         self.data = default_config()
         self.load()
 
     def load(self):
+        """Read the new config or migrate macOS settings without touching the old app."""
         try:
             if self.path.exists():
                 with self.path.open('r', encoding='utf-8') as handle:
                     self.data = _normalize(json.load(handle))
             else:
                 self.data = default_config()
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning('Could not load config from %s: %s', self.path, exc)
+                legacy = legacy_macos_config_path() if self._uses_default_path else None
+                if legacy is not None and legacy.is_file():
+                    try:
+                        with legacy.open('r', encoding='utf-8') as handle:
+                            contents = json.load(handle)
+                        if isinstance(contents, dict):
+                            self.data = _normalize(contents)
+                            # The old file stays unchanged so the working Qt5 app
+                            # remains a fully usable fallback.
+                            try:
+                                self.save()
+                            except OSError:
+                                log.warning('Legacy settings loaded, but could not be saved at the new path')
+                            else:
+                                log.info('Imported legacy macOS TVHplayer settings')
+                    except (OSError, ValueError):
+                        log.warning('Could not import legacy macOS TVHplayer settings')
+        except (OSError, json.JSONDecodeError):
+            log.warning('Could not load TVHplayer settings; using defaults')
             self.data = default_config()
         return self.data
 
     def save(self):
+        """Atomically write secrets-bearing config with owner-only permissions."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
         payload = _normalize(self.data)
         on_disk = dict(payload, servers=without_builtin_secrets(payload['servers']))
-        with self.path.open('w', encoding='utf-8') as handle:
-            json.dump(on_disk, handle, indent=2)
+        fd, tmp_name = tempfile.mkstemp(
+            prefix='.' + self.path.name + '.', suffix='.tmp',
+            dir=str(self.path.parent),
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(on_disk, handle, indent=2)
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self.path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
         self.data = payload
         return payload
 
