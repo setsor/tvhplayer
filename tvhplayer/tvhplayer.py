@@ -2727,16 +2727,24 @@ class TVHeadendClient(QMainWindow):
             status_item = QTableWidgetItem()
             table.setItem(row, 2, status_item)
         pane = getattr(self, "tasks_pane", None)
-        recording = bool(
-            channel is not None and pane is not None and pane._last_server_ok
-            and any(
-                job.category() == "recording"
-                and job.matches_channel(channel)
-                for job in pane._server_entries
+        # Number active server recordings in a deterministic order. The REC
+        # indicator uses the same snapshot, so REC 1..N corresponds to REC N.
+        active = (
+            sorted(
+                (job for job in pane._server_entries
+                 if job.category() == "recording"),
+                key=lambda job: (job.start or 0, job.uuid or ""),
             )
+            if pane is not None and pane._last_server_ok else []
         )
-        status = "Play/REC" if is_playing and recording else (
-            "Playing" if is_playing else ("REC" if recording else "")
+        indexes = [
+            index for index, job in enumerate(active, start=1)
+            if channel is not None and job.matches_channel(channel)
+        ]
+        recording = bool(indexes)
+        rec_label = "REC " + ",".join(str(index) for index in indexes) if recording else ""
+        status = ("Playing / " + rec_label) if is_playing and recording else (
+            "Playing" if is_playing else rec_label
         )
         if status_item.text() != status:
             status_item.setText(status)
@@ -2764,7 +2772,7 @@ class TVHeadendClient(QMainWindow):
         if is_playing:
             description += " Playing."
         if recording:
-            description += " Recording."
+            description += f" Recording instance {rec_label} of {len(active)} active."
         description += " Press Enter to play."
         set_item_access(name_item, channel.name, description)
 
