@@ -37,6 +37,7 @@ try:
     )
     from .core.config import ConfigStore
     from .core.qt_platform import prepare_qt_platform
+    from .core.status_state import StatusState
     from .core.dvr import instant_recording_title
     from .core.errors import TvhError
     from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
@@ -61,6 +62,7 @@ except ImportError:
     )
     from core.config import ConfigStore
     from core.qt_platform import prepare_qt_platform
+    from core.status_state import StatusState
     from core.dvr import instant_recording_title
     from core.errors import TvhError
     from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
@@ -347,24 +349,10 @@ class DVRStatusDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to stop recording: {str(e)}")
 
     def _sync_parent_indicator(self):
-        """Clear the main-window pulse when no server recording is still running."""
+        """Let the parent refresh all active DVR entries, not guess the count."""
         parent = self.parent()
-        if parent is None or not hasattr(parent, 'stop_recording_indicator'):
-            return
-        recorder = getattr(parent, 'local_recorder', None)
-        if recorder is not None and recorder.is_running:
-            return
-        try:
-            running = [
-                item for item in self.backend.list_dvr_entries()
-                if item.category() == 'recording'
-            ]
-        except Exception:
-            return
-        if not running and getattr(parent, 'is_recording', False):
-            parent.stop_recording_indicator()
-            if hasattr(parent, 'statusbar'):
-                parent.statusbar.showMessage("Recording stopped")
+        if parent is not None and hasattr(parent, "_refresh_tasks"):
+            parent._refresh_tasks()
 
     def _fill_row(self, table, row, values, entry, emphasis=None):
         colors = row_emphasis(emphasis)
@@ -748,10 +736,12 @@ class TasksPanel(QFrame):
         self._server_tasks = []
 
     def refresh(self, server=True):
-        """Reload tasks. A failed server fetch keeps the rows already shown."""
+        """Refresh Tasks and the main REC badge from the same server response."""
+        server_ok = None
         if server:
             fetched, error = self._fetch_server_tasks()
-            if error is None:
+            server_ok = error is None
+            if server_ok:
                 self._server_tasks = fetched
                 self._set_error("")
             else:
@@ -763,6 +753,15 @@ class TasksPanel(QFrame):
             tasks.append(local)
         self._tasks = sorted(tasks, key=self._sort_key)
         self._apply_filter()
+        host = self._host
+        if host is not None and hasattr(host, "update_recording_activity"):
+            if server:
+                # A failed fetch is UNKNOWN, not REC 0; keep Tasks cached.
+                host.update_recording_activity(
+                    self._server_tasks if server_ok else None
+                )
+            else:
+                host.update_recording_activity(refresh_server=False)
 
     def selected_task(self):
         row = self.task_table.currentRow()
@@ -828,9 +827,8 @@ class TasksPanel(QFrame):
         menu.exec(self.task_table.viewport().mapToGlobal(position))
 
     def _tell(self, host, message):
-        statusbar = getattr(host, 'statusbar', None)
-        if statusbar is not None:
-            statusbar.showMessage(message)
+        if host is not None and hasattr(host, "show_status"):
+            host.show_status(message)
 
     def _fetch_server_tasks(self):
         host = self._host
@@ -1854,8 +1852,8 @@ class TVHeadendClient(QMainWindow):
         self._awaiting_playback = False
         self._playback_channel = None
         self._video_menu = None
+        self._status_state = StatusState()
 
-        
         # Add recording indicator variables
         self.recording_indicator_timer = None
         self.recording_indicator_visible = False
@@ -2352,45 +2350,36 @@ class TVHeadendClient(QMainWindow):
         
         # Buttons removed
         
-        # Status bar setup
-        self.statusbar = QStatusBar()
+        # Three independent pieces of state: persistent live playback on the
+        # left, expiring notices beside it, and the real DVR count at right.
+        # Do not monkey-patch QStatusBar.showMessage: it bypasses Qt timeouts.
+        self.statusbar = QStatusBar(self)
         self.statusbar.setAccessibleName("Status bar")
         self.setStatusBar(self.statusbar)
-        
-        # Create a container widget for status bar items
-        status_container = QWidget()
+
+        status_container = QWidget(self.statusbar)
         status_layout = QHBoxLayout(status_container)
         status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(10)  # Space between indicator and text
-        
-        # Text plus a dark-red badge, so recording state is not color alone.
-        self.recording_indicator = QLabel("")
-        self.recording_indicator.setVisible(False)
-        self.recording_indicator.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        if not prefers_high_contrast():
-            self.recording_indicator.setStyleSheet(
-                "QLabel { background-color: #7f1d1d; color: #ffffff; "
-                "font-weight: bold; padding: 1px 6px; border-radius: 8px; }"
-            )
-        describe(self.recording_indicator, "Not recording", "Shown only while a recording is in progress")
-        
-        # Create status message label
+        status_layout.setSpacing(10)
+
         self.status_label = QLabel("Ready")
-        describe(self.status_label, "Ready", "Application status")
-        
-        # Add widgets to horizontal layout
-        status_layout.addWidget(self.recording_indicator)
+        describe(self.status_label, "Ready", "Currently playing channel")
         status_layout.addWidget(self.status_label)
-        status_layout.addStretch()  # This pushes everything to the left
-        
-        # Add the container to the status bar
-        self.statusbar.addWidget(status_container)
-        
-        # Override showMessage to update our custom label
-        def custom_show_message(message, timeout=0):
-            announce_label(self.status_label, message)
-        self.statusbar.showMessage = custom_show_message
-        
+
+        self.status_notice_label = QLabel("")
+        describe(self.status_notice_label, "", "Temporary action result")
+        status_layout.addWidget(self.status_notice_label, 1)
+        self.statusbar.addWidget(status_container, 1)
+
+        self.recording_indicator = QLabel("REC ?")
+        self.recording_indicator.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.statusbar.addPermanentWidget(self.recording_indicator)
+        self._render_recording_status()
+
+        self._status_notice_timer = QTimer(self)
+        self._status_notice_timer.setSingleShot(True)
+        self._status_notice_timer.timeout.connect(self._clear_status_notice)
+
         # Initialize
         self.fetch_channels()
         
@@ -2491,7 +2480,7 @@ class TVHeadendClient(QMainWindow):
     def _adjust_volume(self, delta):
         value = max(0, min(100, self.volume_slider.value() + delta))
         self.volume_slider.setValue(value)
-        self.statusbar.showMessage(f"Volume {value}")
+        self.show_status(f"Volume {value}")
 
     def _channel_menu_position(self):
         row = self.channel_list.currentRow()
@@ -2659,7 +2648,7 @@ class TVHeadendClient(QMainWindow):
         try:
             if not self.servers:
                 print("Debug: No servers configured")
-                self.statusbar.showMessage("No servers configured")
+                self.show_status("No servers configured")
                 return
                 
             server = self.current_server()
@@ -2667,17 +2656,17 @@ class TVHeadendClient(QMainWindow):
                 self.channel_list.setRowCount(0)
                 supervisor = getattr(self, 'builtin', None)
                 if supervisor is None:
-                    self.statusbar.showMessage("Built-in server is not available in this build.")
+                    self.show_status("Built-in server is not available in this build.")
                     return
                 if supervisor.binary is None:
-                    self.statusbar.showMessage("Built-in Tvheadend is not packaged in this build.")
+                    self.show_status("Built-in Tvheadend is not packaged in this build.")
                     print("Debug: Built-in Tvheadend binary was not found in this build.")
                     return
-                self.statusbar.showMessage("Starting built-in server...")
+                self.show_status("Starting built-in server...")
                 supervisor.start()
                 return
             print(f"Debug: Fetching channels from server: {server['url']}")
-            self.statusbar.showMessage("Connecting to server...")
+            self.show_status("Connecting to server...")
             channels = self.get_backend().get_channels()
             self.channel_list.setSortingEnabled(False)
             self.channel_list.setRowCount(0)
@@ -2699,7 +2688,7 @@ class TVHeadendClient(QMainWindow):
                 self.channel_list.setItem(row, 2, QTableWidgetItem(""))
             self.channel_list.setSortingEnabled(True)
             self._mark_playing_channel(scroll=True)
-            self.statusbar.showMessage("Channels loaded successfully")
+            self.show_status("Channels loaded successfully")
         except Exception as e:
             print(f"Debug: Error in fetch_channels: {str(e)}")
             print(f"Debug: Error type: {type(e)}")
@@ -2718,7 +2707,7 @@ class TVHeadendClient(QMainWindow):
                 self.fetch_channels()
             else:
                 print("Debug: Connection attempt aborted by user")
-                self.statusbar.showMessage("Connection aborted")
+                self.show_status("Connection aborted")
                 self.channel_list.clear()
         
 
@@ -2728,7 +2717,7 @@ class TVHeadendClient(QMainWindow):
             channel = self.selected_channel()
             if not channel:
                 print("Debug: No channel selected for recording")
-                self.statusbar.showMessage("Please select a channel to record")
+                self.show_status("Please select a channel to record")
                 return
 
             duration_dialog = RecordingDurationDialog(self)
@@ -2747,17 +2736,17 @@ class TVHeadendClient(QMainWindow):
                 comment='Instant recording via TVHplayer',
             )
             duration_minutes = duration // 60
-            self.statusbar.showMessage(
+            self.show_status(
                 f"Recording started for: {channel.name} ({duration_minutes} minutes)"
             )
-            self.start_recording_indicator()
+            # The actual server DVR grid, not this success notice, sets REC.
             self._refresh_tasks()
         except Exception as e:
             print(f"Debug: Recording error: {str(e)}")
             print(f"Debug: Error type: {type(e)}")
             import traceback
             print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage(f"Recording error: {str(e)}")
+            self.show_status(f"Recording error: {str(e)}")
             
     def stop_playback(self):
         """Stop current playback"""
@@ -2766,10 +2755,11 @@ class TVHeadendClient(QMainWindow):
         self._playback_active = False
         self._playback_channel = None
         self._mark_playing_channel()
+        self._refresh_playback_status()
         self._set_playback_spinner(False)
         self.player.stop()
         self._protect_video_surface(False)
-        self.statusbar.showMessage("Playback stopped")
+        self.show_status("Playback stopped")
 
     def _set_idle_splash(self, visible):
         """Show the logo overlay only when VLC is not drawing video."""
@@ -2829,18 +2819,17 @@ class TVHeadendClient(QMainWindow):
         self._set_playback_spinner(False)
         self._protect_video_surface(True)
         self._mark_playing_channel()
-        channel = getattr(self, '_playback_channel', None)
-        if channel is not None:
-            self.statusbar.showMessage(f"Playing: {channel.name}")
+        self._refresh_playback_status()
 
     def _on_playback_failed(self):
         self._awaiting_playback = False
         self._playback_active = False
         self._playback_channel = None
         self._mark_playing_channel()
+        self._refresh_playback_status()
         self._set_playback_spinner(False)
         self._protect_video_surface(False)
-        self.statusbar.showMessage("Playback failed")
+        self.show_status("Playback failed")
 
     def _on_playback_stopped(self):
         # A menu or resize can make the engine tear down its output for a moment.
@@ -2857,6 +2846,7 @@ class TVHeadendClient(QMainWindow):
         if self.player and self.player.is_playing():
             return
         self._protect_video_surface(False)
+        self._refresh_playback_status()
 
     def _bind_playback_splash(self):
         """Keep the splash in sync if playback starts or stops on its own."""
@@ -2916,35 +2906,97 @@ class TVHeadendClient(QMainWindow):
                 handles.append(handle)
         return handles
 
+    def show_status(self, message, timeout_ms=4500):
+        """Temporary feedback; playback and DVR activity remain visible."""
+        text = str(message or "")
+        if not text:
+            self._clear_status_notice()
+            return
+        if self.status_notice_label.text() != text:
+            announce_label(self.status_notice_label, text)
+        self._status_notice_timer.start(max(100, int(timeout_ms)))
+
+    def _clear_status_notice(self):
+        self._status_notice_timer.stop()
+        self.status_notice_label.clear()
+
+    def _refresh_playback_status(self):
+        channel = self._playing_channel()
+        self._status_state.playing_channel = (
+            channel.name if channel is not None else ""
+        )
+        label = self._status_state.playback_label
+        if self.status_label.text() != label:
+            announce_label(self.status_label, label)
+
+    def _render_recording_status(self):
+        """Use one Tasks snapshot; no additional DVR HTTP requests."""
+        indicator = getattr(self, "recording_indicator", None)
+        if indicator is None:
+            return
+        local = getattr(self, "local_recorder", None)
+        self._status_state.local_recording = bool(
+            local is not None and getattr(local, "is_running", False)
+        )
+        label = self._status_state.recording_label
+        active = self._status_state.has_active_recordings
+        indicator.setText(label)
+        indicator.setVisible(True)
+        indicator.setToolTip(
+            "Live TVHeadend DVR count. LOCAL means a computer-side recording."
+            if self._status_state.server_recordings is not None
+            else "TVHeadend DVR count unavailable. LOCAL indicates a local recording."
+        )
+        if active:
+            if not prefers_high_contrast():
+                indicator.setStyleSheet(
+                    "QLabel { background-color: #7f1d1d; color: white; "
+                    "font-weight: bold; padding: 1px 6px; border-radius: 8px; }"
+                )
+            if not self.is_recording:
+                self.opacity_effect = QGraphicsOpacityEffect(indicator)
+                indicator.setGraphicsEffect(self.opacity_effect)
+                self.recording_animation = QPropertyAnimation(
+                    self.opacity_effect, b"opacity", self
+                )
+                self.recording_animation.setDuration(1000)
+                self.recording_animation.setStartValue(1.0)
+                self.recording_animation.setEndValue(0.3)
+                self.recording_animation.setEasingCurve(
+                    QEasingCurve.Type.InOutSine
+                )
+                self.recording_animation.setLoopCount(-1)
+                self.recording_animation.start()
+        else:
+            if self.recording_animation is not None:
+                self.recording_animation.stop()
+                self.recording_animation = None
+            if self.opacity_effect is not None:
+                indicator.setGraphicsEffect(None)
+                self.opacity_effect = None
+            indicator.setStyleSheet("")
+        self.is_recording = active
+
+    def update_recording_activity(self, server_tasks=None, refresh_server=True):
+        """Reconcile REC from Tasks' completed fetch, not an action message."""
+        if refresh_server:
+            self._status_state.set_server_tasks(server_tasks)
+        self._render_recording_status()
+
     def _toggle_tasks_pane(self, checked):
         self.tasks_pane.setVisible(bool(checked))
 
     def _refresh_tasks(self, server=True):
-        pane = getattr(self, 'tasks_pane', None)
+        pane = getattr(self, "tasks_pane", None)
         if pane is not None:
             pane.refresh(server=server)
 
     def _recording_in_progress(self):
-        """True while a server recording or the local job is running."""
-        recorder = getattr(self, 'local_recorder', None)
-        if recorder is not None and getattr(recorder, 'is_running', False):
-            return True
-        try:
-            if not self.current_server() or not self._server_requests_ready():
-                return False
-            entries = self.get_backend().list_dvr_entries()
-        except Exception:
-            return bool(getattr(self, 'is_recording', False))
-        return any(entry.category() == 'recording' for entry in entries)
+        return self._status_state.has_active_recordings
 
     def sync_recording_indicator(self):
-        """Show REC while a server recording or the local job is running."""
-        if self._recording_in_progress():
-            if not self.is_recording:
-                self.start_recording_indicator()
-            return
-        if self.is_recording:
-            self.stop_recording_indicator()
+        """Refresh authoritative DVR state after a user action."""
+        self._refresh_tasks()
 
     def _enter_fullscreen(self):
         handles = self._splitter_handles()
@@ -3170,7 +3222,7 @@ class TVHeadendClient(QMainWindow):
             current_row = self.channel_list.currentRow()
             if current_row < 0:
                 print("Debug: No channel selected")
-                self.statusbar.showMessage("Please select a channel to play")
+                self.show_status("Please select a channel to play")
                 return
             
             # Get channel data directly from the table
@@ -3371,14 +3423,14 @@ class TVHeadendClient(QMainWindow):
             self.mute_btn.setChecked(True)
             describe(self.mute_btn, "Unmute", "Turn sound on. Keyboard: M. The button stays pressed while muted.")
             self.mute_btn.setToolTip("Unmute (M)")
-            self.statusbar.showMessage("Muted")
+            self.show_status("Muted")
             print("Debug: Audio muted")
         else:  # Switching to unmuted
             self.mute_btn.setIcon(QIcon(f"{self.icons_dir}/unmute.svg"))
             self.mute_btn.setChecked(False)
             describe(self.mute_btn, "Mute", "Turn sound off. Keyboard: M. The button stays pressed while muted.")
             self.mute_btn.setToolTip("Mute (M)")
-            self.statusbar.showMessage("Sound on")
+            self.show_status("Sound on")
             print("Debug: Audio unmuted")
 
     def show_about(self):
@@ -3472,12 +3524,12 @@ class TVHeadendClient(QMainWindow):
             targets = recordings_to_stop(entries, channel)
             if not targets:
                 if len(running) > 1 and channel is not None:
-                    self.statusbar.showMessage(f"No recording in progress for {channel.name}")
+                    self.show_status(f"No recording in progress for {channel.name}")
                 elif len(running) > 1:
-                    self.statusbar.showMessage("Select a channel to stop its recording")
+                    self.show_status("Select a channel to stop its recording")
                 else:
                     print("Debug: No active recordings found")
-                    self.statusbar.showMessage("No active recordings to stop")
+                    self.show_status("No active recordings to stop")
                     self.sync_recording_indicator()
                 return
             for entry in targets:
@@ -3487,60 +3539,27 @@ class TVHeadendClient(QMainWindow):
                 self.sync_recording_indicator()
             channel_name = targets[0].channel_name or (channel.name if channel else 'channel')
             if len(targets) == 1:
-                self.statusbar.showMessage(f"Stopped recording for {channel_name}")
+                self.show_status(f"Stopped recording for {channel_name}")
             else:
-                self.statusbar.showMessage(f"Stopped {len(targets)} recordings for {channel_name}")
+                self.show_status(f"Stopped {len(targets)} recordings for {channel_name}")
         except Exception as e:
             print(f"Debug: Error stopping recordings: {str(e)}")
             print(f"Debug: Error type: {type(e)}")
             import traceback
             print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage(f"Error stopping recordings: {str(e)}")
+            self.show_status(f"Error stopping recordings: {str(e)}")
             if len(running) <= 1:
                 self.sync_recording_indicator()
         finally:
             self._refresh_tasks()
 
     def start_recording_indicator(self):
-        """Start the recording indicator with smooth pulsing animation"""
-        print("Debug: Starting recording indicator")
-        self.is_recording = True
-        self.recording_indicator.setText("REC")
-        self.recording_indicator.setVisible(True)
-        describe(self.recording_indicator, "Recording in progress", "A recording is in progress")
-        self.recording_indicator.setProperty("recording", True)
-        self.recording_indicator.style().polish(self.recording_indicator)
-        
-        # Create opacity effect
-        self.opacity_effect = QGraphicsOpacityEffect(self.recording_indicator)
-        self.recording_indicator.setGraphicsEffect(self.opacity_effect)
-        
-        # Create and configure the animation
-        self.recording_animation = QPropertyAnimation(self.opacity_effect, b"opacity")
-        self.recording_animation.setDuration(1000)  # 1 second per pulse
-        self.recording_animation.setStartValue(1.0)
-        self.recording_animation.setEndValue(0.3)
-        self.recording_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
-        self.recording_animation.setLoopCount(-1)  # Infinite loop
-        
-        # Start the animation
-        self.recording_animation.start()
+        """Update from current local state; server count comes from Tasks."""
+        self.update_recording_activity(refresh_server=False)
 
     def stop_recording_indicator(self):
-        """Stop the recording indicator and its animation"""
-        print("Debug: Stopping recording indicator")
-        self.is_recording = False
-        if self.recording_animation:
-            self.recording_animation.stop()
-            self.recording_animation = None
-        if hasattr(self, 'opacity_effect'):
-            self.recording_indicator.setGraphicsEffect(None)
-            self.opacity_effect = None
-        self.recording_indicator.setText("")
-        self.recording_indicator.setVisible(False)
-        describe(self.recording_indicator, "Not recording", "Shown only while a recording is in progress")
-        self.recording_indicator.setProperty("recording", False)
-        self.recording_indicator.style().polish(self.recording_indicator)
+        """Refresh after stopping; do not assume every DVR entry stopped."""
+        self._refresh_tasks()
 
     def show_dvr_status(self):
         """Show DVR status dialog"""
@@ -3551,15 +3570,16 @@ class TVHeadendClient(QMainWindow):
         except Exception as e:
             print(f"Debug: Error showing DVR status: {str(e)}")
             print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage("Error showing DVR status")
+            self.show_status("Error showing DVR status")
 
     def play_url(self, url):
         """Play media from URL"""
         try:
             self._playback_channel = None
+            self._refresh_playback_status()
             self._show_playback_wait()
             self.player.play(url)
-            self.statusbar.showMessage("Starting playback")
+            self.show_status("Starting playback")
         except Exception as e:
             if self._awaiting_playback:
                 self._awaiting_playback = False
@@ -3578,7 +3598,7 @@ class TVHeadendClient(QMainWindow):
                 channel = selected if selected and selected.name == channel else None
             if not channel:
                 print("Debug: No channel selected for recording")
-                self.statusbar.showMessage("Please select a channel to record")
+                self.show_status("Please select a channel to record")
                 return
 
             channel_name = channel.name
@@ -3612,7 +3632,7 @@ class TVHeadendClient(QMainWindow):
             self.recording_monitor = QTimer()
             self.recording_monitor.timeout.connect(self.check_recording_status)
             self.recording_monitor.start(2000)
-            self.statusbar.showMessage(f"Local recording started: {file_path}")
+            self.show_status(f"Local recording started: {file_path}")
             self.start_recording_indicator()
             self._refresh_tasks(server=False)
             
@@ -3621,7 +3641,7 @@ class TVHeadendClient(QMainWindow):
             print(f"Debug: Error type: {type(e)}")
             import traceback
             print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.statusbar.showMessage(f"Local recording error: {str(e)}")
+            self.show_status(f"Local recording error: {str(e)}")
 
     def check_recording_status(self):
         """Check if the recording is actually working"""
@@ -3645,7 +3665,7 @@ class TVHeadendClient(QMainWindow):
                 # would discard the file already being written.
                 if not getattr(self, '_recording_stall_noted', False):
                     self._recording_stall_noted = True
-                    self.statusbar.showMessage("Local recording stalled")
+                    self.show_status("Local recording stalled")
                 return
             self._recording_stall_noted = False
         except Exception as e:
@@ -3659,11 +3679,11 @@ class TVHeadendClient(QMainWindow):
                 self.recording_monitor.stop()
                 self.recording_monitor = None
             self.local_recorder.stop()
-            self.statusbar.showMessage("Local recording stopped")
+            self.show_status("Local recording stopped")
             self.sync_recording_indicator()
         except Exception as e:
             print(f"Debug: Error stopping local recording: {str(e)}")
-            self.statusbar.showMessage(f"Error stopping local recording: {str(e)}")
+            self.show_status(f"Error stopping local recording: {str(e)}")
             self.sync_recording_indicator()
         self._refresh_tasks()
 
@@ -3734,7 +3754,7 @@ class TVHeadendClient(QMainWindow):
 
     def _on_builtin_failed(self, message):
         print(f"Debug: Built-in server failed: {message}")
-        self.statusbar.showMessage(message)
+        self.show_status(message)
         self._sync_builtin_controls()
 
     def _set_builtin_autostart(self, checked):
@@ -3758,12 +3778,12 @@ class TVHeadendClient(QMainWindow):
     def open_builtin_web(self):
         supervisor = getattr(self, 'builtin', None)
         if supervisor is None or not supervisor.is_running():
-            self.statusbar.showMessage("The built-in server is not running.")
+            self.show_status("The built-in server is not running.")
             return
         # The page asks for a login. Hand over the password without putting it in the URL.
         QApplication.clipboard().setText(supervisor.password)
         QDesktopServices.openUrl(QUrl(f"http://127.0.0.1:{supervisor.http_port}/"))
-        self.statusbar.showMessage(
+        self.show_status(
             f"Log in as \"{supervisor.username}\". The password is on the clipboard."
         )
 
@@ -3825,7 +3845,7 @@ class TVHeadendClient(QMainWindow):
                 selected = self.selected_channel()
                 channel = selected if selected and selected.name == channel else None
             if not channel:
-                self.statusbar.showMessage("Channel not found")
+                self.show_status("Channel not found")
                 return
             print(f"Debug: Fetching EPG for channel: {channel.name}")
             events = self.get_backend().get_epg(channel, limit=24)
@@ -3833,10 +3853,10 @@ class TVHeadendClient(QMainWindow):
                 dialog = EPGDialog(channel, events, self.get_backend(), self)
                 dialog.show()
             else:
-                self.statusbar.showMessage("No EPG data available")
+                self.show_status("No EPG data available")
         except Exception as e:
             print(f"Debug: Error fetching EPG: {str(e)}")
-            self.statusbar.showMessage(f"Error fetching EPG: {str(e)}")
+            self.show_status(f"Error fetching EPG: {str(e)}")
 
     def play_channel_from_table(self, item):
         """Play channel from table selection"""
@@ -3849,10 +3869,10 @@ class TVHeadendClient(QMainWindow):
         """Play channel using channel data"""
         try:
             if channel_data is None:
-                self.statusbar.showMessage("Please select a channel to play")
+                self.show_status("Please select a channel to play")
                 return
             if not self._server_requests_ready():
-                self.statusbar.showMessage("Built-in server is not running yet")
+                self.show_status("Built-in server is not running yet")
                 return
             if isinstance(channel_data, Channel):
                 channel = channel_data
@@ -3863,8 +3883,9 @@ class TVHeadendClient(QMainWindow):
             print(f"Debug: Starting playback for {channel.name}")
             self._show_playback_wait()
             self._mark_playing_channel(scroll=True)
+            self._refresh_playback_status()
             self.player.play(stream_url)
-            self.statusbar.showMessage(f"Starting: {channel.name}")
+            self.show_status(f"Starting: {channel.name}")
         except Exception as e:
             print(f"Debug: Error in play_channel: {str(e)}")
             if self._awaiting_playback:
@@ -3874,7 +3895,8 @@ class TVHeadendClient(QMainWindow):
                 self._protect_video_surface(False)
             self._playback_channel = None
             self._mark_playing_channel()
-            self.statusbar.showMessage(f"Playback error: {str(e)}")
+            self._refresh_playback_status()
+            self.show_status(f"Playback error: {str(e)}")
 
     def show_server_status(self):
         """Show server status dialog"""
@@ -3883,7 +3905,7 @@ class TVHeadendClient(QMainWindow):
             dialog.show()
         except Exception as e:
             print(f"Debug: Error showing server status: {str(e)}")
-            self.statusbar.showMessage("Error showing server status")
+            self.show_status("Error showing server status")
 
     def filter_channels(self, search_text):
         """Filter channel list based on search text"""
