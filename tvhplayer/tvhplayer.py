@@ -844,6 +844,8 @@ class TasksPanel(QFrame):
         host = self._host
         if host is not None and hasattr(host, "_mark_playing_channel"):
             host._mark_playing_channel()
+            for dialog in host.findChildren(EPGDialog):
+                dialog.refresh_recording_buttons()
 
     def _render_tasks(self, server=False):
         tasks = list(self._server_tasks)
@@ -1371,6 +1373,8 @@ class ServerDialog(QDialog):
         btn_layout.addWidget(open_web_btn)
         layout.addLayout(btn_layout)
         
+        self.refresh_recording_buttons()
+
         # Close button
         close_btn = QPushButton("&Close")
         close_btn.clicked.connect(self.accept)
@@ -4073,6 +4077,7 @@ class EPGDialog(QDialog):
         self.setWindowTitle(f"EPG Guide - {self.channel_name}")
         self.setModal(False)
         self.resize(800, 500)
+        self._record_buttons = []
         self.setup_ui(epg_data)
         
     def setup_ui(self, epg_data):
@@ -4113,6 +4118,7 @@ class EPGDialog(QDialog):
             record_btn.setToolTip("Schedule Recording")
             describe(record_btn, f"Schedule recording for {title}", description)
             record_btn.clicked.connect(lambda checked, e=entry: self.schedule_recording(e))
+            self._record_buttons.append((entry, record_btn))
             item_layout.addWidget(record_btn)
             list_item = QListWidgetItem(self.epg_list)
             list_item.setSizeHint(item_widget.sizeHint())
@@ -4126,6 +4132,53 @@ class EPGDialog(QDialog):
         close_btn.setAutoDefault(True)
         layout.addWidget(close_btn)
         
+    def refresh_recording_buttons(self):
+        """Mark existing server schedules without issuing any DVR HTTP calls."""
+        parent = self.parent()
+        pane = getattr(parent, "tasks_pane", None)
+        entries = pane._server_entries if pane is not None and pane._last_server_ok else []
+        for event, button in self._record_buttons:
+            scheduled = False
+            for job in entries:
+                if job.category() not in ("upcoming", "recording"):
+                    continue
+                if not job.matches_channel(self.channel):
+                    continue
+                raw = job.raw or {}
+                event_id = getattr(event, "event_id", None)
+                job_event = raw.get("broadcast") or raw.get("eventId")
+                linked = bool(event_id is not None and job_event is not None
+                              and str(event_id) == str(job_event))
+                # Time/title fallback for manually scheduled entries with no
+                # broadcast reference; require both to avoid false matches.
+                same_programme = (
+                    (job.title or "").strip().casefold() ==
+                    (event.title or "").strip().casefold()
+                    and abs((job.start or 0) - event.start) <= 120
+                )
+                if linked or same_programme:
+                    scheduled = True
+                    break
+            if scheduled:
+                button.setText("Scheduled")
+                button.setStyleSheet(
+                    "QPushButton { background-color: #2B7650; color: white;"
+                    " border: 1px solid #2B7650; border-radius: 16px;"
+                    " padding: 0 10px; font-weight: bold; }"
+                )
+                button.setToolTip("Recording already scheduled")
+                button.setAccessibleName(f"Recording scheduled for {event.title}")
+                button.setEnabled(False)
+            else:
+                button.setText("Rec")
+                button.setStyleSheet(button_stylesheet(
+                    "border: 1px solid palette(mid); border-radius: 16px; padding: 0px;",
+                    radius=16,
+                ))
+                button.setToolTip("Schedule Recording")
+                button.setAccessibleName(f"Schedule recording for {event.title}")
+                button.setEnabled(True)
+
     def schedule_recording(self, entry):
         """Schedule a recording for the selected EPG entry"""
         try:
@@ -4147,6 +4200,20 @@ class EPGDialog(QDialog):
             parent = self.parent()
             if parent is not None and hasattr(parent, '_refresh_tasks'):
                 parent._refresh_tasks()
+            # Visually acknowledge an accepted scheduling request immediately;
+            # the next authoritative Tasks snapshot reconciles all buttons.
+            for event, button in self._record_buttons:
+                if event is entry:
+                    button.setText("Scheduled")
+                    button.setStyleSheet(
+                        "QPushButton { background-color: #2B7650; color: white;"
+                        " border: 1px solid #2B7650; border-radius: 16px;"
+                        " padding: 0 10px; font-weight: bold; }"
+                    )
+                    button.setToolTip("Recording scheduled")
+                    button.setAccessibleName(f"Recording scheduled for {entry.title}")
+                    button.setEnabled(False)
+                    break
         except Exception as e:
             print(f"Debug: Error scheduling recording: {str(e)}")
             QMessageBox.critical(
