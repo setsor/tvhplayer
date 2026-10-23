@@ -37,15 +37,27 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn('gate.submit(host.get_backend(), "read"', refresh)
         self.assertNotIn(".list_dvr_entries(", refresh)
 
-    def test_main_stop_only_one_entry(self):
+    def test_main_stop_only_on_playing_channel(self):
         stop = method("TVHeadendClient", "stop_recording")
-        self.assertIn("pane.selected_task()", stop)
-        self.assertIn('uuid = selected["entry"].uuid', stop)
-        self.assertIn("len(running) == 1", stop)
-        self.assertIn("Select one active recording in Tasks", stop)
-        self.assertIn("pane.stop_server_entry(entry)", stop)
+        self.assertIn("self._playing_channel()", stop)
+        self.assertIn("entry.matches_channel(channel)", stop)
+        self.assertIn("len(matching) != 1", stop)
+        self.assertIn("pane.stop_server_entry(matching[0])", stop)
+        self.assertNotIn("pane.selected_task()", stop)
         self.assertNotIn("gate.submit(", stop)
-        self.assertNotIn(".stop_dvr_entry(", stop)
+
+    def test_start_also_uses_playing_channel(self):
+        start = method("TVHeadendClient", "start_recording")
+        self.assertIn("channel = self._playing_channel()", start)
+        self.assertNotIn("channel = self.selected_channel()", start)
+
+    def test_channel_status_combines_playback_and_rec(self):
+        row = method("TVHeadendClient", "_set_channel_row_playing")
+        self.assertIn('"Play/REC"', row)
+        self.assertIn('"REC"', row)
+        self.assertIn("job.matches_channel(channel)", row)
+        refresh = method("TasksPanel", "_server_read_done")
+        self.assertIn("host._mark_playing_channel()", refresh)
 
     def test_unknown_stop_tracks_exact_uuid(self):
         completed = method("_DvrGate", "_completed")
