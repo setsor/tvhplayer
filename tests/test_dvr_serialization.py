@@ -75,6 +75,18 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn("gate.uncertain = False", completed)
         self.assertNotIn('stop_dvr_entry(', completed)
 
+    def test_epg_scheduled_rec_button(self):
+        render = method("EPGDialog", "refresh_recording_buttons")
+        self.assertIn('job.category() not in ("upcoming", "recording")', render)
+        self.assertIn("job.matches_channel(self.channel)", render)
+        self.assertIn('button.setText("Scheduled")', render)
+        self.assertIn("button.setEnabled(False)", render)
+        self.assertIn('button.setText("Rec")', render)
+        self.assertIn("button.setEnabled(True)", render)
+        self.assertNotIn("list_dvr_entries(", render)
+        refresh = method("TasksPanel", "_server_read_done")
+        self.assertIn("dialog.refresh_recording_buttons()", refresh)
+
     def test_dialog_stop_is_serialized(self):
         stop = method("DVRStatusDialog", "stop_selected")
         self.assertIn('gate.submit(self.backend, "stop"', stop)
