@@ -59,6 +59,12 @@ jobs:
           set -euo pipefail
           python -m unittest discover -s tests -p 'test_macos_legacy_migration.py' -v
 
+      - name: Verify platform selection (Cocoa on macOS, xcb only on Linux)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_qt_platform.py' -v
+
       - name: Download verified VLC 3.0.24 (Intel)
         shell: bash
         run: |
@@ -85,7 +91,28 @@ jobs:
           file "$APP/Contents/MacOS/TVHplayer-MacOS-Intel"
           test ! -e "$APP/Contents/Frameworks/vlc/plugins/plugins.dat"
           test -f "$APP/Contents/Frameworks/icons/play.svg"
+          # The user-reported Ventura crash was Qt's fatal "xcb" platform
+          # initialization. Verify Cocoa is bundled and actually loads.
+          test -n "$(find "$APP/Contents" -name libqcocoa.dylib -print -quit)"
           codesign --verify --deep --verbose=2 "$APP"
+          QT_SMOKE_OUTPUT="$(env -u QT_QPA_PLATFORM "$APP/Contents/MacOS/TVHplayer-MacOS-Intel" --tvhplayer-qt-smoke-test 2>&1)"
+          printf '%s\n' "$QT_SMOKE_OUTPUT"
+          grep -q '^Qt platform: cocoa
+          bash macos/package-dmg.sh
+          test -s macos/dist/TVHplayer-MacOS-Intel.dmg
+          test -s macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
+
+      - name: Upload app archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: TVHplayer-MacOS-Intel-${{ github.sha }}
+          path: |
+            macos/dist/TVHplayer-MacOS-Intel.zip
+            macos/dist/TVHplayer-MacOS-Intel.dmg
+            macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+ <<< "$QT_SMOKE_OUTPUT"
           ditto -c -k --sequesterRsrc --keepParent "$APP" macos/dist/TVHplayer-MacOS-Intel.zip
           bash macos/package-dmg.sh
           test -s macos/dist/TVHplayer-MacOS-Intel.dmg
