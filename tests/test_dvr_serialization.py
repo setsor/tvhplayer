@@ -45,6 +45,20 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn('gate.submit(self.get_backend(), "stop"', stop)
         self.assertNotIn(".stop_dvr_entry(", stop)
 
+    def test_unknown_stop_tracks_exact_uuid(self):
+        completed = method("_DvrGate", "_completed")
+        self.assertIn("self.uncertain_uuid =", completed)
+        submit = method("_DvrGate", "submit")
+        self.assertIn('getattr(entry, "uuid", None)', submit)
+
+    def test_fresh_snapshot_resolves_only_finished_uuid(self):
+        completed = method("TasksPanel", "_server_read_done")
+        self.assertIn('item.uuid == gate.uncertain_uuid', completed)
+        self.assertIn('item.category() == "recording"', completed)
+        self.assertIn("if not still_recording:", completed)
+        self.assertIn("gate.uncertain = False", completed)
+        self.assertNotIn('stop_dvr_entry(', completed)
+
     def test_dialog_stop_is_serialized(self):
         stop = method("DVRStatusDialog", "stop_selected")
         self.assertIn('gate.submit(self.backend, "stop"', stop)
