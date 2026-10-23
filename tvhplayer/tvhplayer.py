@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton,
     QAbstractItemView, QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox,
 )
-from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QUrl
+from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QUrl, QObject, QRunnable, QThreadPool, pyqtSignal
 from PyQt6.QtGui import QIcon, QAction, QShortcut, QPainter, QPen, QColor, QPixmap, QDesktopServices
 import json
 # Replace this line:
@@ -219,6 +219,65 @@ def fit_table_columns(table, stretch_columns):
     table.setTextElideMode(Qt.TextElideMode.ElideRight)
 
 
+class _DvrJob(QRunnable):
+    def __init__(self, gate, backend, operation, entry, sequence):
+        super().__init__()
+        self.gate, self.backend, self.operation = gate, backend, operation
+        self.entry, self.sequence = entry, sequence
+
+    def run(self):
+        try:
+            if self.operation == "read":
+                result = self.backend.list_dvr_entries()
+            elif self.operation == "stop":
+                result = self.backend.stop_dvr_entry(self.entry)
+            elif self.operation == "cancel":
+                result = self.backend.cancel_dvr_entry(self.entry)
+            else:
+                raise ValueError("Unsupported DVR operation")
+            self.gate.finished.emit(self.sequence, result, None)
+        except Exception as exc:
+            self.gate.finished.emit(self.sequence, None, str(exc))
+
+
+class _DvrGate(QObject):
+    """Single in-flight DVR request. Unknown writes are never retried."""
+
+    finished = pyqtSignal(int, object, object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.pool = QThreadPool(self)
+        self.pool.setMaxThreadCount(1)
+        self.busy = False
+        self.uncertain = False
+        self._sequence = 0
+        self._callback = None
+        self._operation = None
+        self.finished.connect(self._completed)
+
+    def submit(self, backend, operation, callback, entry=None):
+        if self.busy or (self.uncertain and operation != "read"):
+            return False
+        self.busy = True
+        self._sequence += 1
+        self._callback = callback
+        self._operation = operation
+        self.pool.start(_DvrJob(self, backend, operation, entry, self._sequence))
+        return True
+
+    def _completed(self, sequence, result, error):
+        if sequence != self._sequence:
+            return
+        callback = self._callback
+        self._callback = None
+        self.busy = False
+        if error and self._operation in ("stop", "cancel"):
+            self.uncertain = True
+        if callback is not None:
+            callback(result, error)
+
+
 class DVRStatusDialog(QDialog):
     def __init__(self, backend, parent=None):
         super().__init__(parent)
@@ -334,19 +393,20 @@ class DVRStatusDialog(QDialog):
             return
         title = entry.title or 'recording'
         channel = entry.channel_name or 'channel'
-        try:
-            print(f"Debug: Stopping DVR entry: {title} ({entry.uuid}) on {channel}")
-            self.backend.stop_dvr_entry(entry)
-            announce_label(
-                self.action_label,
-                f"Stopped {title} on {channel}. The recorded file is kept.",
-            )
-            self.update_status()
+        parent = self.parent()
+        gate = getattr(parent, "_dvr_gate", None)
+        if gate is None or gate.uncertain:
+            announce_label(self.action_label, "Stop unavailable: reconnect to verify DVR state.")
+            return
+        def done(_result, error):
+            if error:
+                announce_label(self.action_label, "Stop result UNKNOWN. Check TVHeadend before reconnecting.")
+            else:
+                announce_label(self.action_label, f"Stop accepted for {title} on {channel}.")
             self._sync_parent_indicator()
-        except Exception as e:
-            print(f"Debug: Error stopping DVR entry: {str(e)}")
-            print(f"Debug: Traceback: {traceback.format_exc()}")
-            QMessageBox.critical(self, "Error", f"Failed to stop recording: {str(e)}")
+            self.update_status()
+        if gate.submit(self.backend, "stop", done, entry):
+            self.stop_btn.setEnabled(False)
 
     def _sync_parent_indicator(self):
         """Let the parent refresh all active DVR entries, not guess the count."""
@@ -388,7 +448,9 @@ class DVRStatusDialog(QDialog):
     def update_status(self):
         selected_key = self._entry_key(self._selected_entry())
         try:
-            entries = self.backend.list_dvr_entries()
+            parent = self.parent()
+            pane = getattr(parent, 'tasks_pane', None)
+            entries = list(pane._server_entries) if pane is not None else []
             upcoming = []
             finished = []
             failed = []
@@ -614,6 +676,8 @@ class TasksPanel(QFrame):
         # The splitter reparents this pane, so keep the window that owns the backend.
         self._host = parent
         self._server_tasks = []
+        self._server_entries = []
+        self._last_server_ok = False
         self._tasks = []
         self._error_text = ""
         self._table_description = None
@@ -734,19 +798,35 @@ class TasksPanel(QFrame):
     def clear_server_tasks(self):
         """Drop cached server rows, for example after the server changes."""
         self._server_tasks = []
+        self._server_entries = []
+        self._last_server_ok = False
 
     def refresh(self, server=True):
         """Refresh Tasks and the main REC badge from the same server response."""
-        server_ok = None
         if server:
-            fetched, error = self._fetch_server_tasks()
-            server_ok = error is None
-            if server_ok:
-                self._server_tasks = fetched
-                self._set_error("")
-            else:
-                print(f"Debug: Error refreshing tasks: {error}")
-                self._set_error("Couldn't refresh server recordings")
+            host = self._host
+            gate = getattr(host, "_dvr_gate", None)
+            if gate is not None and not gate.busy:
+                try:
+                    if host.current_server() and host._server_requests_ready():
+                        gate.submit(host.get_backend(), "read", self._server_read_done)
+                    else:
+                        self._last_server_ok = False
+                except Exception as exc:
+                    self._server_read_done(None, str(exc))
+        self._render_tasks(server=False)
+
+    def _server_read_done(self, entries, error):
+        self._last_server_ok = error is None
+        if error is None:
+            self._server_entries = entries or []
+            self._server_tasks = self._tasks_from_entries(self._server_entries)
+            self._set_error("")
+        else:
+            self._set_error("Couldn't refresh server recordings")
+        self._render_tasks(server=True)
+
+    def _render_tasks(self, server=False):
         tasks = list(self._server_tasks)
         local = self._local_task()
         if local is not None:
@@ -758,7 +838,7 @@ class TasksPanel(QFrame):
             if server:
                 # A failed fetch is UNKNOWN, not REC 0; keep Tasks cached.
                 host.update_recording_activity(
-                    self._server_tasks if server_ok else None
+                    self._server_tasks if self._last_server_ok else None
                 )
             else:
                 host.update_recording_activity(refresh_server=False)
@@ -780,23 +860,23 @@ class TasksPanel(QFrame):
             return
         title = task.get('title') or 'recording'
         channel = task.get('channel') or 'channel'
-        try:
-            if task['kind'] == 'Local':
-                host.stop_local_recording()
-            elif task['bucket'] == 'recording':
-                host.get_backend().stop_dvr_entry(task['entry'])
-                self._tell(host, f"Stopped {title} on {channel}. The recorded file is kept.")
-                if hasattr(host, 'sync_recording_indicator'):
-                    host.sync_recording_indicator()
-            else:
-                host.get_backend().cancel_dvr_entry(task['entry'])
-                self._tell(host, f"Cancelled {title} on {channel}.")
-        except Exception as exc:
-            print(f"Debug: Error updating task: {exc}")
-            print(f"Debug: Traceback: {traceback.format_exc()}")
-            QMessageBox.critical(self, "Error", f"Failed to update the task: {exc}")
+        if task['kind'] == 'Local':
+            host.stop_local_recording()
+            self.refresh(server=False)
             return
-        self.refresh()
+        gate = getattr(host, "_dvr_gate", None)
+        if gate is None or gate.uncertain or not self._last_server_ok:
+            self._tell(host, "DVR state uncertain. Reconnect and verify before changing recordings.")
+            return
+        operation = "stop" if task['bucket'] == 'recording' else "cancel"
+        def done(_result, error):
+            if error:
+                self._tell(host, "DVR action result UNKNOWN. Check TVHeadend before reconnecting.")
+            else:
+                self._tell(host, f"{'Stop accepted' if operation == 'stop' else 'Cancel accepted'} for {title} on {channel}.")
+            self.refresh()
+        if gate.submit(host.get_backend(), operation, done, task['entry']):
+            self.action_btn.setEnabled(False)
 
     def reveal_selected(self):
         """Show the selected local recording in the file manager."""
@@ -1045,6 +1125,11 @@ class TasksPanel(QFrame):
 
     def _update_action(self):
         task = self.selected_task()
+        gate = getattr(self._host, '_dvr_gate', None)
+        if gate is not None and (gate.busy or gate.uncertain or not self._last_server_ok):
+            self._set_action('Stop', 'DVR operation unavailable or state uncertain.', False)
+            self._set_reveal(self._can_reveal(task))
+            return
         self._set_reveal(self._can_reveal(task))
         if task is None:
             self._set_action(
@@ -2326,6 +2411,7 @@ class TVHeadendClient(QMainWindow):
         self.right_layout.addWidget(self.controls_bar)
         
         # Add panes to splitter instead of layout
+        self._dvr_gate = _DvrGate(self)
         self.tasks_pane = TasksPanel(self)
         self.splitter.addWidget(self.left_pane)
         self.splitter.addWidget(self.right_pane)
@@ -3510,49 +3596,25 @@ class TVHeadendClient(QMainWindow):
             self.stop_recording()
 
     def stop_recording(self):
-        """Stop the running recording for the active channel.
-
-        A lone running job is stopped even when no channel is highlighted.
-        When several jobs are running, only the active channel is stopped.
-        """
-        print("Debug: Attempting to stop recordings")
-        running = []
-        try:
-            backend = self.get_backend()
-            entries = backend.list_dvr_entries()
-            running = [entry for entry in entries if entry.category() == 'recording']
-            channel = self.active_channel()
-            targets = recordings_to_stop(entries, channel)
-            if not targets:
-                if len(running) > 1 and channel is not None:
-                    self.show_status(f"No recording in progress for {channel.name}")
-                elif len(running) > 1:
-                    self.show_status("Select a channel to stop its recording")
-                else:
-                    print("Debug: No active recordings found")
-                    self.show_status("No active recordings to stop")
-                    self.sync_recording_indicator()
-                return
-            for entry in targets:
-                print(f"Debug: Stopping recording: {entry.title} ({entry.uuid}) on {entry.channel_name}")
-                backend.stop_dvr_entry(entry)
-            if len(targets) >= len(running):
-                self.sync_recording_indicator()
-            channel_name = targets[0].channel_name or (channel.name if channel else 'channel')
-            if len(targets) == 1:
-                self.show_status(f"Stopped recording for {channel_name}")
+        """Only a single active-channel DVR entry can be stopped."""
+        gate = self._dvr_gate
+        pane = self.tasks_pane
+        if gate.busy or gate.uncertain or not pane._last_server_ok:
+            self.show_status("DVR busy or state uncertain. Verify TVHeadend before retrying.")
+            return
+        targets = recordings_to_stop(pane._server_entries, self.active_channel())
+        if len(targets) != 1:
+            self.show_status("Select exactly one active recording in Tasks to stop.")
+            return
+        entry = targets[0]
+        def done(_result, error):
+            if error:
+                self.show_status("Stop result UNKNOWN. Verify TVHeadend before reconnecting.")
             else:
-                self.show_status(f"Stopped {len(targets)} recordings for {channel_name}")
-        except Exception as e:
-            print(f"Debug: Error stopping recordings: {str(e)}")
-            print(f"Debug: Error type: {type(e)}")
-            import traceback
-            print(f"Debug: Traceback: {traceback.format_exc()}")
-            self.show_status(f"Error stopping recordings: {str(e)}")
-            if len(running) <= 1:
-                self.sync_recording_indicator()
-        finally:
+                self.show_status(f"Stop accepted for {entry.channel_name or 'channel'}")
             self._refresh_tasks()
+        if not gate.submit(self.get_backend(), "stop", done, entry):
+            self.show_status("DVR request already in progress")
 
     def start_recording_indicator(self):
         """Update from current local state; server count comes from Tasks."""
