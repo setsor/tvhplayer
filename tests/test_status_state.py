@@ -102,9 +102,9 @@ class StatusWiringTests(unittest.TestCase):
         self.assertNotIn("self.status_label", expire)
 
     def test_dvr_refresh_updates_badge_without_new_http_request(self):
-        method = gui_method("TasksPanel", "refresh")
+        method = gui_method("TasksPanel", "_render_tasks")
         self.assertIn("host.update_recording_activity(", method)
-        self.assertIn("self._server_tasks if server_ok else None", method)
+        self.assertIn("self._server_tasks if self._last_server_ok else None", method)
         self.assertIn("refresh_server=False", method)
         badge = gui_method("TVHeadendClient", "update_recording_activity")
         self.assertIn("self._status_state.set_server_tasks(", badge)
