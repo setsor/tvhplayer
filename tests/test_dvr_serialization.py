@@ -37,12 +37,17 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn('gate.submit(host.get_backend(), "read"', refresh)
         self.assertNotIn(".list_dvr_entries(", refresh)
 
+    def test_instant_type_is_not_scheduled(self):
+        matcher = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == "_scheduled_matches_event")
+        source = ast.get_source_segment(SOURCE, matcher)
+        self.assertIn("_instant_dvr(job)", source)
+
     def test_main_stop_only_on_playing_channel(self):
         stop = method("TVHeadendClient", "stop_recording")
         self.assertIn("self._playing_channel()", stop)
         self.assertIn("entry.matches_channel(channel)", stop)
-        self.assertIn("len(matching) != 1", stop)
-        self.assertIn("pane.stop_server_entry(matching[0])", stop)
+        self.assertIn("len(instant) != 1", stop)
+        self.assertIn("pane.stop_server_entry(instant[0])", stop)
         self.assertNotIn("pane.selected_task()", stop)
         self.assertNotIn("gate.submit(", stop)
 
@@ -53,8 +58,9 @@ class DvrIsolationTests(unittest.TestCase):
 
     def test_channel_status_combines_playback_and_rec(self):
         row = method("TVHeadendClient", "_set_channel_row_playing")
-        self.assertIn('"Playing / " + rec_label', row)
-        self.assertIn('"REC " + ",".join(', row)
+        self.assertIn("_recording_badge_pixmap(badges)", row)
+        self.assertIn("status_item.setIcon(", row)
+        self.assertIn("_instant_dvr(job)", row)
         self.assertIn("job.matches_channel(channel)", row)
         self.assertIn("enumerate(active, start=1)", row)
         self.assertIn("job.start or 0", row)
@@ -77,8 +83,7 @@ class DvrIsolationTests(unittest.TestCase):
 
     def test_epg_scheduled_rec_button(self):
         render = method("EPGDialog", "refresh_recording_buttons")
-        self.assertIn('job.category() not in ("upcoming", "recording")', render)
-        self.assertIn("job.matches_channel(self.channel)", render)
+        self.assertIn("_scheduled_matches_event(job, event, self.channel)", render)
         self.assertIn('button.setText("Scheduled")', render)
         self.assertIn("button.setEnabled(False)", render)
         self.assertIn('button.setText("🔴 REC")', render)
