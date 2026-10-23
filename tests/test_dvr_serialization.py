@@ -53,9 +53,11 @@ class DvrIsolationTests(unittest.TestCase):
 
     def test_channel_status_combines_playback_and_rec(self):
         row = method("TVHeadendClient", "_set_channel_row_playing")
-        self.assertIn('"Play/REC"', row)
-        self.assertIn('"REC"', row)
+        self.assertIn('"Playing / " + rec_label', row)
+        self.assertIn('"REC " + ",".join(', row)
         self.assertIn("job.matches_channel(channel)", row)
+        self.assertIn("enumerate(active, start=1)", row)
+        self.assertIn("job.start or 0", row)
         refresh = method("TasksPanel", "_server_read_done")
         self.assertIn("host._mark_playing_channel()", refresh)
 
