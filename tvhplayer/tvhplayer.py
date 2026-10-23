@@ -4108,8 +4108,8 @@ class EPGDialog(QDialog):
             info_label.setToolTip(description)
             info_label.setAccessibleDescription(description)
             item_layout.addWidget(info_label, stretch=1)
-            record_btn = QPushButton("Rec")
-            record_btn.setMinimumWidth(48)
+            record_btn = QPushButton("🔴 REC")
+            record_btn.setMinimumWidth(76)
             record_btn.setFixedHeight(32)
             record_btn.setStyleSheet(button_stylesheet(
                 "border: 1px solid palette(mid); border-radius: 16px; padding: 0px;",
@@ -4170,7 +4170,7 @@ class EPGDialog(QDialog):
                 button.setAccessibleName(f"Recording scheduled for {event.title}")
                 button.setEnabled(False)
             else:
-                button.setText("Rec")
+                button.setText("🔴 REC")
                 button.setStyleSheet(button_stylesheet(
                     "border: 1px solid palette(mid); border-radius: 16px; padding: 0px;",
                     radius=16,
