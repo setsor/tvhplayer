@@ -81,7 +81,7 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn("job.matches_channel(self.channel)", render)
         self.assertIn('button.setText("Scheduled")', render)
         self.assertIn("button.setEnabled(False)", render)
-        self.assertIn('button.setText("Rec")', render)
+        self.assertIn('button.setText("🔴 REC")', render)
         self.assertIn("button.setEnabled(True)", render)
         self.assertNotIn("list_dvr_entries(", render)
         refresh = method("TasksPanel", "_server_read_done")
