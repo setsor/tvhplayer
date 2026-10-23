@@ -3596,24 +3596,53 @@ class TVHeadendClient(QMainWindow):
             self.stop_recording()
 
     def stop_recording(self):
-        """Only a single active-channel DVR entry can be stopped."""
+        """Stop the selected server DVR entry, never an inferred group.
+
+        If Tasks has no selected active server recording, allow Stop only
+        when exactly one server recording is active. Playback channel
+        selection alone must not determine which recording is stopped.
+        """
         gate = self._dvr_gate
         pane = self.tasks_pane
-        if gate.busy or gate.uncertain or not pane._last_server_ok:
-            self.show_status("DVR busy or state uncertain. Verify TVHeadend before retrying.")
+        if gate.uncertain or not pane._last_server_ok:
+            self.show_status("DVR state uncertain. Verify TVHeadend before stopping.")
             return
-        targets = recordings_to_stop(pane._server_entries, self.active_channel())
-        if len(targets) != 1:
-            self.show_status("Select exactly one active recording in Tasks to stop.")
+        if gate.busy:
+            self.show_status("DVR request in progress. Try Stop again after refresh.")
             return
-        entry = targets[0]
+
+        running = [
+            entry for entry in pane._server_entries
+            if entry.category() == 'recording'
+        ]
+        selected = pane.selected_task()
+        entry = None
+        if (selected is not None and selected.get('kind') == 'Server'
+                and selected.get('bucket') == 'recording'):
+            selected_uuid = selected['entry'].uuid
+            entry = next((job for job in running if job.uuid == selected_uuid), None)
+            if entry is None:
+                self.show_status("Selected recording is no longer active. Refresh Tasks.")
+                return
+        elif len(running) == 1:
+            entry = running[0]
+        elif not running:
+            self.show_status("No active server recording to stop.")
+            return
+        else:
+            self.show_status("Select one active recording in Tasks before pressing Stop.")
+            return
+
         def done(_result, error):
             if error:
                 self.show_status("Stop result UNKNOWN. Verify TVHeadend before reconnecting.")
             else:
                 self.show_status(f"Stop accepted for {entry.channel_name or 'channel'}")
             self._refresh_tasks()
-        if not gate.submit(self.get_backend(), "stop", done, entry):
+
+        if gate.submit(self.get_backend(), "stop", done, entry):
+            self.show_status(f"Stopping {entry.channel_name or 'recording'}...")
+        else:
             self.show_status("DVR request already in progress")
 
     def start_recording_indicator(self):
