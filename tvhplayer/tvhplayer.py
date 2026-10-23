@@ -681,6 +681,8 @@ class TasksPanel(QFrame):
         self._server_tasks = []
         self._server_entries = []
         self._last_server_ok = False
+        self._recording_seen = {}
+        self._next_recording_seen = 0
         self._tasks = []
         self._error_text = ""
         self._table_description = None
@@ -758,7 +760,7 @@ class TasksPanel(QFrame):
             "Recording, scheduled, or completed.",
         )
         status_header.setToolTip("Status")
-        self.task_table.setIconSize(QSize(16, 16))
+        self.task_table.setIconSize(QSize(25, 25))
         self.task_table.setItemDelegateForColumn(0, _StatusIconDelegate(self.task_table))
         fit_table_columns(self.task_table, (3, 6))
         self.task_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -823,6 +825,7 @@ class TasksPanel(QFrame):
         self._last_server_ok = error is None
         if error is None:
             self._server_entries = entries or []
+            self._sync_recording_order()
             self._server_tasks = self._tasks_from_entries(self._server_entries)
             self._set_error("")
             gate = getattr(self._host, "_dvr_gate", None)
@@ -846,6 +849,27 @@ class TasksPanel(QFrame):
             host._mark_playing_channel()
             for dialog in host.findChildren(EPGDialog):
                 dialog.refresh_recording_buttons()
+
+    def _sync_recording_order(self):
+        """Order by first observed active state, not EPG scheduled start time."""
+        active = [job for job in self._server_entries if job.category() == "recording"]
+        active_ids = {job.uuid for job in active}
+        self._recording_seen = {
+            uuid: serial for uuid, serial in self._recording_seen.items()
+            if uuid in active_ids
+        }
+        for job in active:
+            if job.uuid not in self._recording_seen:
+                self._next_recording_seen += 1
+                self._recording_seen[job.uuid] = self._next_recording_seen
+
+    def numbered_recordings(self):
+        """One numbering source for Tasks and the channel-list badges."""
+        active = (job for job in self._server_entries if job.category() == "recording")
+        ordered = sorted(active, key=lambda job: (
+            self._recording_seen.get(job.uuid, float("inf")), job.uuid or ""
+        ))
+        return {job.uuid: index for index, job in enumerate(ordered, 1)}
 
     def _render_tasks(self, server=False):
         tasks = list(self._server_tasks)
@@ -1146,10 +1170,21 @@ class TasksPanel(QFrame):
         )
         colors = row_emphasis('recording' if task['bucket'] == 'recording' else None)
         icon_item = QTableWidgetItem()
-        icon_item.setIcon(_task_status_icon(task['status']))
+        numbered = self.numbered_recordings() if self._last_server_ok else {}
+        entry = task.get("entry")
+        number = numbered.get(entry.uuid) if entry is not None else None
+        if task["bucket"] == "recording" and number is not None:
+            icon_item.setIcon(QIcon(_recording_badge_pixmap(
+                [(number, _instant_dvr(entry))]
+            )))
+            kind = "Instant" if _instant_dvr(entry) else "Scheduled"
+            icon_item.setToolTip(f"REC {number} — {kind}")
+            summary += f", REC {number}, {kind}"
+        else:
+            icon_item.setIcon(_task_status_icon(task['status']))
+            icon_item.setToolTip(task['status'])
         icon_item.setData(Qt.ItemDataRole.UserRole, task)
         set_item_access(icon_item, summary, task['detail'])
-        icon_item.setToolTip(task['status'])
         if colors is not None:
             icon_item.setBackground(colors[0])
             icon_item.setForeground(colors[1])
@@ -2735,17 +2770,14 @@ class TVHeadendClient(QMainWindow):
         # Number active server recordings in a deterministic order. The REC
         # indicator uses the same snapshot, so REC 1..N corresponds to REC N.
         active = (
-            sorted(
-                (job for job in pane._server_entries
-                 if job.category() == "recording"),
-                key=lambda job: (job.start or 0, job.uuid or ""),
-            )
+            [job for job in pane._server_entries if job.category() == "recording"]
             if pane is not None and pane._last_server_ok else []
         )
-        badges = [
-            (index, _instant_dvr(job)) for index, job in enumerate(active, start=1)
-            if channel is not None and job.matches_channel(channel)
-        ]
+        numbers = pane.numbered_recordings() if pane is not None and pane._last_server_ok else {}
+        badges = sorted([
+            (numbers[job.uuid], _instant_dvr(job)) for job in active
+            if job.uuid in numbers and channel is not None and job.matches_channel(channel)
+        ])
         recording = bool(badges)
         rec_label = ", ".join(
             f"{index} {'Instant' if instant else 'Scheduled'}"
