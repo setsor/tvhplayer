@@ -251,6 +251,7 @@ class _DvrGate(QObject):
         self.pool.setMaxThreadCount(1)
         self.busy = False
         self.uncertain = False
+        self.uncertain_uuid = None
         self._sequence = 0
         self._callback = None
         self._operation = None
@@ -263,6 +264,7 @@ class _DvrGate(QObject):
         self._sequence += 1
         self._callback = callback
         self._operation = operation
+        self._pending_uuid = getattr(entry, "uuid", None) if entry is not None else None
         self.pool.start(_DvrJob(self, backend, operation, entry, self._sequence))
         return True
 
@@ -274,6 +276,7 @@ class _DvrGate(QObject):
         self.busy = False
         if error and self._operation in ("stop", "cancel"):
             self.uncertain = True
+            self.uncertain_uuid = getattr(self, "_pending_uuid", None)
         if callback is not None:
             callback(result, error)
 
@@ -822,6 +825,19 @@ class TasksPanel(QFrame):
             self._server_entries = entries or []
             self._server_tasks = self._tasks_from_entries(self._server_entries)
             self._set_error("")
+            gate = getattr(self._host, "_dvr_gate", None)
+            if gate is not None and gate.uncertain and gate.uncertain_uuid:
+                # A fresh server snapshot showing that the attempted UUID is no
+                # longer recording resolves the uncertain Stop without a retry.
+                still_recording = any(
+                    item.uuid == gate.uncertain_uuid and item.category() == "recording"
+                    for item in self._server_entries
+                )
+                if not still_recording:
+                    gate.uncertain = False
+                    gate.uncertain_uuid = None
+                    if hasattr(self._host, "show_status"):
+                        self._host.show_status("DVR stop verified from server state.")
         else:
             self._set_error("Couldn't refresh server recordings")
         self._render_tasks(server=True)
