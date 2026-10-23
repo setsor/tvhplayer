@@ -2741,20 +2741,26 @@ class TVHeadendClient(QMainWindow):
             )
             if pane is not None and pane._last_server_ok else []
         )
-        indexes = [
-            index for index, job in enumerate(active, start=1)
+        badges = [
+            (index, _instant_dvr(job)) for index, job in enumerate(active, start=1)
             if channel is not None and job.matches_channel(channel)
         ]
-        recording = bool(indexes)
-        rec_label = "REC " + ",".join(str(index) for index in indexes) if recording else ""
-        status = ("Playing / " + rec_label) if is_playing and recording else (
-            "Playing" if is_playing else rec_label
+        recording = bool(badges)
+        rec_label = ", ".join(
+            f"{index} {'Instant' if instant else 'Scheduled'}"
+            for index, instant in badges
         )
-        if status_item.text() != status:
-            status_item.setText(status)
-        if status:
-            set_item_access(status_item, status, f"{channel.name}: {status}")
-            status_item.setToolTip(status)
+        status = "Playing" if is_playing else ""
+        status_item.setText(status)
+        if recording:
+            status_item.setIcon(QIcon(_recording_badge_pixmap(badges)))
+            status_item.setSizeHint(QSize(110, 29))
+        else:
+            status_item.setIcon(QIcon())
+        if status or recording:
+            description = f"{channel.name}: " + ("Playing; " if is_playing else "") + rec_label
+            set_item_access(status_item, description, description)
+            status_item.setToolTip(description)
         else:
             status_item.setData(Qt.ItemDataRole.AccessibleTextRole, None)
             status_item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, None)
@@ -2776,7 +2782,7 @@ class TVHeadendClient(QMainWindow):
         if is_playing:
             description += " Playing."
         if recording:
-            description += f" Recording instance {rec_label} of {len(active)} active."
+            description += f" Recording instances {rec_label}; {len(active)} active globally."
         description += " Press Enter to play."
         set_item_access(name_item, channel.name, description)
 
@@ -2885,6 +2891,14 @@ class TVHeadendClient(QMainWindow):
                 self.show_status("Play the channel before starting a recording")
                 return
 
+            pane = self.tasks_pane
+            if not pane._last_server_ok or self._dvr_gate.busy:
+                self.show_status("DVR state unavailable. Retry after Tasks refresh.")
+                return
+            if any(_instant_dvr(job) and job.category() in ("recording", "upcoming")
+                   and job.matches_channel(channel) for job in pane._server_entries):
+                self.show_status("An Instant recording already exists on this channel.")
+                return
             duration_dialog = RecordingDurationDialog(self)
             if duration_dialog.exec() != QDialog.DialogCode.Accepted:
                 print("Debug: Recording cancelled by user")
@@ -3689,13 +3703,14 @@ class TVHeadendClient(QMainWindow):
             entry for entry in pane._server_entries
             if entry.category() == "recording" and entry.matches_channel(channel)
         ]
-        if len(matching) != 1:
-            if matching:
-                self.show_status("Multiple recordings on this channel. Stop one in Tasks.")
-            else:
-                self.show_status(f"No active recording on {channel.name}.")
+        instant = [entry for entry in matching if _instant_dvr(entry)]
+        if len(instant) != 1:
+            self.show_status(
+                "No unique Instant recording on this channel. "
+                "Use Tasks for Scheduled recordings."
+            )
             return
-        pane.stop_server_entry(matching[0])
+        pane.stop_server_entry(instant[0])
 
     def start_recording_indicator(self):
         """Update from current local state; server count comes from Tasks."""
@@ -4068,6 +4083,53 @@ class TVHeadendClient(QMainWindow):
 
 
 
+def _instant_dvr(job):
+    """Classify TVHplayer instant DVR entries using explicit metadata."""
+    raw = getattr(job, "raw", None) or {}
+    markers = " ".join(str(raw.get(k) or "") for k in ("comment", "description"))
+    return "Instant recording via TVHplayer" in markers or "Recorded via TVHplayer" in markers
+
+
+def _scheduled_matches_event(job, event, channel):
+    """Match an EPG programme, excluding independent instant recordings."""
+    if _instant_dvr(job) or job.category() not in ("upcoming", "recording"):
+        return False
+    if not job.matches_channel(channel):
+        return False
+    raw = job.raw or {}
+    eid = getattr(event, "event_id", None)
+    linked = raw.get("broadcast") or raw.get("eventId")
+    if eid is not None and linked is not None:
+        return str(eid) == str(linked)
+    return (
+        (job.title or "").strip().casefold() ==
+        (event.title or "").strip().casefold()
+        and abs((job.start or 0) - event.start) <= 120
+    )
+
+
+def _recording_badge_pixmap(entries):
+    """Render compact numbered circles (red=instant, blue=scheduled)."""
+    diameter, step = 23, 27
+    pix = QPixmap(max(1, step * len(entries)), diameter + 2)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    font = painter.font()
+    font.setBold(True)
+    font.setPointSize(10)
+    painter.setFont(font)
+    for offset, (number, instant) in enumerate(entries):
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#BF3036" if instant else "#2478BA"))
+        painter.drawEllipse(offset * step + 1, 1, diameter, diameter)
+        painter.setPen(QColor("white"))
+        painter.drawText(QRect(offset * step + 1, 1, diameter, diameter),
+                         Qt.AlignmentFlag.AlignCenter, str(number))
+    painter.end()
+    return pix
+
+
 class EPGDialog(QDialog):
     def __init__(self, channel, epg_data, backend, parent=None):
         super().__init__(parent)
@@ -4140,23 +4202,7 @@ class EPGDialog(QDialog):
         for event, button in self._record_buttons:
             scheduled = False
             for job in entries:
-                if job.category() not in ("upcoming", "recording"):
-                    continue
-                if not job.matches_channel(self.channel):
-                    continue
-                raw = job.raw or {}
-                event_id = getattr(event, "event_id", None)
-                job_event = raw.get("broadcast") or raw.get("eventId")
-                linked = bool(event_id is not None and job_event is not None
-                              and str(event_id) == str(job_event))
-                # Time/title fallback for manually scheduled entries with no
-                # broadcast reference; require both to avoid false matches.
-                same_programme = (
-                    (job.title or "").strip().casefold() ==
-                    (event.title or "").strip().casefold()
-                    and abs((job.start or 0) - event.start) <= 120
-                )
-                if linked or same_programme:
+                if _scheduled_matches_event(job, event, self.channel):
                     scheduled = True
                     break
             if scheduled:
@@ -4183,6 +4229,15 @@ class EPGDialog(QDialog):
         """Schedule a recording for the selected EPG entry"""
         try:
             print(f"Debug: Scheduling recording for: {entry.title}")
+            parent = self.parent()
+            pane = getattr(parent, "tasks_pane", None)
+            if pane is None or not pane._last_server_ok or parent._dvr_gate.busy:
+                QMessageBox.warning(self, "DVR state", "Refresh Tasks before scheduling.")
+                return
+            if any(_scheduled_matches_event(job, entry, self.channel)
+                   for job in pane._server_entries):
+                self.refresh_recording_buttons()
+                return
             self.backend.create_dvr_entry(
                 self.channel,
                 entry.start,
