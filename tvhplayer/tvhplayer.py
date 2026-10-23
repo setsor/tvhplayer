@@ -163,13 +163,9 @@ class Logger:
             self.logger.info(f"Memory: {psutil.virtual_memory().total / (1024**3):.2f} GB")
             self.logger.info(f"Disk Space: {psutil.disk_usage('/').free / (1024**3):.2f} GB free")
         
-        # Log environment variables
-        self.logger.info("=== Environment Variables ===")
-        for key, value in os.environ.items():
-            if any(sensitive in key.lower() for sensitive in ['password', 'secret', 'key', 'token']):
-                self.logger.info(f"{key}=<REDACTED>")
-            else:
-                self.logger.info(f"{key}={value}")
+        # Never include raw environment variables: URLs, proxy credentials,
+        # session keys and tokens may appear under arbitrary variable names.
+        self.logger.info("Environment variable values omitted for privacy")
         
         self.logger.info("=== Dependencies ===")
         try:
@@ -1413,7 +1409,7 @@ class ServerConfigDialog(QDialog):
     def accept(self):
         print("Debug: Validating server configuration")
         config = self.get_server_config()
-        print(f"Debug: Server config: {config['name']} @ {config['url']}")
+        print(f"Debug: Validating server named {config['name']}")
         
         if not config['name']:
             QMessageBox.warning(self, "Invalid Configuration",
@@ -1802,7 +1798,7 @@ class TVHeadendClient(QMainWindow):
         self.config_dir = str(self.config_store.path.parent)
         self.config = self.config_store.data
         print(f"Debug: Config file location: {self.config_file}")
-        print(f"Debug: Current config: {json.dumps(self.config, indent=2)}")
+        print(f"Debug: Loaded {len(self.config.get('servers', []))} configured servers")
         print("Debug: Initializing TVHeadendClient")
         
         # Initialize fullscreen state        
@@ -3862,7 +3858,7 @@ class TVHeadendClient(QMainWindow):
                 channel = Channel.from_raw(channel_data)
             self._playback_channel = channel
             stream_url = self.get_backend().stream_url(channel)
-            print(f"Debug: Stream URL: {stream_url}")
+            print(f"Debug: Starting playback for {channel.name}")
             self._show_playback_wait()
             self._mark_playing_channel(scroll=True)
             self.player.play(stream_url)
