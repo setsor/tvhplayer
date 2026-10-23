@@ -80,6 +80,16 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn("self.numbered_recordings()", tasks)
         self.assertIn("_recording_badge_pixmap(", tasks)
 
+    def test_unverified_channel_keeps_red_question_mark(self):
+        row = method("TVHeadendClient", "_set_channel_row_playing")
+        self.assertIn('not verified and channel is not None', row)
+        self.assertIn('uncertain=uncertain', row)
+        renderer = next(n for n in TREE.body if isinstance(n, ast.FunctionDef)
+                        and n.name == "_recording_badge_pixmap")
+        source = ast.get_source_segment(SOURCE, renderer)
+        self.assertIn('QColor("#BF3036")', source)
+        self.assertIn('AlignCenter, "?"', source)
+
     def test_stale_tasks_are_explicitly_unverified(self):
         render = method("TasksPanel", "_render_tasks")
         self.assertIn('copy["status"] = "Unverified"', render)
