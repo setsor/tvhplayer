@@ -2790,22 +2790,31 @@ class TVHeadendClient(QMainWindow):
         # indicator uses the same snapshot, so REC 1..N corresponds to REC N.
         active = (
             [job for job in pane._server_entries if job.category() == "recording"]
-            if pane is not None and pane._last_server_ok else []
+            if pane is not None else []
         )
-        numbers = pane.numbered_recordings() if pane is not None and pane._last_server_ok else {}
+        verified = pane is not None and pane._last_server_ok
+        numbers = pane.numbered_recordings() if verified else {}
         badges = sorted([
             (numbers[job.uuid], _instant_dvr(job)) for job in active
-            if job.uuid in numbers and channel is not None and job.matches_channel(channel)
+            if verified and job.uuid in numbers and channel is not None and job.matches_channel(channel)
         ])
-        recording = bool(badges)
+        # On a failed DVR read, preserve the same red circular REC shape but
+        # replace the stale number with '?' instead of silently removing it.
+        uncertain = (
+            not verified and channel is not None
+            and any(job.matches_channel(channel) for job in active)
+        )
+        recording = bool(badges) or uncertain
         rec_label = ", ".join(
             f"{index} {'Instant' if instant else 'Scheduled'}"
             for index, instant in badges
         )
+        if uncertain:
+            rec_label = "REC ? (last known; not verified)"
         status_item.setText("")
         if is_playing or recording:
             status_item.setIcon(QIcon(_recording_badge_pixmap(
-                badges, playing=is_playing
+                badges, playing=is_playing, uncertain=uncertain
             )))
             status_item.setSizeHint(QSize(110, 29))
         else:
@@ -4161,10 +4170,10 @@ def _scheduled_matches_event(job, event, channel):
     )
 
 
-def _recording_badge_pixmap(entries, playing=False):
-    """Render Play triangle and numbered REC circles at matching size."""
+def _recording_badge_pixmap(entries, playing=False, uncertain=False):
+    """Render Play triangle, numbered REC circles, or red '?' when unverified."""
     diameter, step = 23, 27
-    pix = QPixmap(max(1, step * (len(entries) + int(playing))), diameter + 2)
+    pix = QPixmap(max(1, step * (len(entries) + int(playing) + int(uncertain))), diameter + 2)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -4180,7 +4189,15 @@ def _recording_badge_pixmap(entries, playing=False):
             QPoint(5, 2), QPoint(5, diameter + 1),
             QPoint(diameter + 1, diameter // 2 + 1)
         ]))
-    for offset, (number, instant) in enumerate(entries, start=int(playing)):
+    if uncertain:
+        x = int(playing) * step + 1
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#BF3036"))
+        painter.drawEllipse(x, 1, diameter, diameter)
+        painter.setPen(QColor("white"))
+        painter.drawText(QRect(x, 1, diameter, diameter),
+                         Qt.AlignmentFlag.AlignCenter, "?")
+    for offset, (number, instant) in enumerate(entries, start=int(playing) + int(uncertain)):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#BF3036" if instant else "#2478BA"))
         painter.drawEllipse(offset * step + 1, 1, diameter, diameter)
