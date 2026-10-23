@@ -27,7 +27,8 @@ class DvrIsolationTests(unittest.TestCase):
 
     def test_tasks_stop_uses_worker(self):
         method_source = method("TasksPanel", "run_action")
-        self.assertIn("gate.submit(", method_source)
+        self.assertIn("self.stop_server_entry(task[\"entry\"])", method_source)
+        self.assertIn('gate.submit(host.get_backend(), "stop"', method("TasksPanel", "stop_server_entry"))
         self.assertNotIn(".stop_dvr_entry(", method_source)
         self.assertNotIn(".cancel_dvr_entry(", method_source)
 
@@ -39,10 +40,11 @@ class DvrIsolationTests(unittest.TestCase):
     def test_main_stop_only_one_entry(self):
         stop = method("TVHeadendClient", "stop_recording")
         self.assertIn("pane.selected_task()", stop)
-        self.assertIn("selected_uuid", stop)
+        self.assertIn('uuid = selected["entry"].uuid', stop)
         self.assertIn("len(running) == 1", stop)
         self.assertIn("Select one active recording in Tasks", stop)
-        self.assertIn('gate.submit(self.get_backend(), "stop"', stop)
+        self.assertIn("pane.stop_server_entry(entry)", stop)
+        self.assertNotIn("gate.submit(", stop)
         self.assertNotIn(".stop_dvr_entry(", stop)
 
     def test_unknown_stop_tracks_exact_uuid(self):
