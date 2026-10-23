@@ -58,7 +58,8 @@ class DvrIsolationTests(unittest.TestCase):
 
     def test_channel_status_combines_playback_and_rec(self):
         row = method("TVHeadendClient", "_set_channel_row_playing")
-        self.assertIn("_recording_badge_pixmap(badges)", row)
+        self.assertIn("playing=is_playing", row)
+        self.assertIn('status_item.setText("")', row)
         self.assertIn("status_item.setIcon(", row)
         self.assertIn("_instant_dvr(job)", row)
         self.assertIn("job.matches_channel(channel)", row)
