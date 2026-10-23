@@ -2224,6 +2224,7 @@ class TVHeadendClient(QMainWindow):
         # Channel list
         self.channel_list = QTableWidget()
         self.channel_list.setColumnCount(3)
+        self.channel_list.setIconSize(QSize(105, 25))
         self.channel_list.setHorizontalHeaderLabels(['Number', 'Channel Name', 'Status'])
         describe(
             self.channel_list,
