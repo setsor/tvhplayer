@@ -2751,14 +2751,15 @@ class TVHeadendClient(QMainWindow):
             f"{index} {'Instant' if instant else 'Scheduled'}"
             for index, instant in badges
         )
-        status = "Playing" if is_playing else ""
-        status_item.setText(status)
-        if recording:
-            status_item.setIcon(QIcon(_recording_badge_pixmap(badges)))
+        status_item.setText("")
+        if is_playing or recording:
+            status_item.setIcon(QIcon(_recording_badge_pixmap(
+                badges, playing=is_playing
+            )))
             status_item.setSizeHint(QSize(110, 29))
         else:
             status_item.setIcon(QIcon())
-        if status or recording:
+        if is_playing or recording:
             description = f"{channel.name}: " + ("Playing; " if is_playing else "") + rec_label
             set_item_access(status_item, description, description)
             status_item.setToolTip(description)
@@ -4109,10 +4110,10 @@ def _scheduled_matches_event(job, event, channel):
     )
 
 
-def _recording_badge_pixmap(entries):
-    """Render compact numbered circles (red=instant, blue=scheduled)."""
+def _recording_badge_pixmap(entries, playing=False):
+    """Render Play triangle and numbered REC circles at matching size."""
     diameter, step = 23, 27
-    pix = QPixmap(max(1, step * len(entries)), diameter + 2)
+    pix = QPixmap(max(1, step * (len(entries) + int(playing))), diameter + 2)
     pix.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pix)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -4120,7 +4121,15 @@ def _recording_badge_pixmap(entries):
     font.setBold(True)
     font.setPointSize(10)
     painter.setFont(font)
-    for offset, (number, instant) in enumerate(entries):
+    if playing:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#27834D"))
+        from PyQt6.QtGui import QPolygon
+        painter.drawPolygon(QPolygon([
+            QPoint(5, 2), QPoint(5, diameter + 1),
+            QPoint(diameter + 1, diameter // 2 + 1)
+        ]))
+    for offset, (number, instant) in enumerate(entries, start=int(playing)):
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#BF3036" if instant else "#2478BA"))
         painter.drawEllipse(offset * step + 1, 1, diameter, diameter)
