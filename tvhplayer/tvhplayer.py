@@ -613,7 +613,14 @@ def _task_status_icon(status):
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    if status == 'Recording':
+    if status == 'Unverified':
+        pen = QPen(QColor('#9ca3af'))
+        pen.setWidthF(1.8)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(QRectF(2, 2, 12, 12))
+        painter.drawText(QRectF(2, 2, 12, 12), Qt.AlignmentFlag.AlignCenter, '?')
+    elif status == 'Recording':
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor('#dc2626'))
         painter.drawEllipse(QRectF(2, 2, 12, 12))
