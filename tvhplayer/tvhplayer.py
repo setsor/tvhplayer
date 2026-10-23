@@ -841,6 +841,9 @@ class TasksPanel(QFrame):
         else:
             self._set_error("Couldn't refresh server recordings")
         self._render_tasks(server=True)
+        host = self._host
+        if host is not None and hasattr(host, "_mark_playing_channel"):
+            host._mark_playing_channel()
 
     def _render_tasks(self, server=False):
         tasks = list(self._server_tasks)
@@ -2723,11 +2726,23 @@ class TVHeadendClient(QMainWindow):
         if status_item is None:
             status_item = QTableWidgetItem()
             table.setItem(row, 2, status_item)
-        status = "Playing" if is_playing else ""
+        pane = getattr(self, "tasks_pane", None)
+        recording = bool(
+            channel is not None and pane is not None and pane._last_server_ok
+            and any(
+                job.category() == "recording"
+                and job.matches_channel(channel)
+                for job in pane._server_entries
+            )
+        )
+        status = "Play/REC" if is_playing and recording else (
+            "Playing" if is_playing else ("REC" if recording else "")
+        )
         if status_item.text() != status:
             status_item.setText(status)
-        if is_playing and channel is not None:
-            set_item_access(status_item, "Playing", f"{channel.name} is playing")
+        if status:
+            set_item_access(status_item, status, f"{channel.name}: {status}")
+            status_item.setToolTip(status)
         else:
             status_item.setData(Qt.ItemDataRole.AccessibleTextRole, None)
             status_item.setData(Qt.ItemDataRole.AccessibleDescriptionRole, None)
@@ -2748,6 +2763,8 @@ class TVHeadendClient(QMainWindow):
         description = f"Channel {channel.number}, {channel.name}."
         if is_playing:
             description += " Playing."
+        if recording:
+            description += " Recording."
         description += " Press Enter to play."
         set_item_access(name_item, channel.name, description)
 
@@ -2850,10 +2867,10 @@ class TVHeadendClient(QMainWindow):
     def start_recording(self):
         print("Debug: Starting recording")
         try:
-            channel = self.selected_channel()
+            channel = self._playing_channel()
             if not channel:
-                print("Debug: No channel selected for recording")
-                self.show_status("Please select a channel to record")
+                print("Debug: No playing channel for recording")
+                self.show_status("Play the channel before starting a recording")
                 return
 
             duration_dialog = RecordingDurationDialog(self)
@@ -3646,27 +3663,27 @@ class TVHeadendClient(QMainWindow):
             self.stop_recording()
 
     def stop_recording(self):
-        """Toolbar Stop uses exactly the same selected-UUID path as Tasks."""
+        """Stop only the recording belonging to the currently playing channel."""
         pane = self.tasks_pane
-        if self._dvr_gate.busy or self._dvr_gate.uncertain or not pane._last_server_ok:
+        gate = self._dvr_gate
+        if gate.busy or gate.uncertain or not pane._last_server_ok:
             self.show_status("DVR busy or state uncertain. Verify TVHeadend before stopping.")
             return
-        running = [entry for entry in pane._server_entries
-                   if entry.category() == "recording"]
-        selected = pane.selected_task()
-        if (selected is not None and selected.get("kind") == "Server"
-                and selected.get("bucket") == "recording"):
-            uuid = selected["entry"].uuid
-            entry = next((item for item in running if item.uuid == uuid), None)
-            if entry is None:
-                self.show_status("Selected recording is no longer active. Refresh Tasks.")
-                return
-        elif len(running) == 1:
-            entry = running[0]
-        else:
-            self.show_status("Select one active recording in Tasks before pressing Stop.")
+        channel = self._playing_channel()
+        if channel is None:
+            self.show_status("Play the recording channel before pressing Stop.")
             return
-        pane.stop_server_entry(entry)
+        matching = [
+            entry for entry in pane._server_entries
+            if entry.category() == "recording" and entry.matches_channel(channel)
+        ]
+        if len(matching) != 1:
+            if matching:
+                self.show_status("Multiple recordings on this channel. Stop one in Tasks.")
+            else:
+                self.show_status(f"No active recording on {channel.name}.")
+            return
+        pane.stop_server_entry(matching[0])
 
     def start_recording_indicator(self):
         """Update from current local state; server count comes from Tasks."""
