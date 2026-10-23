@@ -868,30 +868,64 @@ class TasksPanel(QFrame):
             return None
         return item.data(Qt.ItemDataRole.UserRole)
 
+    def stop_server_entry(self, entry):
+        """Single Stop implementation shared by Tasks and main toolbar."""
+        host = self._host
+        gate = getattr(host, "_dvr_gate", None)
+        if host is None or gate is None or gate.busy or gate.uncertain or not self._last_server_ok:
+            self._tell(host, "DVR busy or state uncertain. Verify TVHeadend before stopping.")
+            return False
+        # Never stop a stale UUID or a non-recording entry.
+        current = next((
+            item for item in self._server_entries
+            if item.uuid == entry.uuid and item.category() == "recording"
+        ), None)
+        if current is None:
+            self._tell(host, "Selected recording is no longer active. Refresh Tasks.")
+            return False
+        title = current.title or "recording"
+        channel = current.channel_name or "channel"
+
+        def done(_result, error):
+            if error:
+                self._tell(host, "Stop result UNKNOWN. Verify TVHeadend before retrying.")
+            else:
+                self._tell(host, f"Stop accepted for {title} on {channel}.")
+            self.refresh()
+
+        if gate.submit(host.get_backend(), "stop", done, current):
+            self.action_btn.setEnabled(False)
+            return True
+        return False
+
     def run_action(self):
-        """Stop a recording or cancel a scheduled timer."""
+        """Stop the selected recording or cancel its scheduled timer."""
         task = self.selected_task()
         host = self._host
         if task is None or host is None:
             return
-        title = task.get('title') or 'recording'
-        channel = task.get('channel') or 'channel'
-        if task['kind'] == 'Local':
+        if task["kind"] == "Local":
             host.stop_local_recording()
             self.refresh(server=False)
             return
-        gate = getattr(host, "_dvr_gate", None)
-        if gate is None or gate.uncertain or not self._last_server_ok:
-            self._tell(host, "DVR state uncertain. Reconnect and verify before changing recordings.")
+        if task["bucket"] == "recording":
+            self.stop_server_entry(task["entry"])
             return
-        operation = "stop" if task['bucket'] == 'recording' else "cancel"
+        if task["bucket"] != "scheduled":
+            return
+        gate = getattr(host, "_dvr_gate", None)
+        if gate is None or gate.busy or gate.uncertain or not self._last_server_ok:
+            self._tell(host, "DVR busy or state uncertain. Verify TVHeadend before cancelling.")
+            return
+        title = task.get("title") or "recording"
+        channel = task.get("channel") or "channel"
         def done(_result, error):
             if error:
-                self._tell(host, "DVR action result UNKNOWN. Check TVHeadend before reconnecting.")
+                self._tell(host, "Cancel result UNKNOWN. Verify TVHeadend before retrying.")
             else:
-                self._tell(host, f"{'Stop accepted' if operation == 'stop' else 'Cancel accepted'} for {title} on {channel}.")
+                self._tell(host, f"Cancel accepted for {title} on {channel}.")
             self.refresh()
-        if gate.submit(host.get_backend(), operation, done, task['entry']):
+        if gate.submit(host.get_backend(), "cancel", done, task["entry"]):
             self.action_btn.setEnabled(False)
 
     def reveal_selected(self):
@@ -3612,54 +3646,27 @@ class TVHeadendClient(QMainWindow):
             self.stop_recording()
 
     def stop_recording(self):
-        """Stop the selected server DVR entry, never an inferred group.
-
-        If Tasks has no selected active server recording, allow Stop only
-        when exactly one server recording is active. Playback channel
-        selection alone must not determine which recording is stopped.
-        """
-        gate = self._dvr_gate
+        """Toolbar Stop uses exactly the same selected-UUID path as Tasks."""
         pane = self.tasks_pane
-        if gate.uncertain or not pane._last_server_ok:
-            self.show_status("DVR state uncertain. Verify TVHeadend before stopping.")
+        if self._dvr_gate.busy or self._dvr_gate.uncertain or not pane._last_server_ok:
+            self.show_status("DVR busy or state uncertain. Verify TVHeadend before stopping.")
             return
-        if gate.busy:
-            self.show_status("DVR request in progress. Try Stop again after refresh.")
-            return
-
-        running = [
-            entry for entry in pane._server_entries
-            if entry.category() == 'recording'
-        ]
+        running = [entry for entry in pane._server_entries
+                   if entry.category() == "recording"]
         selected = pane.selected_task()
-        entry = None
-        if (selected is not None and selected.get('kind') == 'Server'
-                and selected.get('bucket') == 'recording'):
-            selected_uuid = selected['entry'].uuid
-            entry = next((job for job in running if job.uuid == selected_uuid), None)
+        if (selected is not None and selected.get("kind") == "Server"
+                and selected.get("bucket") == "recording"):
+            uuid = selected["entry"].uuid
+            entry = next((item for item in running if item.uuid == uuid), None)
             if entry is None:
                 self.show_status("Selected recording is no longer active. Refresh Tasks.")
                 return
         elif len(running) == 1:
             entry = running[0]
-        elif not running:
-            self.show_status("No active server recording to stop.")
-            return
         else:
             self.show_status("Select one active recording in Tasks before pressing Stop.")
             return
-
-        def done(_result, error):
-            if error:
-                self.show_status("Stop result UNKNOWN. Verify TVHeadend before reconnecting.")
-            else:
-                self.show_status(f"Stop accepted for {entry.channel_name or 'channel'}")
-            self._refresh_tasks()
-
-        if gate.submit(self.get_backend(), "stop", done, entry):
-            self.show_status(f"Stopping {entry.channel_name or 'recording'}...")
-        else:
-            self.show_status("DVR request already in progress")
+        pane.stop_server_entry(entry)
 
     def start_recording_indicator(self):
         """Update from current local state; server count comes from Tasks."""
