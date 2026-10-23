@@ -38,7 +38,10 @@ class DvrIsolationTests(unittest.TestCase):
 
     def test_main_stop_only_one_entry(self):
         stop = method("TVHeadendClient", "stop_recording")
-        self.assertIn("len(targets) != 1", stop)
+        self.assertIn("pane.selected_task()", stop)
+        self.assertIn("selected_uuid", stop)
+        self.assertIn("len(running) == 1", stop)
+        self.assertIn("Select one active recording in Tasks", stop)
         self.assertIn('gate.submit(self.get_backend(), "stop"', stop)
         self.assertNotIn(".stop_dvr_entry(", stop)
 
