@@ -53,6 +53,12 @@ jobs:
           "$RUNNER_TEMP/tvhplayer-venv/bin/python" -c 'import ast, pathlib; ast.parse(pathlib.Path("tvhplayer/tvhplayer.py").read_text(encoding="utf-8"))'
           echo "$RUNNER_TEMP/tvhplayer-venv/bin" >> "$GITHUB_PATH"
 
+      - name: Verify legacy macOS settings migration and private config handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_macos_legacy_migration.py' -v
+
       - name: Download verified VLC 3.0.24 (Intel)
         shell: bash
         run: |
