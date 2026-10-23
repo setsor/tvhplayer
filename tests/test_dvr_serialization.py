@@ -63,10 +63,22 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn("status_item.setIcon(", row)
         self.assertIn("_instant_dvr(job)", row)
         self.assertIn("job.matches_channel(channel)", row)
-        self.assertIn("enumerate(active, start=1)", row)
-        self.assertIn("job.start or 0", row)
+        self.assertIn("pane.numbered_recordings()", row)
+        self.assertNotIn("job.start or 0", row)
         refresh = method("TasksPanel", "_server_read_done")
         self.assertIn("host._mark_playing_channel()", refresh)
+
+    def test_shared_ordinals_in_tasks_and_channel_list(self):
+        numbers = method("TasksPanel", "numbered_recordings")
+        self.assertIn("self._recording_seen.get(job.uuid", numbers)
+        self.assertIn("enumerate(ordered, 1)", numbers)
+        self.assertNotIn("job.start", numbers)
+        sync = method("TasksPanel", "_sync_recording_order")
+        self.assertIn("self._next_recording_seen += 1", sync)
+        self.assertIn("if uuid in active_ids", sync)
+        tasks = method("TasksPanel", "_add_row")
+        self.assertIn("self.numbered_recordings()", tasks)
+        self.assertIn("_recording_badge_pixmap(", tasks)
 
     def test_unknown_stop_tracks_exact_uuid(self):
         completed = method("_DvrGate", "_completed")
