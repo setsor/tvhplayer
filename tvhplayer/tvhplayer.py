@@ -872,7 +872,17 @@ class TasksPanel(QFrame):
         return {job.uuid: index for index, job in enumerate(ordered, 1)}
 
     def _render_tasks(self, server=False):
-        tasks = list(self._server_tasks)
+        # Retain the last DVR snapshot for continuity, but never present it
+        # as verified "Recording" after an HTTP timeout or failed read.
+        tasks = []
+        for task in self._server_tasks:
+            if not self._last_server_ok and task.get("bucket") == "recording":
+                copy = dict(task)
+                copy["status"] = "Unverified"
+                copy["detail"] = "Last known recording; server state unavailable"
+                tasks.append(copy)
+            else:
+                tasks.append(task)
         local = self._local_task()
         if local is not None:
             tasks.append(local)
@@ -1168,7 +1178,9 @@ class TasksPanel(QFrame):
             f"{task['kind']}, {task['channel']}, {task['title']}, "
             f"{task['status']}, {task.get('size') or 'no file yet'}. {task['detail']}"
         )
-        colors = row_emphasis('recording' if task['bucket'] == 'recording' else None)
+        colors = row_emphasis(
+            'recording' if task['bucket'] == 'recording' and task['status'] != 'Unverified' else None
+        )
         icon_item = QTableWidgetItem()
         numbered = self.numbered_recordings() if self._last_server_ok else {}
         entry = task.get("entry")
