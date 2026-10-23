@@ -80,6 +80,13 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn("self.numbered_recordings()", tasks)
         self.assertIn("_recording_badge_pixmap(", tasks)
 
+    def test_stale_tasks_are_explicitly_unverified(self):
+        render = method("TasksPanel", "_render_tasks")
+        self.assertIn('copy["status"] = "Unverified"', render)
+        self.assertIn('if not self._last_server_ok', render)
+        self.assertIn('copy["detail"] = "Last known recording; server state unavailable"', render)
+        self.assertNotIn("list_dvr_entries(", render)
+
     def test_unknown_stop_tracks_exact_uuid(self):
         completed = method("_DvrGate", "_completed")
         self.assertIn("self.uncertain_uuid =", completed)
