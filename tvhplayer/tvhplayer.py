@@ -2995,8 +2995,8 @@ class TVHeadendClient(QMainWindow):
         return self._status_state.has_active_recordings
 
     def sync_recording_indicator(self):
-        """Refresh authoritative DVR state after a user action."""
-        self._refresh_tasks()
+        """Update local state; Tasks refresh handles authoritative server count."""
+        self.update_recording_activity(refresh_server=False)
 
     def _enter_fullscreen(self):
         handles = self._splitter_handles()
