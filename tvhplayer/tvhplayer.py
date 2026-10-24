@@ -257,13 +257,21 @@ class _DvrGate(QObject):
         self._operation = None
         self.finished.connect(self._completed)
 
-    def submit(self, backend, operation, callback, entry=None):
+    def submit(self, backend, operation, callback, entry=None, origin="OTHER"):
         if self.busy or (self.uncertain and operation != "read"):
             return False
         self.busy = True
         self._sequence += 1
         self._callback = callback
         self._operation = operation
+        if operation == "stop":
+            self._stop_started_at = time.monotonic()
+            self._stop_origin = origin
+            logging.getLogger("TVHplayer").info(
+                "DVR_DIAG STOP_REQUEST origin=%s uuid=%s type=%s",
+                origin, getattr(entry, "uuid", ""), 
+                "instant" if _instant_dvr(entry) else "scheduled",
+            )
         self._pending_uuid = getattr(entry, "uuid", None) if entry is not None else None
         self.pool.start(_DvrJob(self, backend, operation, entry, self._sequence))
         return True
@@ -274,6 +282,17 @@ class _DvrGate(QObject):
         callback = self._callback
         self._callback = None
         self.busy = False
+        if self._operation == "stop":
+            elapsed = time.monotonic() - self._stop_started_at
+            logging.getLogger("TVHplayer").info(
+                "DVR_DIAG HTTP_RESULT origin=%s uuid=%s elapsed_s=%.3f result=%s",
+                self._stop_origin, self._pending_uuid, elapsed,
+                "ERROR_OR_TIMEOUT" if error else "ACCEPTED",
+            )
+            # Retain this timestamp for successful confirmation by DVR grid.
+            self._stop_pending_verification = (
+                self._pending_uuid, self._stop_origin, self._stop_started_at
+            )
         if error and self._operation in ("stop", "cancel"):
             self.uncertain = True
             self.uncertain_uuid = getattr(self, "_pending_uuid", None)
@@ -831,6 +850,20 @@ class TasksPanel(QFrame):
     def _server_read_done(self, entries, error):
         self._last_server_ok = error is None
         if error is None:
+            gate = getattr(self._host, "_dvr_gate", None)
+            pending = getattr(gate, "_stop_pending_verification", None) if gate else None
+            if pending is not None:
+                uuid, origin, started = pending
+                active_now = any(
+                    job.uuid == uuid and job.category() == "recording"
+                    for job in (entries or [])
+                )
+                if not active_now:
+                    logging.getLogger("TVHplayer").info(
+                        "DVR_DIAG DVR_VERIFIED origin=%s uuid=%s elapsed_s=%.3f stopped=yes",
+                        origin, uuid, time.monotonic() - started
+                    )
+                    gate._stop_pending_verification = None
             self._server_entries = entries or []
             self._sync_recording_order()
             self._server_tasks = self._tasks_from_entries(self._server_entries)
@@ -914,7 +947,7 @@ class TasksPanel(QFrame):
             return None
         return item.data(Qt.ItemDataRole.UserRole)
 
-    def stop_server_entry(self, entry):
+    def stop_server_entry(self, entry, origin="TASKS_STOP"):
         """Single Stop implementation shared by Tasks and main toolbar."""
         host = self._host
         gate = getattr(host, "_dvr_gate", None)
@@ -939,7 +972,7 @@ class TasksPanel(QFrame):
                 self._tell(host, f"Stop accepted for {title} on {channel}.")
             self.refresh()
 
-        if gate.submit(host.get_backend(), "stop", done, current):
+        if gate.submit(host.get_backend(), "stop", done, current, origin=origin):
             self.action_btn.setEnabled(False)
             return True
         return False
@@ -3809,7 +3842,7 @@ class TVHeadendClient(QMainWindow):
                 "Use Tasks for Scheduled recordings."
             )
             return
-        pane.stop_server_entry(instant[0])
+        pane.stop_server_entry(instant[0], origin="MAIN_STOP")
 
     def start_recording_indicator(self):
         """Update from current local state; server count comes from Tasks."""
