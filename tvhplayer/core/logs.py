@@ -38,6 +38,37 @@ _URL_LOGIN = re.compile(r'(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+):[^@\s/]+@')
 _AUTHORIZATION = re.compile(r'(?i)(\bauthorization\s*:\s*(?:basic|digest|bearer)\s+)[^\r\n]+')
 
 
+# VLC may emit this exact nonfatal EIT version warning thousands of times.
+# Do not hide other transport, video, network or decoding errors.
+_VLC_EIT_VERSION_WARNING = re.compile(
+    r"^\[[0-9a-fA-F]+\] ts demux error: libdvbpsi error \(EIT decoder\): "
+    r"'version_number' differs whereas no discontinuity has occurred$"
+)
+_EIT_REPEAT_REPORT_EVERY = 1000
+
+
+class _VlcEitRepeatLimiter:
+    """Keep the first VLC EIT version warning and periodic repeat totals.
+
+    Only messages matching the precise warning are coalesced. No changes are
+    made to libVLC, the media stream, or playback/recording behavior.
+    """
+
+    def __init__(self):
+        self._seen = 0
+
+    def process(self, message: str) -> str | None:
+        if not _VLC_EIT_VERSION_WARNING.fullmatch(message):
+            return message
+        self._seen += 1
+        if self._seen == 1:
+            return message
+        repeats = self._seen - 1
+        if repeats % _EIT_REPEAT_REPORT_EVERY == 0:
+            return f"VLC EIT version-number warning: {repeats} identical repeats suppressed"
+        return None
+
+
 def log_dir() -> Path:
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Logs' / 'TVHplayer'
@@ -90,6 +121,7 @@ class _FdCapture:
         self._read_end = read_end
         self._logger = logger
         self._level = level
+        self._eit_limiter = _VlcEitRepeatLimiter()
         self._thread = threading.Thread(target=self._pump, name=f'log-fd{fd}', daemon=True)
         self._thread.start()
 
@@ -112,6 +144,9 @@ class _FdCapture:
 
     def _emit(self, raw):
         text = sanitize(raw.decode('utf-8', errors='replace').rstrip('\r'))
+        text = self._eit_limiter.process(text)
+        if text is None:
+            return
         try:
             os.write(self.terminal, (text + '\n').encode('utf-8', errors='replace'))
         except OSError:
@@ -137,12 +172,15 @@ class _Tee(io.TextIOBase):
         self._logger = logger
         self._level = level
         self._pending = ''
+        self._eit_limiter = _VlcEitRepeatLimiter()
 
     def write(self, text):
         self._pending += text
         while '\n' in self._pending:
             line, self._pending = self._pending.split('\n', 1)
-            line = sanitize(line.rstrip())
+            line = self._eit_limiter.process(sanitize(line.rstrip()))
+            if line is None:
+                continue
             if self._stream is not None:
                 try:
                     self._stream.write(line + '\n')

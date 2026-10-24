@@ -94,6 +94,85 @@ def test_everything_the_process_writes_is_logged_and_hidden(tmp_path):
     assert app_log.count('a warning') == 1
 
 
+def test_eit_warning_repetitions_are_sampled_but_other_errors_are_preserved():
+    limiter = logs._VlcEitRepeatLimiter()
+    eit = (
+        "[00007f7f08c72260] ts demux error: libdvbpsi error (EIT decoder): "
+        "'version_number' differs whereas no discontinuity has occurred"
+    )
+    different_id = eit.replace("[00007f7f08c72260]", "[000000000000abcd]")
+    other_eit = eit.replace("'version_number' differs", "'last_section_number' differs")
+    other_error = "[00007f7f08c72260] main decoder error: buffer deadlock prevented"
+
+    assert limiter.process(eit) == eit
+    assert limiter.process(other_eit) == other_eit
+    assert limiter.process(other_error) == other_error
+    for _ in range(999):
+        assert limiter.process(different_id) is None
+    assert limiter.process(eit) == (
+        "VLC EIT version-number warning: 1000 identical repeats suppressed"
+    )
+    assert limiter.process(eit) is None
+    assert limiter.process(other_error) == other_error
+
+
+def test_fd_capture_samples_vlc_eit_without_losing_other_warnings(tmp_path):
+    """Test C-style native writes to fd 2, not just Python logging messages."""
+    import subprocess
+    from pathlib import Path
+
+    warning = (
+        "[00007f7f08c72260] ts demux error: libdvbpsi error (EIT decoder): "
+        "'version_number' differs whereas no discontinuity has occurred"
+    )
+    script = "\n".join([
+        "import os",
+        "from tvhplayer.core import logs",
+        f"logs.configure_logging({str(tmp_path / 'logs')!r})",
+        f"eit = {(warning + chr(10))!r}.encode('utf-8')",
+        "for _ in range(2002): os.write(2, eit)",
+        "os.write(2, b'[00007f7f08c72260] main decoder error: buffer deadlock prevented\\n')",
+    ])
+    result = subprocess.run(
+        [sys.executable, '-c', script],
+        cwd=str(Path(__file__).resolve().parents[1]),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    file_log = (tmp_path / 'logs' / logs.APP_LOG).read_text(encoding='utf-8')
+    for output in (result.stderr, file_log):
+        assert output.count("'version_number' differs") == 1
+        assert output.count('identical repeats suppressed') == 2
+        assert '1000 identical repeats suppressed' in output
+        assert '2000 identical repeats suppressed' in output
+        assert output.count('buffer deadlock prevented') == 1
+
+
+def test_fallback_tee_uses_the_same_narrow_eit_filter():
+    import io
+
+    class Recorder:
+        def __init__(self):
+            self.messages = []
+
+        def log(self, level, message):
+            self.messages.append((level, message))
+
+    sink = io.StringIO()
+    recorder = Recorder()
+    tee = logs._Tee(sink, recorder, logging.WARNING)
+    eit = (
+        "[0000abcd] ts demux error: libdvbpsi error (EIT decoder): "
+        "'version_number' differs whereas no discontinuity has occurred\n"
+    )
+    tee.write(eit * 3 + "[0000abcd] ts demux error: malformed transport stream\n")
+    assert sink.getvalue().count("'version_number' differs") == 1
+    assert len(recorder.messages) == 2
+    assert 'malformed transport stream' in sink.getvalue()
+
+
 def test_unwritable_folder_keeps_the_console(tmp_path, restore_logging):
     blocker = tmp_path / 'file'
     blocker.write_text('x')
