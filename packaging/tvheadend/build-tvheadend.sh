@@ -76,6 +76,18 @@ cmd_build() {
         verify "$sources/$DVBCSA_ARCHIVE" "$LIBDVBCSA_SHA256"
         mkdir -p "$work/libdvbcsa"
         tar -xzf "$sources/$DVBCSA_ARCHIVE" -C "$work/libdvbcsa" --strip-components=1
+        # libdvbcsa 1.1.0's GNU config helpers predate aarch64.
+        # Use modern distro-provided autoconf host/build triplet detection.
+        config_tools_found=no
+        for guess in /usr/share/automake-*/config.guess; do
+            [ -f "$guess" ] || continue
+            [ -f "$(dirname "$guess")/config.sub" ] || continue
+            cp "$guess" "$work/libdvbcsa/config.guess"
+            cp "$(dirname "$guess")/config.sub" "$work/libdvbcsa/config.sub"
+            config_tools_found=yes
+            break
+        done
+        [ "$config_tools_found" = yes ] || die "automake config.guess/config.sub not found for libdvbcsa"
         (
             cd "$work/libdvbcsa"
             ./configure --prefix="$work/dvbcsa" --disable-shared --enable-static --with-pic

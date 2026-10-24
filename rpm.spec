@@ -25,6 +25,7 @@ Source4:        https://files.pythonhosted.org/packages/5b/ee/7d76eb3b50ccb13976
 
 BuildRequires:  gcc
 BuildRequires:  make
+BuildRequires:  automake
 BuildRequires:  pkgconf-pkg-config
 BuildRequires:  python3
 BuildRequires:  python3-devel
