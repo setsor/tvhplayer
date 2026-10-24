@@ -278,6 +278,7 @@ def test_finds_servers_on_the_builtin_config_folder(tmp_path):
     assert owned_by_other_app(103, str(proc))
 
 
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Relies on Linux /proc and exec -a')
 def test_leftover_server_is_stopped_but_another_window_keeps_its_own(tmp_path, monkeypatch):
     import subprocess
 

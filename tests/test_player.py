@@ -30,6 +30,12 @@ class _MediaPlayer:
     def set_xwindow(self, handle):
         self.window_id = handle
 
+    def set_nsobject(self, handle):
+        self.window_id = handle
+
+    def set_hwnd(self, handle):
+        self.window_id = handle
+
     def set_media(self, media):
         self.media = media
 

@@ -357,7 +357,8 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert window.playback_spinner.isVisible()
         assert window.playback_spinner._timer.isActive()
         assert window.idle_splash.isVisible()
-        assert window.status_label.text() == 'Starting: News'
+        assert window.status_label.text() == 'Playing: News'
+        assert window.status_notice_label.text() == 'Starting: News'
         image = window.playback_spinner.grab().toImage()
         assert image.width() > 0
         assert any(
@@ -382,7 +383,8 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
 
         assert not window.playback_spinner.isVisible()
         assert window.idle_splash.isVisible()
-        assert window.status_label.text() == 'Playback failed'
+        assert window.status_label.text() == 'Ready'
+        assert window.status_notice_label.text() == 'Playback failed'
     finally:
         window.close()
         app.processEvents()
@@ -436,10 +438,13 @@ def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
         app.processEvents()
 
         assert window.channel_list.currentRow() == sport_row
-        assert window.channel_list.item(sport_row, 2).text() == "Playing"
+        assert window.channel_list.item(sport_row, 2).text() == ""
+        assert not window.channel_list.item(sport_row, 2).icon().isNull()
         assert window.channel_list.item(sport_row, 2).data(
             Qt.ItemDataRole.AccessibleTextRole
-        ) == "Playing"
+        ) and "Playing;" in window.channel_list.item(sport_row, 2).data(
+            Qt.ItemDataRole.AccessibleTextRole
+        )
         assert "Playing." in window.channel_list.item(sport_row, 1).data(
             Qt.ItemDataRole.AccessibleDescriptionRole
         )
@@ -451,19 +456,22 @@ def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
 
         window.channel_list.setCurrentCell(news_row, 1)
         app.processEvents()
-        assert window.channel_list.item(sport_row, 2).text() == "Playing"
+        assert window.channel_list.item(sport_row, 2).text() == ""
+        assert not window.channel_list.item(sport_row, 2).icon().isNull()
         assert window.channel_list.item(news_row, 2).text() == ""
 
         window.fetch_channels()
         app.processEvents()
         sport_row = _channel_row(window.channel_list, 'Sport')
         news_row = _channel_row(window.channel_list, 'News')
-        assert window.channel_list.item(sport_row, 2).text() == "Playing"
+        assert window.channel_list.item(sport_row, 2).text() == ""
+        assert not window.channel_list.item(sport_row, 2).icon().isNull()
         assert window.channel_list.currentRow() == sport_row
 
         window.stop_playback()
         app.processEvents()
         assert window.channel_list.item(sport_row, 2).text() == ""
+        assert window.channel_list.item(sport_row, 2).icon().isNull()
         assert window.channel_list.item(sport_row, 1).background().style() == Qt.BrushStyle.NoBrush
         assert "Playing." not in window.channel_list.item(sport_row, 1).data(
             Qt.ItemDataRole.AccessibleDescriptionRole
@@ -472,7 +480,8 @@ def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
         window.play_channel_by_data(news)
         app.processEvents()
         news_row = _channel_row(window.channel_list, 'News')
-        assert window.channel_list.item(news_row, 2).text() == "Playing"
+        assert window.channel_list.item(news_row, 2).text() == ""
+        assert not window.channel_list.item(news_row, 2).icon().isNull()
         fake_player._events.handlers['error'](None)
         app.processEvents()
         assert window.channel_list.item(news_row, 2).text() == ""
@@ -721,10 +730,13 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert shortcuts.help_text.accessibleName() == "Keyboard shortcuts"
         shortcuts.close()
 
-        window.statusbar.showMessage("Playing: News")
-        window.statusbar.showMessage("Playing: News")
+        window._playback_channel = Channel(uuid="news", name="News")
+        window._awaiting_playback = True
+        window._refresh_playback_status()
         assert window.status_label.text() == "Playing: News"
         assert window.status_label.accessibleName() == "Playing: News"
+        window.statusbar.showMessage("A separate native status message")
+        assert window.status_label.text() == "Playing: News"
 
         window.video_frame.setFocus()
         app.processEvents()
@@ -734,7 +746,7 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert fake_player.audio_get_mute()
         assert window.mute_btn.isChecked() is True
         assert window.mute_btn.accessibleName() == "Unmute"
-        assert window.status_label.accessibleName() == "Muted"
+        assert window.status_notice_label.accessibleName() == "Muted"
 
         window.channel_list.setFocus()
         app.processEvents()
@@ -762,7 +774,7 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         )
         window.keyPressEvent(louder)
         assert window.volume_slider.value() == 55
-        assert window.status_label.text() == "Volume 55"
+        assert window.status_notice_label.text() == "Volume 55"
 
         window.channel_list.setSortingEnabled(False)
         window.channel_list.insertRow(0)
@@ -776,15 +788,16 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         window.servers = []
         enter = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
         assert window.eventFilter(window.channel_list, enter) is True
-        assert "Playback error" in window.status_label.text()
+        assert "Playback error" in window.status_notice_label.text()
 
+        before_rec = window.recording_indicator.text()
         window.start_recording_indicator()
-        assert window.recording_indicator.text() == "REC"
+        # A start notice must not manufacture an unverified REC 1.
+        assert window.recording_indicator.text() == before_rec
         assert window.recording_indicator.isVisible()
-        assert "Recording" in window.recording_indicator.accessibleName()
         window.stop_recording_indicator()
-        assert window.recording_indicator.text() == ""
-        assert window.recording_indicator.accessibleName() == "Not recording"
+        # Stop also waits for a verified server snapshot.
+        assert window.recording_indicator.text() == before_rec
 
         window.toggle_fullscreen()
         app.processEvents()
@@ -987,8 +1000,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.task_table.item(0, 0).text() == ''
         assert panel.task_table.item(0, 0).icon().isNull() is False
         assert panel.task_table.item(0, 0).toolTip() == 'Recording'
-        assert panel.task_table.item(1, 0).toolTip() == 'Recording'
-        assert panel.task_table.item(0, 0).icon().cacheKey() == panel.task_table.item(1, 0).icon().cacheKey()
+        assert panel.task_table.item(1, 0).toolTip() == 'REC 1 — Scheduled'
+        assert panel.task_table.item(0, 0).icon().cacheKey() != panel.task_table.item(1, 0).icon().cacheKey()
         assert panel.task_table.item(2, 0).toolTip() == 'Scheduled'
         assert panel.task_table.item(0, 0).icon().cacheKey() != panel.task_table.item(2, 0).icon().cacheKey()
         app.processEvents()
@@ -1103,7 +1116,7 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'show_in_file_manager', fake_show)
         panel.reveal_selected()
         assert revealed == [str(recording)]
-        assert window.status_label.text() == 'Showing recording_irinn.ts in the file manager'
+        assert window.status_notice_label.text() == 'Showing recording_irinn.ts in the file manager'
         revealed.clear()
 
         def show_folder(path, platform=None):
@@ -1123,7 +1136,7 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         revealed.clear()
         monkeypatch.setattr(ui, 'show_in_file_manager', lambda path, platform=None: False)
         panel.reveal_selected()
-        assert window.status_label.text() == "Couldn't show the recording in the file manager"
+        assert window.status_notice_label.text() == "Couldn't show the recording in the file manager"
         labels = []
 
         def capture_menu(menu, *_args, **_kwargs):
@@ -1156,7 +1169,7 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         panel.run_action()
         drain()
         assert backend.cancelled == ['soon']
-        assert window.is_recording is True
+        assert window.is_recording is False
         assert any('Old' in text for text in _task_texts(panel))
         assert panel.task_table.isVisible()
         _select_task(panel, 'Old')
@@ -1210,7 +1223,7 @@ def test_stalled_local_recording_is_left_running(monkeypatch, tmp_path):
         window.check_recording_status()
         window.check_recording_status()
         assert stopped == []
-        assert window.status_label.text() == 'Local recording stalled'
+        assert window.status_notice_label.text() == 'Local recording stalled'
     finally:
         window.close()
         app.processEvents()
