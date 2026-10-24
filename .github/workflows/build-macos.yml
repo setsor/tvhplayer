@@ -118,4 +118,4 @@ jobs:
             macos/dist/TVHplayer-MacOS-Intel.dmg
             macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 7
