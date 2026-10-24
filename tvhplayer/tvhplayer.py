@@ -3003,6 +3003,40 @@ class TVHeadendClient(QMainWindow):
         self._protect_video_surface(False)
         self.show_status("Playback stopped")
 
+    def _sync_player_geometry(self):
+        """Reconcile native VLC surface and overlays after Qt layout settles."""
+        container = getattr(self, "player_container", None)
+        frame = getattr(self, "video_frame", None)
+        if container is None or frame is None or not container.isVisible():
+            return
+        # Qt must finish calculating the splitter and right-pane geometry
+        # before a WA_NativeWindow surface can reliably paint at final size.
+        container.layout().activate()
+        target = container.contentsRect()
+        if target.width() <= 0 or target.height() <= 0:
+            return
+        if frame.geometry() != target:
+            frame.setGeometry(target)
+        for name in ("idle_splash", "playback_spinner"):
+            overlay = getattr(self, name, None)
+            if overlay is not None and overlay.geometry() != target:
+                overlay.setGeometry(target)
+        if self.idle_splash.isVisible():
+            self.idle_splash.raise_()
+        spinner = getattr(self, "playback_spinner", None)
+        if spinner is not None and spinner.isVisible():
+            spinner.raise_()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The initial setSizes() occurs before macOS knows the final DPI and
+        # content size; reconcile only after the first event-loop layout pass.
+        QTimer.singleShot(0, self._sync_player_geometry)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._sync_player_geometry)
+
     def _set_idle_splash(self, visible):
         """Show the logo overlay only when VLC is not drawing video."""
         if not hasattr(self, 'idle_splash'):
@@ -3547,6 +3581,9 @@ class TVHeadendClient(QMainWindow):
             if spinner is not None and spinner.isVisible():
                 spinner.setGeometry(player_container.rect())
                 spinner.raise_()
+            # Defer until layout completes, rather than resizing a native
+            # VLC surface synchronously inside its parent's resize event.
+            QTimer.singleShot(0, self._sync_player_geometry)
             return False
         video_frame = getattr(self, 'video_frame', None)
         if video_frame is not None and obj is video_frame:
