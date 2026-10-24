@@ -77,15 +77,15 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install 'pytest>=9,<11'
-          QT_QPA_PLATFORM=offscreen python -m pytest -q \\
-            tests/test_playlist.py \\
-            tests/test_playlist_dialogs.py \\
-            tests/test_playlist_sync.py \\
-            tests/test_xmltv.py \\
-            tests/test_logs.py \\
-            tests/test_builtin_server.py \\
-            tests/test_config.py \\
-            tests/test_player.py \\
+          QT_QPA_PLATFORM=offscreen python -m pytest -q \
+            tests/test_playlist.py \
+            tests/test_playlist_dialogs.py \
+            tests/test_playlist_sync.py \
+            tests/test_xmltv.py \
+            tests/test_logs.py \
+            tests/test_builtin_server.py \
+            tests/test_config.py \
+            tests/test_player.py \
             tests/test_pyqt6_ui.py
 
       - name: Download verified VLC 3.0.24 (Intel)
