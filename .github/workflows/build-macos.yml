@@ -1,0 +1,121 @@
+name: Build TVHplayer (macOS Intel)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - build/macos-intel-reproducible
+      - test/macos-integration-build
+    paths:
+      - 'macos/**'
+      - 'tvhplayer/**'
+      - '.github/workflows/build-macos.yml'
+  pull_request:
+    paths:
+      - 'macos/**'
+      - 'tvhplayer/**'
+      - '.github/workflows/build-macos.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-intel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Install verified Python 3.15.0 (official macOS package)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 2 \
+            -o "$RUNNER_TEMP/python-3.15.0-macos11.pkg" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $RUNNER_TEMP/python-3.15.0-macos11.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "$RUNNER_TEMP/python-3.15.0-macos11.pkg" -target / >/dev/null
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 --version
+
+      - name: Install pinned build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/tvhplayer-venv"
+          "$RUNNER_TEMP/tvhplayer-venv/bin/python" -m pip install -r macos/requirements-build.txt
+          "$RUNNER_TEMP/tvhplayer-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/tvhplayer-venv/bin/python" -c 'import ast, pathlib; ast.parse(pathlib.Path("tvhplayer/tvhplayer.py").read_text(encoding="utf-8"))'
+          echo "$RUNNER_TEMP/tvhplayer-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Verify legacy macOS settings migration and private config handling
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_macos_legacy_migration.py' -v
+
+      - name: Verify Qt platform selection (Cocoa on macOS)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_qt_platform.py' -v
+
+      - name: Verify LIVE status, expiring notices and DVR task counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -p 'test_status_state.py' -v
+          python -m unittest discover -s tests -p 'test_dvr_serialization.py' -v
+
+      - name: Download verified VLC 3.0.24 (Intel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 2 \
+            -o "$RUNNER_TEMP/vlc-3.0.24-intel64.dmg" \
+            'https://get.videolan.org/vlc/3.0.24/macosx/vlc-3.0.24-intel64.dmg'
+          echo "1ef6c903e2dc026d4e58ddf7b2a9ed0eb6f8caf80a9a9f46f96490340b962707  $RUNNER_TEMP/vlc-3.0.24-intel64.dmg" | shasum -a 256 -c -
+          mkdir -p "$RUNNER_TEMP/vlc-mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$RUNNER_TEMP/vlc-mount" "$RUNNER_TEMP/vlc-3.0.24-intel64.dmg" >/dev/null
+          test -f "$RUNNER_TEMP/vlc-mount/VLC.app/Contents/MacOS/lib/libvlc.dylib"
+          # Ephemeral runner only: mirror the developer's tested VLC installation.
+          sudo rm -rf /Applications/VLC.app
+          sudo ditto "$RUNNER_TEMP/vlc-mount/VLC.app" /Applications/VLC.app
+          hdiutil detach "$RUNNER_TEMP/vlc-mount" >/dev/null
+          python -c 'import vlc; assert vlc.libvlc_get_version().decode().startswith("3.0.24")'
+
+      - name: Build and inspect macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash macos/build-macos.sh
+          APP='macos/dist/TVHplayer-MacOS-Intel.app'
+          file "$APP/Contents/MacOS/TVHplayer-MacOS-Intel"
+          test ! -e "$APP/Contents/Frameworks/vlc/plugins/plugins.dat"
+          test -f "$APP/Contents/Frameworks/icons/play.svg"
+          # Guard against Qt6 abort at QApplication due to Linux xcb on macOS.
+          test -n "$(find "$APP/Contents" -name libqcocoa.dylib -print -quit)"
+          codesign --verify --deep --verbose=2 "$APP"
+          QT_SMOKE_OUTPUT="$(env -u QT_QPA_PLATFORM "$APP/Contents/MacOS/TVHplayer-MacOS-Intel" --tvhplayer-qt-smoke-test 2>&1)"
+          printf '%s\n' "$QT_SMOKE_OUTPUT"
+          printf '%s\n' "$QT_SMOKE_OUTPUT" | grep -Fq "Qt platform: cocoa"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" macos/dist/TVHplayer-MacOS-Intel.zip
+          bash macos/package-dmg.sh
+          test -s macos/dist/TVHplayer-MacOS-Intel.dmg
+          test -s macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
+
+      - name: Upload app archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: TVHplayer-MacOS-Intel-${{ github.sha }}
+          path: |
+            macos/dist/TVHplayer-MacOS-Intel.zip
+            macos/dist/TVHplayer-MacOS-Intel.dmg
+            macos/dist/TVHplayer-MacOS-Intel.dmg.sha256
+          if-no-files-found: error
+          retention-days: 7

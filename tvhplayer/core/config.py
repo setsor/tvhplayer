@@ -1,0 +1,155 @@
+"""Load and save TVHplayer settings. No Qt imports."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import tempfile
+from copy import deepcopy
+from pathlib import Path
+
+from .builtin_server import without_builtin_secrets
+from .models import ServerConfig
+
+log = logging.getLogger(__name__)
+
+DEFAULT_GEOMETRY = {'x': 100, 'y': 100, 'width': 1200, 'height': 700}
+
+
+def default_config_dir():
+    if sys.platform == 'darwin':
+        return Path.home() / 'Library' / 'Application Support' / 'TVHplayer'
+    if sys.platform == 'win32':
+        return Path(os.environ.get('APPDATA') or Path.home()) / 'TVHplayer'
+    xdg = os.environ.get('XDG_CONFIG_HOME')
+    base = Path(xdg) if xdg else Path.home() / '.config'
+    return base / 'tvhplayer'
+
+
+def default_config_path():
+    return default_config_dir() / 'tvhplayer.conf'
+
+
+def legacy_macos_config_path():
+    """Previous Intel macOS builds stored settings in ~/.tvhplayer.conf."""
+    if sys.platform != 'darwin':
+        return None
+    return Path.home() / '.tvhplayer.conf'
+
+
+def default_config():
+    return {
+        'volume': 50,
+        'last_server': 0,
+        'recording_path': str(Path.home()),
+        'window_geometry': dict(DEFAULT_GEOMETRY),
+        'servers': [],
+        'builtin_autostart': False,
+        'builtin_http_port': 0,
+        'builtin_htsp_port': 0,
+    }
+
+
+def _normalize(data):
+    cfg = default_config()
+    if not isinstance(data, dict):
+        return cfg
+    cfg.update(data)
+    geometry = data.get('window_geometry') or {}
+    merged_geo = dict(DEFAULT_GEOMETRY)
+    if isinstance(geometry, dict):
+        merged_geo.update({k: geometry[k] for k in DEFAULT_GEOMETRY if k in geometry})
+    cfg['window_geometry'] = merged_geo
+    servers = []
+    for raw in data.get('servers') or []:
+        servers.append(ServerConfig.from_dict(raw).to_dict())
+    cfg['servers'] = servers
+    try:
+        cfg['last_server'] = int(cfg.get('last_server') or 0)
+    except (TypeError, ValueError):
+        cfg['last_server'] = 0
+    try:
+        cfg['volume'] = int(cfg.get('volume') or 50)
+    except (TypeError, ValueError):
+        cfg['volume'] = 50
+    cfg['builtin_autostart'] = bool(cfg.get('builtin_autostart'))
+    for key in ('builtin_http_port', 'builtin_htsp_port'):
+        try:
+            cfg[key] = int(cfg.get(key) or 0)
+        except (TypeError, ValueError):
+            cfg[key] = 0
+    return cfg
+
+
+class ConfigStore:
+    def __init__(self, path=None):
+        self._uses_default_path = path is None
+        self.path = Path(path) if path is not None else default_config_path()
+        self.data = default_config()
+        self.load()
+
+    def load(self):
+        """Read the new config or migrate macOS settings without touching the old app."""
+        try:
+            if self.path.exists():
+                with self.path.open('r', encoding='utf-8') as handle:
+                    self.data = _normalize(json.load(handle))
+            else:
+                self.data = default_config()
+                legacy = legacy_macos_config_path() if self._uses_default_path else None
+                if legacy is not None and legacy.is_file():
+                    try:
+                        with legacy.open('r', encoding='utf-8') as handle:
+                            contents = json.load(handle)
+                        if isinstance(contents, dict):
+                            self.data = _normalize(contents)
+                            # The old file stays unchanged so the working Qt5 app
+                            # remains a fully usable fallback.
+                            try:
+                                self.save()
+                            except OSError:
+                                log.warning('Legacy settings loaded, but could not be saved at the new path')
+                            else:
+                                log.info('Imported legacy macOS TVHplayer settings')
+                    except (OSError, ValueError):
+                        log.warning('Could not import legacy macOS TVHplayer settings')
+        except (OSError, json.JSONDecodeError):
+            log.warning('Could not load TVHplayer settings; using defaults')
+            self.data = default_config()
+        return self.data
+
+    def save(self):
+        """Atomically write secrets-bearing config with owner-only permissions."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _normalize(self.data)
+        on_disk = dict(payload, servers=without_builtin_secrets(payload['servers']))
+        fd, tmp_name = tempfile.mkstemp(
+            prefix='.' + self.path.name + '.', suffix='.tmp',
+            dir=str(self.path.parent),
+        )
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(on_disk, handle, indent=2)
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, self.path)
+        finally:
+            if os.path.exists(tmp_name):
+                os.unlink(tmp_name)
+        self.data = payload
+        return payload
+
+    @property
+    def servers(self):
+        return self.data.setdefault('servers', [])
+
+    @servers.setter
+    def servers(self, value):
+        self.data['servers'] = [
+            ServerConfig.from_dict(item).to_dict() if isinstance(item, dict) else item.to_dict()
+            for item in (value or [])
+        ]
+
+    def snapshot(self):
+        return deepcopy(self.data)
