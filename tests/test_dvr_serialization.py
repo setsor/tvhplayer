@@ -12,6 +12,15 @@ def method(klass, name):
     return ast.get_source_segment(SOURCE, fn)
 
 class DvrIsolationTests(unittest.TestCase):
+    def test_native_video_geometry_reconciled_after_startup(self):
+        sync = method("TVHeadendClient", "_sync_player_geometry")
+        self.assertIn("container.layout().activate()", sync)
+        self.assertIn("frame.setGeometry(target)", sync)
+        self.assertIn('("idle_splash", "playback_spinner")', sync)
+        for name in ("showEvent", "resizeEvent"):
+            callback = method("TVHeadendClient", name)
+            self.assertIn("QTimer.singleShot(0, self._sync_player_geometry)", callback)
+
     def test_single_worker_pool(self):
         constructor = method("_DvrGate", "__init__")
         self.assertIn("self.pool.setMaxThreadCount(1)", constructor)
