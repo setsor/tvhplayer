@@ -67,7 +67,7 @@ class DvrIsolationTests(unittest.TestCase):
         self.assertIn("self._playing_channel()", stop)
         self.assertIn("entry.matches_channel(channel)", stop)
         self.assertIn("len(instant) != 1", stop)
-        self.assertIn("pane.stop_server_entry(instant[0])", stop)
+        self.assertIn('pane.stop_server_entry(instant[0], origin="MAIN_STOP")', stop)
         self.assertNotIn("pane.selected_task()", stop)
         self.assertNotIn("gate.submit(", stop)
 
