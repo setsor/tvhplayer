@@ -21,6 +21,17 @@ class DvrIsolationTests(unittest.TestCase):
             callback = method("TVHeadendClient", name)
             self.assertIn("QTimer.singleShot(0, self._sync_player_geometry)", callback)
 
+    def test_stop_diagnostic_is_common_to_both_controls(self):
+        task = method("TasksPanel", "stop_server_entry")
+        self.assertIn('origin="TASKS_STOP"', task)
+        self.assertIn("origin=origin", task)
+        main = method("TVHeadendClient", "stop_recording")
+        self.assertIn('origin="MAIN_STOP"', main)
+        gate = method("_DvrGate", "_completed")
+        self.assertIn("DVR_DIAG HTTP_RESULT", gate)
+        read = method("TasksPanel", "_server_read_done")
+        self.assertIn("DVR_DIAG DVR_VERIFIED", read)
+
     def test_single_worker_pool(self):
         constructor = method("_DvrGate", "__init__")
         self.assertIn("self.pool.setMaxThreadCount(1)", constructor)
