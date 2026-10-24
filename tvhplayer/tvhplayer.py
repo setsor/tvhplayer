@@ -36,6 +36,7 @@ try:
         recording_titles,
     )
     from .core.config import ConfigStore
+    from .core.logs import SERVER_LOG, configure_logging, log_dir
     from .core.qt_platform import prepare_qt_platform
     from .core.status_state import StatusState
     from .core.dvr import instant_recording_title
@@ -43,8 +44,10 @@ try:
     from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
     from .core.recorder import STALL_LIMIT, LocalRecorder
     from .core.vlc_player import VlcPlayer
+    from .core.playlist_sync import PlaylistSource, server_key
     from .builtin_supervisor import BuiltinSupervisor
     from .file_manager import show_in_file_manager
+    from .playlist_dialogs import BUSY as PLAYLIST_BUSY, ImportPlaylistDialog, PlaylistJob, PlaylistsDialog
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from core.backend import create_backend
@@ -61,6 +64,7 @@ except ImportError:
         recording_titles,
     )
     from core.config import ConfigStore
+    from core.logs import SERVER_LOG, configure_logging, log_dir
     from core.qt_platform import prepare_qt_platform
     from core.status_state import StatusState
     from core.dvr import instant_recording_title
@@ -68,8 +72,10 @@ except ImportError:
     from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
     from core.recorder import STALL_LIMIT, LocalRecorder
     from core.vlc_player import VlcPlayer
+    from core.playlist_sync import PlaylistSource, server_key
     from builtin_supervisor import BuiltinSupervisor
     from file_manager import show_in_file_manager
+    from playlist_dialogs import BUSY as PLAYLIST_BUSY, ImportPlaylistDialog, PlaylistJob, PlaylistsDialog
 try:
     from .a11y import (
         ShortcutHelpDialog,
@@ -112,101 +118,6 @@ import platform
 
 
 
-class Logger:
-    def __init__(self, name="TVHplayer"):
-        self.logger = logging.getLogger(name)
-        self.logger.setLevel(logging.DEBUG)
-        
-        # Create logs directory
-        log_dir = Path.home() / '.tvhplayer' / 'logs'
-        log_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Create timestamped log file
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        log_file = log_dir / f'tvhplayer_{timestamp}.log'
-        
-        # File handler with detailed formatting
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(funcName)s - %(message)s'
-        )
-        file_handler.setFormatter(file_formatter)
-        
-        # Console handler with simpler formatting
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(logging.INFO)
-        console_formatter = logging.Formatter('%(levelname)s: %(message)s')
-        console_handler.setFormatter(console_formatter)
-        
-        # Add handlers
-        self.logger.addHandler(file_handler)
-        self.logger.addHandler(console_handler)
-        
-        # Store log file path
-        self.log_file = log_file
-        
-        # Log system info at startup
-        self.log_system_info()
-    
-    def log_system_info(self):
-        """Log detailed system information"""
-        import platform
-        import sys
-        try:
-            import psutil
-        except ImportError:
-            psutil = None
-        
-        self.logger.info("=== System Information ===")
-        self.logger.info(f"OS: {platform.platform()}")
-        self.logger.info(f"Python: {sys.version}")
-        self.logger.info(f"CPU: {platform.processor()}")
-        
-        if psutil:
-            self.logger.info(f"Memory: {psutil.virtual_memory().total / (1024**3):.2f} GB")
-            self.logger.info(f"Disk Space: {psutil.disk_usage('/').free / (1024**3):.2f} GB free")
-        
-        # Never include raw environment variables: URLs, proxy credentials,
-        # session keys and tokens may appear under arbitrary variable names.
-        self.logger.info("Environment variable values omitted for privacy")
-        
-        self.logger.info("=== Dependencies ===")
-        try:
-            import PyQt6
-            self.logger.info(f"PyQt6 version: {PyQt6.QtCore.QT_VERSION_STR}")
-        except ImportError:
-            self.logger.error("PyQt6 not found")
-        
-        try:
-            import vlc
-            self.logger.info(f"python-vlc version: {vlc.__version__}")
-        except ImportError:
-            self.logger.error("python-vlc not found")
-        
-        try:
-            import requests
-            self.logger.info(f"requests version: {requests.__version__}")
-        except ImportError:
-            self.logger.error("requests not found")
-    
-    def debug(self, msg):
-        self.logger.debug(msg)
-    
-    def info(self, msg):
-        self.logger.info(msg)
-    
-    def warning(self, msg):
-        self.logger.warning(msg)
-    
-    def error(self, msg):
-        self.logger.error(msg)
-    
-    def critical(self, msg):
-        self.logger.critical(msg)
-    
-    def exception(self, msg):
-        self.logger.exception(msg)
 
 def fit_table_columns(table, stretch_columns):
     """Size short columns to their text and give the leftover window width to stretch_columns."""
@@ -2027,7 +1938,7 @@ class TVHeadendClient(QMainWindow):
         self.config_dir = str(self.config_store.path.parent)
         self.config = self.config_store.data
         print(f"Debug: Config file location: {self.config_file}")
-        print(f"Debug: Loaded {len(self.config.get('servers', []))} configured servers")
+        print(f"Debug: Config has {len(self.config.get('servers') or [])} servers and {len(self.config.get('playlists') or [])} playlists")
         print("Debug: Initializing TVHeadendClient")
         
         # Initialize fullscreen state        
@@ -2058,6 +1969,8 @@ class TVHeadendClient(QMainWindow):
         )
         self._backend = None
         self._backend_key = None
+        self._busy_playlists = set()
+        self._builtin_playlists_refreshed = False
         self.local_recorder = LocalRecorder()
         self.builtin = None
         if platform_supports_builtin():
@@ -2169,8 +2082,8 @@ class TVHeadendClient(QMainWindow):
         
     def get_icon(self, icon_name):
         """Get icon path and verify it exists"""
-        # Always use app_dir/icons path
-        icon_path = self.app_dir / 'icons' / icon_name
+        # setup_paths found the folder: next to the code in packages, one up in a checkout.
+        icon_path = Path(self.icons_dir) / icon_name
         if not icon_path.exists():
             print(f"Warning: Icon not found: {icon_path}")
             return None
@@ -2212,6 +2125,10 @@ class TVHeadendClient(QMainWindow):
         shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         help_menu.addAction(shortcuts_action)
         
+        log_folder_action = QAction("Open &Log Folder", self)
+        log_folder_action.triggered.connect(self.open_log_folder)
+        help_menu.addAction(log_folder_action)
+
         # Add About action to Help menu
         about_action = QAction("&About", self)
         about_action.triggered.connect(self.show_about)
@@ -2228,6 +2145,15 @@ class TVHeadendClient(QMainWindow):
         #settings_action = QAction("Settings", self)
         ##view_menu.addAction(settings_action)
         
+        import_playlist_action = QAction("&Import Playlist…", self)
+        import_playlist_action.setShortcut("Ctrl+I")
+        import_playlist_action.triggered.connect(self.import_playlist)
+        file_menu.addAction(import_playlist_action)
+        playlists_action = QAction("&Playlists…", self)
+        playlists_action.triggered.connect(self.show_playlists)
+        file_menu.addAction(playlists_action)
+        file_menu.addSeparator()
+
         # Create actions
         exit_action = QAction("E&xit", self)
         if sys.platform == "darwin":  # macOS
@@ -3014,6 +2940,7 @@ class TVHeadendClient(QMainWindow):
                 f"Recording started for: {channel.name} ({duration_minutes} minutes)",
                 timeout_ms=6000,
             )
+            self._show_on_picture(f"Recording {channel.name} ({duration_minutes} min)")
             # The actual server DVR grid, not this success notice, sets REC.
             self._refresh_tasks()
         except Exception as e:
@@ -3123,12 +3050,23 @@ class TVHeadendClient(QMainWindow):
         if hasattr(self, 'video_frame'):
             self.video_frame.setUpdatesEnabled(not playing and not waiting)
 
+    def _show_on_picture(self, text):
+        """Repeat a status message over the video, where it shows in fullscreen too.
+
+        Only while a picture is on screen; the status bar keeps the message for screen readers.
+        """
+        if getattr(self, '_playback_active', False) and getattr(self, 'player', None) is not None:
+            self.player.show_message(text)
+
     def _on_playback_started(self):
         self._awaiting_playback = False
         self._set_playback_spinner(False)
         self._protect_video_surface(True)
         self._mark_playing_channel()
         self._refresh_playback_status()
+        channel = self._playing_channel()
+        if channel is not None:
+            self._show_on_picture(f"{channel.number}  {channel.name}" if channel.number else channel.name)
 
     def _on_playback_failed(self):
         self._awaiting_playback = False
@@ -3590,6 +3528,7 @@ class TVHeadendClient(QMainWindow):
     def on_volume_changed(self, value):
         print(f"Debug: Volume changed to {value}")
         self.player.set_volume(value)
+        self._show_on_picture(f"Volume {value}")
 
     def eventFilter(self, obj, event):
         """Keep the video surface stable and handle player gestures."""
@@ -3736,6 +3675,7 @@ class TVHeadendClient(QMainWindow):
             describe(self.mute_btn, "Unmute", "Turn sound on. Keyboard: M. The button stays pressed while muted.")
             self.mute_btn.setToolTip("Unmute (M)")
             self.show_status("Muted")
+            self._show_on_picture("Muted")
             print("Debug: Audio muted")
         else:  # Switching to unmuted
             self.mute_btn.setIcon(QIcon(f"{self.icons_dir}/unmute.svg"))
@@ -3743,6 +3683,7 @@ class TVHeadendClient(QMainWindow):
             describe(self.mute_btn, "Mute", "Turn sound off. Keyboard: M. The button stays pressed while muted.")
             self.mute_btn.setToolTip("Mute (M)")
             self.show_status("Sound on")
+            self._show_on_picture("Sound on")
             print("Debug: Audio unmuted")
 
     def show_about(self):
@@ -3843,6 +3784,7 @@ class TVHeadendClient(QMainWindow):
             )
             return
         pane.stop_server_entry(instant[0], origin="MAIN_STOP")
+        self._show_on_picture("Recording Stop requested")
 
     def start_recording_indicator(self):
         """Update from current local state; server count comes from Tasks."""
@@ -3924,6 +3866,7 @@ class TVHeadendClient(QMainWindow):
             self.recording_monitor.timeout.connect(self.check_recording_status)
             self.recording_monitor.start(2000)
             self.show_status(f"Local recording started: {file_path}", timeout_ms=6000)
+            self._show_on_picture("Recording to this computer")
             self.start_recording_indicator()
             self._refresh_tasks(server=False)
             
@@ -3971,6 +3914,7 @@ class TVHeadendClient(QMainWindow):
                 self.recording_monitor = None
             self.local_recorder.stop()
             self.show_status("Local recording stopped")
+            self._show_on_picture("Recording to this computer stopped")
             self.sync_recording_indicator()
         except Exception as e:
             print(f"Debug: Error stopping local recording: {str(e)}")
@@ -4042,6 +3986,7 @@ class TVHeadendClient(QMainWindow):
         self._sync_builtin_controls()
         if is_builtin_server(self.current_server()):
             self.fetch_channels()
+        self._refresh_builtin_playlists()
 
     def _on_builtin_failed(self, message):
         print(f"Debug: Built-in server failed: {message}")
@@ -4078,12 +4023,163 @@ class TVHeadendClient(QMainWindow):
             f"Log in as \"{supervisor.username}\". The password is on the clipboard."
         )
 
+    def import_playlist(self):
+        ImportPlaylistDialog(self, self).exec()
+
+    def show_playlists(self):
+        PlaylistsDialog(self, self).exec()
+
+    def server_for_playlist(self, source):
+        """The server entry a playlist source was imported to, or None when it is gone."""
+        for server in self.import_targets():
+            if server_key(server) == source.server:
+                return server
+        return None
+
+    def claim_playlist(self, source):
+        key = (source.server, source.location)
+        if key in self._busy_playlists:
+            return False
+        self._busy_playlists.add(key)
+        return True
+
+    def release_playlist(self, source):
+        self._busy_playlists.discard((source.server, source.location))
+
+    def forget_playlist_source(self, data):
+        gone = PlaylistSource.from_dict(data)
+        self.config['playlists'] = [
+            source.to_dict() for source in self.playlist_sources()
+            if (source.server, source.location) != (gone.server, gone.location)
+        ]
+        self.save_config()
+
+    def _refresh_builtin_playlists(self):
+        """Refresh playlists on the built-in server once per session, one at a time."""
+        if self._builtin_playlists_refreshed:
+            return
+        self._builtin_playlists_refreshed = True
+        server = find_builtin_server(self.servers)
+        queue = [source for source in self.playlist_sources() if source.server == server_key(server or {})]
+
+        def next_job(*_args):
+            if not queue:
+                return
+            source = queue.pop(0)
+            job = PlaylistJob(self, source, server, parent=self)
+            job.finished.connect(lambda message, _skipped: self._playlist_refreshed(message, job.server))
+            job.failed.connect(lambda message: self._playlist_refresh_failed(source, message))
+            job.finished.connect(next_job)
+            job.failed.connect(next_job)
+            job.start()
+
+        next_job()
+
+    def _playlist_refresh_failed(self, source, message):
+        # An import the user started is already updating this playlist.
+        if message != PLAYLIST_BUSY:
+            self.show_status(f"Could not refresh {source.name}. {message}")
+
+    def _playlist_refreshed(self, message, server):
+        self.playlist_imported(server)
+        self.show_status(message)
+
+    def import_targets(self):
+        """Servers a playlist can go to: the built-in server first, then the user's."""
+        targets = []
+        builtin = find_builtin_server(self.servers)
+        if builtin is not None and self.builtin is not None and self.builtin.binary is not None:
+            targets.append(builtin)
+        targets.extend(server for server in self.servers if not is_builtin_server(server))
+        return targets
+
+    def playlist_sources(self):
+        return [PlaylistSource.from_dict(raw) for raw in self.config.get('playlists') or []]
+
+    def store_playlist_source(self, data):
+        source = PlaylistSource.from_dict(data)
+        sources = self.playlist_sources()
+        for index, existing in enumerate(sources):
+            if existing.server == source.server and existing.location == source.location:
+                sources[index] = source
+                break
+        else:
+            sources.append(source)
+        self.config['playlists'] = [item.to_dict() for item in sources]
+        self.save_config()
+
+    def ensure_server_ready(self, server, on_ready, on_failed):
+        """Call ``on_ready`` with a usable server entry, starting the built-in server if needed."""
+        if not is_builtin_server(server):
+            on_ready(server)
+            return
+        supervisor = self.builtin
+        if supervisor is None or supervisor.binary is None:
+            on_failed("The built-in server is not part of this version of TVHplayer.")
+            return
+        current = find_builtin_server(self.servers)
+        if builtin_requests_ready(current, supervisor.is_running()):
+            on_ready(current)
+            return
+
+        def disconnect():
+            for signal, slot in ((supervisor.ready, ready), (supervisor.failed, failed)):
+                try:
+                    signal.disconnect(slot)
+                except TypeError:
+                    pass
+
+        def ready(_http_port, _htsp_port):
+            disconnect()
+            on_ready(find_builtin_server(self.servers))
+
+        def failed(message):
+            disconnect()
+            on_failed(message)
+
+        supervisor.ready.connect(ready)
+        supervisor.failed.connect(failed)
+        self.show_status("Starting built-in server...")
+        supervisor.start()
+
+    def _same_server(self, first, second):
+        if not first or not second:
+            return False
+        return server_key(first) == server_key(second)
+
+    def is_current_server(self, server):
+        return self._same_server(self.current_server(), server)
+
+    def playlist_imported(self, server):
+        if self.is_current_server(server):
+            self.close_backend()
+            self.fetch_channels()
+
+    def show_server(self, server):
+        for index, candidate in enumerate(self.servers):
+            if self._same_server(candidate, server):
+                self.server_combo.setCurrentIndex(index)
+                return
+
+    def open_log_folder(self):
+        folder = log_dir()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        self.show_status(f"Logs are in {folder}")
+
     def show_builtin_log(self):
         supervisor = getattr(self, 'builtin', None)
         text = supervisor.log_text() if supervisor is not None else ''
         dialog = QDialog(self)
         dialog.setWindowTitle("Built-in server log")
         layout = QVBoxLayout(dialog)
+        where = QLabel(f"The full log is saved in {log_dir() / SERVER_LOG}")
+        where.setWordWrap(True)
+        where.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(where)
         view = QTextEdit()
         view.setReadOnly(True)
         view.setPlainText(text or "No log yet.")
@@ -4428,6 +4524,7 @@ class EPGDialog(QDialog):
 def main():
     """Main entry point for the application"""
     try:
+        configure_logging()
         # VLC 3 uses X11 embedding on Linux; macOS must load Qt's Cocoa plugin.
         prepare_qt_platform()
 
