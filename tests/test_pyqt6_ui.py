@@ -55,6 +55,42 @@ def test_ui_module_uses_pyqt6(monkeypatch):
     app.processEvents()
 
 
+
+def test_server_gear_opens_management_dialog_without_crashing(monkeypatch, tmp_path):
+    """The gear used to abort macOS: ServerDialog called EPG-only refresh_recording_buttons."""
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    server = {'name': 'NAS', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}
+    window.servers = [server]
+    opened = []
+
+    def fake_dialog_exec(dialog):
+        opened.append(dialog)
+        assert dialog.windowTitle() == 'Server Management'
+        assert dialog.server_list.count() == 1
+        assert dialog.server_list.item(0).text() == 'NAS'
+        assert dialog.server_list.accessibleName() == 'Configured servers'
+        return ui.QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(ui.ServerDialog, 'exec', fake_dialog_exec)
+    try:
+        # Test construction OUTSIDE a Qt signal so a missing method gives an
+        # ordinary Python test failure rather than PyQt's fatal SIGABRT.
+        standalone = ui.ServerDialog(window)
+        standalone.load_servers([server])
+        assert standalone.server_list.item(0).text() == 'NAS'
+        standalone.close()
+
+        window.show()
+        app.processEvents()
+        window.manage_servers_btn.click()
+        app.processEvents()
+        assert len(opened) == 1
+        assert window.servers == [server]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 class _FakeEvents:
     def __init__(self):
         self.handlers = {}

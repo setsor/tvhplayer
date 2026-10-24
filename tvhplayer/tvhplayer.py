@@ -1371,7 +1371,7 @@ class ServerDialog(QDialog):
         btn_layout.addWidget(open_web_btn)
         layout.addLayout(btn_layout)
         
-        self.refresh_recording_buttons()
+        # Server management has no recording buttons to refresh.
 
         # Close button
         close_btn = QPushButton("&Close")
