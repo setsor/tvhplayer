@@ -220,6 +220,10 @@ class _MarqueePlayer(_MediaPlayer):
         self.marquee[option] = value
         self.log.append(('text', value))
 
+    def video_set_spu(self, track_id):
+        self.log.append(('spu', track_id))
+        return super().video_set_spu(track_id)
+
     def set_media(self, media):
         super().set_media(media)
         self.log.append(('media', media))
@@ -243,14 +247,32 @@ def test_messages_are_drawn_over_the_picture_and_never_carry_over(monkeypatch):
     assert media.marquee[option.Timeout] == 2000
     assert media.marquee[option.Text] == 'Volume 40'
 
-    # A new picture inherits the last text, so it is cleared before the next media.
+    # Neither the old marquee nor old subtitle may survive a channel switch.
+    assert engine.select_subtitle_track(2)
+    assert media.subtitle_id == 2
     media.log.clear()
     engine.play('http://tv.example/two')
-    assert media.log[:2] == [('text', ''), ('media', 'http://tv.example/two')]
+    assert media.subtitle_id == -1
+    assert media.log[:3] == [
+        ('text', ''), ('spu', -1), ('media', 'http://tv.example/two')
+    ]
 
     media.log.clear()
     engine.stop()
     assert media.log == [('text', ''), ('stop', None)]
+
+
+def test_channel_switch_succeeds_when_previous_spu_cannot_be_reset(monkeypatch):
+    """Subtitle cleanup is best-effort, never a precondition for next playback."""
+    media = _MediaPlayer()
+    _install_vlc(monkeypatch, _Instance(media))
+    engine = VlcPlayer()
+    engine.play('http://tv.example/one')
+    media.subtitle_id = 2
+    media.video_set_spu = None
+    engine.play('http://tv.example/two')
+    assert media.media == 'http://tv.example/two'
+    assert engine.is_playing()
 
 
 def test_messages_are_skipped_without_marquee_support(monkeypatch):
