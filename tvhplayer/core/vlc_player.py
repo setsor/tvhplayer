@@ -111,6 +111,55 @@ class VlcPlayer(Player):
         if option is not None and self._player is not None:
             self._player.video_set_marquee_string(option.Text, text)
 
+
+    def subtitle_tracks(self):
+        """Return available (track ID, label) pairs from the current VLC media.
+
+        DVB subtitles and regular text subtitle tracks are surfaced by libVLC
+        once stream discovery completes. Negative track IDs are represented
+        by the application's single "Off" menu action.
+        """
+        player = self._player
+        if player is None or not player.is_playing():
+            return []
+        getter = getattr(player, 'video_get_spu_description', None)
+        if not callable(getter):
+            return []
+        try:
+            tracks = []
+            for track_id, title in (getter() or []):
+                track_id = int(track_id)
+                if track_id < 0:
+                    continue
+                if isinstance(title, bytes):
+                    title = title.decode('utf-8', errors='replace')
+                tracks.append((track_id, str(title or f'Track {track_id}')))
+            return tracks
+        except (TypeError, ValueError, AttributeError, RuntimeError):
+            return []
+
+    def selected_subtitle_track(self):
+        player = self._player
+        getter = getattr(player, 'video_get_spu', None) if player is not None else None
+        if not callable(getter):
+            return -1
+        try:
+            return int(getter())
+        except (TypeError, ValueError, RuntimeError):
+            return -1
+
+    def select_subtitle_track(self, track_id):
+        player = self._player
+        if player is None or not player.is_playing():
+            return False
+        setter = getattr(player, 'video_set_spu', None)
+        if not callable(setter):
+            return False
+        try:
+            return setter(int(track_id)) == 0
+        except (TypeError, ValueError, RuntimeError):
+            return False
+
     def is_playing(self) -> bool:
         return bool(self._player and self._player.is_playing())
 

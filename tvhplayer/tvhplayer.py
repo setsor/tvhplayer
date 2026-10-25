@@ -3383,6 +3383,33 @@ class TVHeadendClient(QMainWindow):
         )
         fullscreen_action.triggered.connect(self.toggle_fullscreen)
 
+        subtitles_menu = menu.addMenu("Subtitles")
+        subtitles_menu.setAccessibleName("Subtitle tracks")
+        subtitles_menu.setEnabled(playing)
+        if playing:
+            current_track = self.player.selected_subtitle_track()
+            off_action = subtitles_menu.addAction("Off")
+            off_action.setCheckable(True)
+            off_action.setChecked(current_track < 0)
+            off_action.triggered.connect(
+                lambda _checked=False: self._select_subtitle_track(-1, "Off")
+            )
+
+            available = self.player.subtitle_tracks()
+            if available:
+                subtitles_menu.addSeparator()
+                for subtitle_id, label in available:
+                    action = subtitles_menu.addAction(label)
+                    action.setCheckable(True)
+                    action.setChecked(current_track == subtitle_id)
+                    action.triggered.connect(
+                        lambda _checked=False, track_id=subtitle_id, name=label:
+                        self._select_subtitle_track(track_id, name)
+                    )
+            else:
+                unavailable = subtitles_menu.addAction("No subtitle tracks available")
+                unavailable.setEnabled(False)
+
         menu.addSeparator()
 
         record_action = menu.addAction(QIcon(f"{self.icons_dir}/record.svg"), "Record")
@@ -3397,6 +3424,20 @@ class TVHeadendClient(QMainWindow):
         epg_action.setEnabled(channel is not None)
         epg_action.triggered.connect(lambda: self.show_channel_epg(channel))
         return menu
+
+    def _select_subtitle_track(self, track_id, label):
+        """Switch the current VLC subtitle track from the playback context menu."""
+        try:
+            if not self.player or not self.player.is_playing():
+                self.show_status("Start playback to select subtitles")
+                return
+            if not self.player.select_subtitle_track(track_id):
+                self.show_status("Subtitle track is unavailable")
+                return
+            self.show_status("Subtitles off" if track_id < 0 else f"Subtitles: {label}")
+        except Exception as exc:
+            # An exception from a Qt signal callback can terminate PyQt6/macOS.
+            self.show_status(f"Could not select subtitles: {exc}")
 
     def show_video_context_menu(self, position):
         """Right-click menu on the video surface."""

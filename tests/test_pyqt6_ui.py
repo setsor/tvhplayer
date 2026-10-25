@@ -106,6 +106,8 @@ class _FakeVlcPlayer:
         self._muted = 0
         self._playing = False
         self._events = _FakeEvents()
+        self.subtitle_id = -1
+        self.subtitle_options = []
 
     def event_manager(self):
         return self._events
@@ -133,6 +135,18 @@ class _FakeVlcPlayer:
 
     def audio_set_mute(self, value):
         self._muted = value
+
+    def video_get_spu_description(self):
+        return list(self.subtitle_options)
+
+    def video_get_spu(self):
+        return self.subtitle_id
+
+    def video_set_spu(self, track_id):
+        if track_id not in [-1] + [track for track, _ in self.subtitle_options]:
+            return -1
+        self.subtitle_id = track_id
+        return 0
 
     def audio_set_volume(self, value):
         return None
@@ -254,6 +268,48 @@ def test_same_window_fullscreen_hides_chrome(monkeypatch, tmp_path):
         app.processEvents()
 
 
+
+def test_subtitles_context_menu_lists_tracks_switches_and_disables(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        menu_before = window._video_context_menu()
+        before = next(action.menu() for action in menu_before.actions()
+                      if action.text() == 'Subtitles')
+        assert not before.menuAction().isEnabled()
+
+        fake_player._playing = True
+        fake_player.subtitle_options = [(3, b'Romanian'), (5, 'English')]
+        available_menu = window._video_context_menu()
+        subtitles = next(action.menu() for action in available_menu.actions()
+                         if action.text() == 'Subtitles')
+        labels = [action.text() for action in subtitles.actions() if not action.isSeparator()]
+        assert labels == ['Off', 'Romanian', 'English']
+        assert subtitles.actions()[0].isChecked()
+        assert subtitles.actions()[1].isChecked() is False
+
+        subtitles.actions()[1].trigger()
+        assert fake_player.subtitle_id == 3
+        assert window.status_notice_label.text() == 'Subtitles: Romanian'
+
+        checked = window._video_context_menu()
+        subs2 = next(action.menu() for action in checked.actions()
+                     if action.text() == 'Subtitles')
+        assert next(a for a in subs2.actions() if a.text() == 'Romanian').isChecked()
+        next(a for a in subs2.actions() if a.text() == 'Off').trigger()
+        assert fake_player.subtitle_id == -1
+
+        fake_player.subtitle_options = []
+        no_tracks_menu = window._video_context_menu()
+        subs3 = next(action.menu() for action in no_tracks_menu.actions()
+                     if action.text() == 'Subtitles')
+        no_tracks = next(a for a in subs3.actions()
+                         if a.text() == 'No subtitle tracks available')
+        assert not no_tracks.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_video_context_menu_and_double_click(monkeypatch, tmp_path):
     from PyQt6.QtCore import QEvent, QPointF, Qt
     from PyQt6.QtGui import QMouseEvent
@@ -275,6 +331,7 @@ def test_video_context_menu_and_double_click(monkeypatch, tmp_path):
             'Stop',
             'Mute',
             'Fullscreen',
+            'Subtitles',
             'Record',
             'Record Locally',
             'Show EPG',

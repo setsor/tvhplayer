@@ -22,6 +22,8 @@ class _MediaPlayer:
         self.mouse_input = None
         self.stopped = False
         self.window_id = None
+        self.subtitle_id = -1
+        self.subtitle_options = [(-1, 'Off'), (2, b'Romanian'), (4, 'English')]
         self._events = _Events()
 
     def event_manager(self):
@@ -57,6 +59,18 @@ class _MediaPlayer:
 
     def audio_set_mute(self, value):
         self.muted = bool(value)
+
+    def video_get_spu_description(self):
+        return list(self.subtitle_options)
+
+    def video_get_spu(self):
+        return self.subtitle_id
+
+    def video_set_spu(self, track_id):
+        if track_id not in [key for key, _ in self.subtitle_options]:
+            return -1
+        self.subtitle_id = track_id
+        return 0
 
     def video_set_key_input(self, value):
         self.key_input = value
@@ -143,6 +157,40 @@ def test_play_stop_mute_and_stopped_callback_is_scheduled(monkeypatch):
     engine.stop()
     assert media.stopped is True
     assert engine.is_playing() is False
+
+
+
+def test_subtitle_tracks_are_discoverable_and_selectable_only_during_playback(monkeypatch):
+    media = _MediaPlayer()
+    _install_vlc(monkeypatch, _Instance(media))
+    engine = VlcPlayer()
+
+    assert engine.subtitle_tracks() == []
+    assert not engine.select_subtitle_track(2)
+
+    engine.play('http://nas:9981/stream/channel/test')
+    assert engine.subtitle_tracks() == [(2, 'Romanian'), (4, 'English')]
+    assert engine.selected_subtitle_track() == -1
+    assert engine.select_subtitle_track(2)
+    assert engine.selected_subtitle_track() == 2
+    assert not engine.select_subtitle_track(99)
+    assert engine.select_subtitle_track(-1)
+    assert engine.selected_subtitle_track() == -1
+    engine.stop()
+    assert engine.subtitle_tracks() == []
+
+
+def test_unavailable_libvlc_subtitle_api_returns_safe_defaults(monkeypatch):
+    media = _MediaPlayer()
+    media.video_get_spu_description = None
+    media.video_get_spu = None
+    media.video_set_spu = None
+    _install_vlc(monkeypatch, _Instance(media))
+    engine = VlcPlayer()
+    engine.play('http://nas:9981/stream/channel/test')
+    assert engine.subtitle_tracks() == []
+    assert engine.selected_subtitle_track() == -1
+    assert not engine.select_subtitle_track(2)
 
 
 def test_close_stops_and_drops_the_player(monkeypatch):
