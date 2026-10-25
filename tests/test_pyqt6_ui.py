@@ -511,6 +511,40 @@ def test_manual_subtitles_override_pending_default_and_off_option(monkeypatch, t
         app.processEvents()
 
 
+
+def test_stale_spu_is_disabled_before_new_channel_track_discovery(monkeypatch, tmp_path):
+    """Do not leave a previous/early SPU painted while DVB tracks are unknown."""
+    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        class Backend:
+            def stream_url(self, channel):
+                return 'http://tv.example/' + channel.uuid
+
+        window.get_backend = lambda: Backend()
+        window.current_server = lambda: {'subtitle_language': 'ron'}
+        window.play_channel_by_data(ui.Channel(uuid='a', name='Old'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert window._subtitle_default_timer.isActive()
+
+        # VLC can report an active old/wrong SPU before describing tracks.
+        fake.subtitle_options = []
+        fake.subtitle_id = 3
+        window._apply_subtitle_default()
+        assert fake.subtitle_id == -1
+        assert window._subtitle_default_timer.isActive()
+
+        # Once discovered, the actual preferred DVB track is still applied.
+        fake.subtitle_options = [(3, b'English'), (7, b'DVB Subtitle (Romanian)')]
+        window._apply_subtitle_default()
+        assert fake.subtitle_id == 7
+        assert window._subtitle_auto_applied
+        assert not window._subtitle_default_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_subtitle_preference_timeout_and_stop_cancel(monkeypatch, tmp_path):
     app, ui, window, fake = _make_player(monkeypatch, tmp_path)
     try:

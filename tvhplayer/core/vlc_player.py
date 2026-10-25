@@ -66,12 +66,25 @@ class VlcPlayer(Player):
         self._events_bound = True
 
     def play(self, url: str):
-        # Each new picture inherits the last marquee text. Clear it so the
-        # previous channel's message does not reappear.
+        # Keep these markers free of URLs and credentials. VLC 3.0 set_media()
+        # synchronously tears down the previous input; if it stalls on macOS,
+        # the last marker in app.log identifies the blocked native operation.
+        print("Debug: VLC channel switch: begin")
+        # Both VLC's marquee and subtitle track can survive video output reuse.
+        # Clear the old subtitle *before* the previous input is discarded,
+        # without changing the user's persistent subtitle preference.
         self._set_marquee_text('')
+        if self.is_playing():
+            print("Debug: VLC channel switch: subtitle reset begin")
+            reset_ok = self.select_subtitle_track(-1)
+            print(f"Debug: VLC channel switch: subtitle reset complete ({reset_ok})")
+        print("Debug: VLC channel switch: media creation begin")
         media = self._instance.media_new(url)
+        print("Debug: VLC channel switch: set_media begin")
         self._player.set_media(media)
+        print("Debug: VLC channel switch: set_media complete")
         self._player.play()
+        print("Debug: VLC channel switch: play returned")
         self._release_input()
 
     def stop(self):
