@@ -3162,6 +3162,12 @@ class TVHeadendClient(QMainWindow):
                 return
             tracks = player.subtitle_tracks()
             if not tracks:
+                # DVB track descriptions can arrive after VLC has already
+                # activated an SPU from its previous/new input. Turn it off
+                # immediately instead of leaving a stale subtitle overlay
+                # visible until track discovery finishes.
+                if player.selected_subtitle_track() >= 0:
+                    player.select_subtitle_track(-1)
                 return
 
             language = self._subtitle_preference
