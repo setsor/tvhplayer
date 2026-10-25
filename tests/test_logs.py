@@ -46,6 +46,25 @@ def restore_logging():
             handler.close()
 
 
+
+def test_no_empty_builtin_log_until_server_writes(tmp_path, restore_logging):
+    """A remote TVHeadend connection should not generate an empty server log."""
+    folder = logs.configure_logging(tmp_path / 'logs', capture_output=False)
+    app_log = folder / logs.APP_LOG
+    server_log = folder / logs.SERVER_LOG
+
+    assert app_log.exists()
+    assert not server_log.exists()
+
+    logging.getLogger('tvhplayer.test').info('Remote TVHeadend is configured')
+    assert not server_log.exists()
+
+    logging.getLogger(logs.SERVER_LOGGER).info('Built-in Tvheadend started')
+    assert server_log.exists()
+    assert 'Built-in Tvheadend started' in server_log.read_text(encoding='utf-8')
+    assert 'Built-in Tvheadend started' not in app_log.read_text(encoding='utf-8')
+
+
 def test_configure_writes_app_and_server_logs(tmp_path, restore_logging):
     folder = logs.configure_logging(tmp_path / 'logs', capture_output=False)
     logging.getLogger('tvhplayer.test').warning('something odd')

@@ -61,13 +61,14 @@ class SanitizingFormatter(logging.Formatter):
         return sanitize(super().format(record))
 
 
-def _file_handler(path: Path) -> logging.Handler:
+def _file_handler(path: Path, *, delay: bool = False) -> logging.Handler:
     handler = RotatingFileHandler(
         str(path),
         maxBytes=LOG_MAX_BYTES,
         backupCount=LOG_BACKUP_COUNT,
         encoding='utf-8',
         errors='backslashreplace',
+        delay=delay,
     )
     handler.setFormatter(SanitizingFormatter(LOG_FORMAT, datefmt=LOG_DATE_FORMAT))
     handler._tvhplayer_managed = True
@@ -219,7 +220,9 @@ def configure_logging(directory=None, capture_output=True) -> Path:
     try:
         directory.mkdir(parents=True, exist_ok=True)
         app_handler = _file_handler(directory / APP_LOG)
-        server_handler = _file_handler(directory / SERVER_LOG)
+        # No empty tvheadend.log when the user connects only to a remote TVHeadend.
+        # Opening is deferred until the built-in server actually logs a message.
+        server_handler = _file_handler(directory / SERVER_LOG, delay=True)
     except OSError as exc:
         print(f'Warning: could not open the log folder {directory}: {exc}', file=sys.stderr)
         return directory
