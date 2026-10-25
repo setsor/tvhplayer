@@ -49,15 +49,20 @@ def test_ui_module_uses_pyqt6(monkeypatch):
     })
     assert config_dialog.get_server_config()['protocol'] == 'htsp'
     assert config_dialog.get_server_config()['subtitle_language'] == ''
+    assert config_dialog.get_server_config()['remember_subtitle_selection'] is False
     config_dialog.set_server_config({
         'name': 'NAS',
         'url': 'http://127.0.0.1:9981',
         'subtitle_language': 'rum',
+        'remember_subtitle_selection': True,
     })
     assert config_dialog.subtitle_language_combo.currentText() == 'Romanian'
     assert config_dialog.get_server_config()['subtitle_language'] == 'ron'
+    assert config_dialog.remember_subtitle_checkbox.isChecked()
+    assert config_dialog.get_server_config()['remember_subtitle_selection'] is True
     config_dialog.set_server_config({'name': 'NAS', 'url': 'http://127.0.0.1:9981'})
     assert config_dialog.get_server_config()['subtitle_language'] == ''
+    assert config_dialog.get_server_config()['remember_subtitle_selection'] is False
 
     error_dialog = ui.ConnectionErrorDialog('local', 'connection refused')
     assert error_dialog.windowTitle() == 'Connection Error'
@@ -293,7 +298,8 @@ def test_subtitles_context_menu_lists_tracks_switches_and_disables(monkeypatch, 
         subtitles = next(action.menu() for action in available_menu.actions()
                          if action.text() == 'Subtitles')
         labels = [action.text() for action in subtitles.actions() if not action.isSeparator()]
-        assert labels == ['Off', 'Romanian', 'English']
+        assert labels == ['Off', 'Romanian', 'English', 'Remember subtitle choices for this server']
+        assert not subtitles.actions()[-1].isEnabled()  # No live server playback here.
         assert subtitles.actions()[0].isChecked()
         assert not next(action for action in subtitles.actions()
                         if action.text() == 'Romanian').isChecked()
@@ -320,6 +326,104 @@ def test_subtitles_context_menu_lists_tracks_switches_and_disables(monkeypatch, 
         window.close()
         app.processEvents()
 
+
+
+
+def test_player_subtitle_choice_can_be_remembered_as_per_server_default(monkeypatch, tmp_path):
+    """An explicit track or Off updates only the active server when opted in."""
+    from tvhplayer.core.config import ConfigStore
+
+    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        window.servers = [
+            {'name': 'NAS', 'url': 'http://tv.example:9981',
+             'subtitle_language': 'ron', 'remember_subtitle_selection': False},
+            {'name': 'Backup', 'url': 'http://backup.example:9981',
+             'subtitle_language': 'eng', 'remember_subtitle_selection': False},
+        ]
+        window.server_combo.blockSignals(True)
+        window.server_combo.clear()
+        for server in window.servers:
+            window.server_combo.addItem(server['name'])
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        assert window.save_config()
+
+        class Backend:
+            def stream_url(self, channel):
+                return 'http://tv.example/stream/channel/' + channel.uuid
+
+        window.get_backend = lambda: Backend()
+        fake.subtitle_options = [(3, b'Romanian'), (5, b'English'), (7, b'Track 7')]
+        window.play_channel_by_data(ui.Channel(uuid='a', name='News'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+
+        def remember_action():
+            menu = window._video_context_menu()
+            subtitles = next(a.menu() for a in menu.actions() if a.text() == 'Subtitles')
+            return next(a for a in subtitles.actions()
+                        if a.text() == 'Remember subtitle choices for this server')
+
+        option = remember_action()
+        assert option.isEnabled() and not option.isChecked()
+        option.trigger()
+        assert window.servers[0]['remember_subtitle_selection'] is True
+        assert remember_action().isChecked()
+
+        # Automatic selection from track discovery does not rewrite settings.
+        assert ConfigStore(window.config_store.path).servers[0]['subtitle_language'] == 'ron'
+        window._select_subtitle_track(5, 'English')
+        assert fake.subtitle_id == 5
+        assert window.servers[0]['subtitle_language'] == 'eng'
+        assert ConfigStore(window.config_store.path).servers[0]['subtitle_language'] == 'eng'
+
+        # Unknown VLC track labels work manually, but do not erase defaults.
+        window._select_subtitle_track(7, 'Track 7')
+        assert fake.subtitle_id == 7
+        assert window.servers[0]['subtitle_language'] == 'eng'
+
+        window._select_subtitle_track(-1, 'Off')
+        assert fake.subtitle_id == -1
+        saved = ConfigStore(window.config_store.path)
+        assert saved.servers[0]['subtitle_language'] == ''
+        assert saved.servers[0]['remember_subtitle_selection'] is True
+        assert saved.servers[1]['subtitle_language'] == 'eng'
+        assert saved.servers[1]['remember_subtitle_selection'] is False
+
+        # Off is applied to the next channel even if VLC selects a track.
+        window.play_channel_by_data(ui.Channel(uuid='b', name='Films'))
+        fake.subtitle_id = 5
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert fake.subtitle_id == -1
+
+        # Turning remembrance off preserves the prior default.
+        remember_action().trigger()
+        assert window.servers[0]['remember_subtitle_selection'] is False
+        window._select_subtitle_track(3, 'Romanian')
+        assert ConfigStore(window.config_store.path).servers[0]['subtitle_language'] == ''
+
+        # Switching servers must not alter the previous server's default.
+        window.server_combo.setCurrentIndex(1)
+        window.play_channel_by_data(ui.Channel(uuid='c', name='Music'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert not remember_action().isChecked()
+        window._select_subtitle_track(3, 'Romanian')
+        saved = ConfigStore(window.config_store.path)
+        assert [x['subtitle_language'] for x in saved.servers] == ['', 'eng']
+
+        # Arbitrary URL playback must never rewrite server defaults.
+        window.server_combo.setCurrentIndex(0)
+        window.play_url('https://example.org/video.ts')
+        assert not remember_action().isEnabled()
+        window._select_subtitle_track(5, 'English')
+        saved = ConfigStore(window.config_store.path)
+        assert [x['subtitle_language'] for x in saved.servers] == ['', 'eng']
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_server_subtitle_default_applies_after_track_discovery(monkeypatch, tmp_path):

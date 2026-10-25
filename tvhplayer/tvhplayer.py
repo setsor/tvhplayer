@@ -44,7 +44,7 @@ try:
     from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
     from .core.recorder import STALL_LIMIT, LocalRecorder
     from .core.vlc_player import VlcPlayer
-    from .core.subtitle_preferences import SUBTITLE_LANGUAGES, normalize_subtitle_language, preferred_subtitle_track
+    from .core.subtitle_preferences import SUBTITLE_LANGUAGES, normalize_subtitle_language, preferred_subtitle_track, subtitle_track_language
     from .core.playlist_sync import PlaylistSource, server_key
     from .builtin_supervisor import BuiltinSupervisor
     from .file_manager import show_in_file_manager
@@ -73,7 +73,7 @@ except ImportError:
     from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
     from core.recorder import STALL_LIMIT, LocalRecorder
     from core.vlc_player import VlcPlayer
-    from core.subtitle_preferences import SUBTITLE_LANGUAGES, normalize_subtitle_language, preferred_subtitle_track
+    from core.subtitle_preferences import SUBTITLE_LANGUAGES, normalize_subtitle_language, preferred_subtitle_track, subtitle_track_language
     from core.playlist_sync import PlaylistSource, server_key
     from builtin_supervisor import BuiltinSupervisor
     from file_manager import show_in_file_manager
@@ -1485,6 +1485,14 @@ class ServerConfigDialog(QDialog):
             "no other language will be selected automatically.",
         )
         layout.addRow(buddy_label("Default &subtitles:", self.subtitle_language_combo), self.subtitle_language_combo)
+        self.remember_subtitle_checkbox = QCheckBox("Remember subtitle changes made in the player")
+        describe(
+            self.remember_subtitle_checkbox,
+            "Remember subtitle choices",
+            "When enabled, choosing a subtitle language or Off during live TV updates "
+            "the default subtitle selection for this server.",
+        )
+        layout.addRow(self.remember_subtitle_checkbox)
         
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1503,6 +1511,7 @@ class ServerConfigDialog(QDialog):
             'protocol': protocol,
             'htsp_port': self.htsp_port_input.value(),
             'subtitle_language': self.subtitle_language_combo.currentData() or '',
+            'remember_subtitle_selection': self.remember_subtitle_checkbox.isChecked(),
         }
         
     def set_server_config(self, config):
@@ -1513,6 +1522,7 @@ class ServerConfigDialog(QDialog):
         subtitle_language = normalize_subtitle_language(config.get('subtitle_language'))
         subtitle_index = self.subtitle_language_combo.findData(subtitle_language)
         self.subtitle_language_combo.setCurrentIndex(max(0, subtitle_index))
+        self.remember_subtitle_checkbox.setChecked(config.get('remember_subtitle_selection') is True)
         protocol = (config.get('protocol') or PROTOCOL_HTTP).lower()
         index = self.protocol_combo.findData(protocol)
         self.protocol_combo.setCurrentIndex(index if index >= 0 else 0)
@@ -2015,6 +2025,7 @@ class TVHeadendClient(QMainWindow):
         self._subtitle_default_timer.setInterval(400)
         self._subtitle_default_timer.timeout.connect(self._apply_subtitle_default)
         self._subtitle_preference = None
+        self._subtitle_playback_server_index = None
         self._subtitle_attempts = 0
         self._subtitle_manual_override = False
         self._subtitle_auto_applied = False
@@ -3095,6 +3106,34 @@ class TVHeadendClient(QMainWindow):
             normalize_subtitle_language((self.current_server() or {}).get('subtitle_language'))
             if for_live_channel else None
         )
+        self._subtitle_playback_server_index = (
+            self.server_combo.currentIndex() if for_live_channel and self.current_server() else None
+        )
+
+    def _subtitle_live_server(self):
+        """The server from which the currently playing live channel was started."""
+        index = self._subtitle_playback_server_index
+        if (index is None or self._playback_channel is None
+                or self.server_combo.currentIndex() != index
+                or not 0 <= index < len(self.servers)):
+            return None
+        return self.servers[index]
+
+    def _set_remember_subtitle_selection(self, enabled):
+        """Toggle remembering subtitle choices without changing VLC playback."""
+        server = self._subtitle_live_server()
+        if server is None:
+            self.show_status("Start a live channel to change subtitle preferences")
+            return
+        previous = bool(server.get('remember_subtitle_selection'))
+        server['remember_subtitle_selection'] = bool(enabled)
+        if not self.save_config():
+            server['remember_subtitle_selection'] = previous
+            self.show_status("Could not save subtitle preference")
+            return
+        self.show_status(
+            "Remember subtitle choices: On" if enabled else "Remember subtitle choices: Off"
+        )
 
     def _start_subtitle_default(self):
         """VLC discovers DVB subtitle tracks asynchronously after video starts."""
@@ -3496,6 +3535,14 @@ class TVHeadendClient(QMainWindow):
                 unavailable = subtitles_menu.addAction("No subtitle tracks available")
                 unavailable.setEnabled(False)
 
+        subtitles_menu.addSeparator()
+        remember_action = subtitles_menu.addAction("Remember subtitle choices for this server")
+        remember_action.setCheckable(True)
+        live_server = self._subtitle_live_server() if playing else None
+        remember_action.setEnabled(live_server is not None)
+        remember_action.setChecked(bool(live_server and live_server.get('remember_subtitle_selection')))
+        remember_action.triggered.connect(self._set_remember_subtitle_selection)
+
         menu.addSeparator()
 
         record_action = menu.addAction(QIcon(f"{self.icons_dir}/record.svg"), "Record")
@@ -3524,7 +3571,24 @@ class TVHeadendClient(QMainWindow):
             # including an explicit Off selection.
             self._subtitle_manual_override = True
             self._subtitle_default_timer.stop()
-            self.show_status("Subtitles off" if track_id < 0 else f"Subtitles: {label}")
+            notice = "Subtitles off" if track_id < 0 else f"Subtitles: {label}"
+            server = self._subtitle_live_server()
+            if server is not None and server.get('remember_subtitle_selection'):
+                # Save only explicit menu choices, never VLC's automatic track.
+                # Do not overwrite the default for unlabelled/ambiguous tracks.
+                language = '' if track_id < 0 else subtitle_track_language(label)
+                if language is None:
+                    notice += " (language unknown; default unchanged)"
+                else:
+                    previous = server.get('subtitle_language', '')
+                    server['subtitle_language'] = language
+                    if self.save_config():
+                        self._subtitle_preference = language
+                        notice += " (default saved)"
+                    else:
+                        server['subtitle_language'] = previous
+                        notice += " (default not saved)"
+            self.show_status(notice)
         except Exception as exc:
             # An exception from a Qt signal callback can terminate PyQt6/macOS.
             self.show_status(f"Could not select subtitles: {exc}")
@@ -3548,6 +3612,7 @@ class TVHeadendClient(QMainWindow):
         dialog.load_servers(self.servers)
         print(f"Debug: Loaded {len(self.servers)} servers into dialog")
         if dialog.exec() == QDialog.DialogCode.Accepted:
+            self._reset_subtitle_default()
             self.servers = ensure_builtin_server(
                 dialog.servers,
                 self.config.get('builtin_http_port') or 0,
@@ -3590,8 +3655,10 @@ class TVHeadendClient(QMainWindow):
             self.config = self.config_store.data
             self.servers = self.config_store.servers
             print("Debug: Configuration saved successfully")
+            return True
         except Exception as e:
             print(f"Debug: Error saving config: {str(e)}")
+            return False
 
     def play_channel(self, item):
         """Play the selected channel"""
