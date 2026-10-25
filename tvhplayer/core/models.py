@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+
+from .subtitle_preferences import normalize_subtitle_language
 from typing import Any, Dict, List, Optional
 
 
@@ -15,6 +17,7 @@ class ServerConfig:
     protocol: str = PROTOCOL_HTTP
     htsp_port: int = 9982
     builtin: bool = False
+    subtitle_language: str = ''
 
     @classmethod
     def from_dict(cls, data):
@@ -34,6 +37,7 @@ class ServerConfig:
             protocol=protocol,
             htsp_port=htsp_port,
             builtin=bool(data.get('builtin')),
+            subtitle_language=normalize_subtitle_language(data.get('subtitle_language')),
         )
 
     def to_dict(self):
@@ -45,6 +49,7 @@ class ServerConfig:
             'protocol': self.protocol,
             'htsp_port': self.htsp_port,
             'builtin': self.builtin,
+            'subtitle_language': self.subtitle_language,
         }
 
 

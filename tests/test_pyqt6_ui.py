@@ -48,6 +48,16 @@ def test_ui_module_uses_pyqt6(monkeypatch):
         'htsp_port': 9982,
     })
     assert config_dialog.get_server_config()['protocol'] == 'htsp'
+    assert config_dialog.get_server_config()['subtitle_language'] == ''
+    config_dialog.set_server_config({
+        'name': 'NAS',
+        'url': 'http://127.0.0.1:9981',
+        'subtitle_language': 'rum',
+    })
+    assert config_dialog.subtitle_language_combo.currentText() == 'Romanian'
+    assert config_dialog.get_server_config()['subtitle_language'] == 'ron'
+    config_dialog.set_server_config({'name': 'NAS', 'url': 'http://127.0.0.1:9981'})
+    assert config_dialog.get_server_config()['subtitle_language'] == ''
 
     error_dialog = ui.ConnectionErrorDialog('local', 'connection refused')
     assert error_dialog.windowTitle() == 'Connection Error'

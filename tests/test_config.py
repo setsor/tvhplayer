@@ -16,6 +16,29 @@ def test_config_roundtrip_normalizes_servers(tmp_path):
     assert loaded.data['window_geometry']['width'] == 1200
 
 
+def test_per_server_subtitle_defaults_persist_without_changing_other_servers(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    store = ConfigStore(path)
+    store.servers = [
+        {'name': 'NAS', 'url': 'http://10.0.1.243:9981', 'subtitle_language': 'Romanian'},
+        {'name': 'Other', 'url': 'http://127.0.0.1:9981'},
+    ]
+    store.save()
+    reloaded = ConfigStore(path)
+    assert reloaded.servers[0]['subtitle_language'] == 'ron'
+    assert reloaded.servers[1]['subtitle_language'] == ''
+
+    reloaded.servers[1]['subtitle_language'] = 'eng'
+    reloaded.save()
+    again = ConfigStore(path)
+    assert [server['subtitle_language'] for server in again.servers] == ['ron', 'eng']
+
+    # Legacy and unknown options must not accidentally enable subtitles.
+    again.servers = [{'name': 'Box', 'url': 'http://box', 'subtitle_language': 'unknown'}]
+    again.save()
+    assert ConfigStore(path).servers[0]['subtitle_language'] == ''
+
+
 def test_corrupt_config_falls_back_to_defaults(tmp_path):
     path = tmp_path / 'tvhplayer.conf'
     path.write_text('{not json', encoding='utf-8')

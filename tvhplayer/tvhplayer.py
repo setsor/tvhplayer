@@ -44,6 +44,7 @@ try:
     from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
     from .core.recorder import STALL_LIMIT, LocalRecorder
     from .core.vlc_player import VlcPlayer
+    from .core.subtitle_preferences import SUBTITLE_LANGUAGES, normalize_subtitle_language, preferred_subtitle_track
     from .core.playlist_sync import PlaylistSource, server_key
     from .builtin_supervisor import BuiltinSupervisor
     from .file_manager import show_in_file_manager
@@ -72,6 +73,7 @@ except ImportError:
     from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, recordings_to_stop
     from core.recorder import STALL_LIMIT, LocalRecorder
     from core.vlc_player import VlcPlayer
+    from core.subtitle_preferences import SUBTITLE_LANGUAGES, normalize_subtitle_language, preferred_subtitle_track
     from core.playlist_sync import PlaylistSource, server_key
     from builtin_supervisor import BuiltinSupervisor
     from file_manager import show_in_file_manager
@@ -1471,6 +1473,18 @@ class ServerConfigDialog(QDialog):
         layout.addRow(buddy_label("&HTSP port:", self.htsp_port_input), self.htsp_port_input)
         layout.addRow(buddy_label("&Username:", self.username_input), self.username_input)
         layout.addRow(buddy_label("Pass&word:", self.password_input), self.password_input)
+        self.subtitle_language_combo = QComboBox()
+        self.subtitle_language_combo.addItem("Off — choose manually during playback", "")
+        for lang_code, label, _aliases in SUBTITLE_LANGUAGES:
+            self.subtitle_language_combo.addItem(label, lang_code)
+        describe(
+            self.subtitle_language_combo,
+            "Default subtitles",
+            "Preferred subtitle language for this server. Off enables manual selection "
+            "from the playback Subtitles menu. If a selected language is unavailable, "
+            "no other language will be selected automatically.",
+        )
+        layout.addRow(buddy_label("Default &subtitles:", self.subtitle_language_combo), self.subtitle_language_combo)
         
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1488,6 +1502,7 @@ class ServerConfigDialog(QDialog):
             'password': self.password_input.text(),
             'protocol': protocol,
             'htsp_port': self.htsp_port_input.value(),
+            'subtitle_language': self.subtitle_language_combo.currentData() or '',
         }
         
     def set_server_config(self, config):
@@ -1495,6 +1510,9 @@ class ServerConfigDialog(QDialog):
         self.url_input.setText(config.get('url', ''))
         self.username_input.setText(config.get('username', ''))
         self.password_input.setText(config.get('password', ''))
+        subtitle_language = normalize_subtitle_language(config.get('subtitle_language'))
+        subtitle_index = self.subtitle_language_combo.findData(subtitle_language)
+        self.subtitle_language_combo.setCurrentIndex(max(0, subtitle_index))
         protocol = (config.get('protocol') or PROTOCOL_HTTP).lower()
         index = self.protocol_combo.findData(protocol)
         self.protocol_combo.setCurrentIndex(index if index >= 0 else 0)
