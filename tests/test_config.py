@@ -16,6 +16,46 @@ def test_config_roundtrip_normalizes_servers(tmp_path):
     assert loaded.data['window_geometry']['width'] == 1200
 
 
+def test_per_server_subtitle_defaults_persist_without_changing_other_servers(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    store = ConfigStore(path)
+    store.servers = [
+        {'name': 'NAS', 'url': 'http://10.0.1.243:9981', 'subtitle_language': 'Romanian'},
+        {'name': 'Other', 'url': 'http://127.0.0.1:9981'},
+    ]
+    store.save()
+    reloaded = ConfigStore(path)
+    assert reloaded.servers[0]['subtitle_language'] == 'ron'
+    assert reloaded.servers[1]['subtitle_language'] == ''
+
+    reloaded.servers[1]['subtitle_language'] = 'eng'
+    reloaded.save()
+    again = ConfigStore(path)
+    assert [server['subtitle_language'] for server in again.servers] == ['ron', 'eng']
+
+    # Legacy and unknown options must not accidentally enable subtitles.
+    again.servers = [{'name': 'Box', 'url': 'http://box', 'subtitle_language': 'unknown'}]
+    again.save()
+    assert ConfigStore(path).servers[0]['subtitle_language'] == ''
+
+
+
+def test_subtitle_language_labels_and_matching():
+    from tvhplayer.core.subtitle_preferences import (
+        normalize_subtitle_language,
+        preferred_subtitle_track,
+    )
+
+    assert normalize_subtitle_language('Română') == 'ron'
+    assert normalize_subtitle_language('rum') == 'ron'
+    assert normalize_subtitle_language('English') == 'eng'
+    assert normalize_subtitle_language('unsupported') == ''
+    assert preferred_subtitle_track([(1, 'English [eng]'), (8, 'DVB Subtitles (ron)')], 'română') == 8
+    assert preferred_subtitle_track([(2, 'Track 2'), (3, 'English')], 'ron') is None
+    assert preferred_subtitle_track([(1, 'Programs'), (2, 'Portuguese')], 'ron') is None
+    assert preferred_subtitle_track([(4, 'DVB - magyar')], 'hun') == 4
+
+
 def test_corrupt_config_falls_back_to_defaults(tmp_path):
     path = tmp_path / 'tvhplayer.conf'
     path.write_text('{not json', encoding='utf-8')
