@@ -49,6 +49,20 @@ def normalize_subtitle_language(value):
     return ''
 
 
+def subtitle_track_language(label):
+    """Identify one supported language from a VLC subtitle-track description.
+
+    Unlike a configured language, a track label can contain text such as
+    'DVB Subtitles (rum)'. Ambiguous and unlabelled tracks are not remembered.
+    """
+    tokens = set(_tokens(label))
+    matches = {
+        code for code, _title, aliases in SUBTITLE_LANGUAGES
+        if tokens.intersection(set(aliases) | {code})
+    }
+    return next(iter(matches)) if len(matches) == 1 else None
+
+
 def preferred_subtitle_track(tracks, language):
     """Match an actual VLC track by language token; do not guess a track ID.
 
