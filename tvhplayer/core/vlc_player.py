@@ -135,7 +135,7 @@ class VlcPlayer(Player):
                     title = title.decode('utf-8', errors='replace')
                 tracks.append((track_id, str(title or f'Track {track_id}')))
             return tracks
-        except (TypeError, ValueError, AttributeError, RuntimeError):
+        except Exception:
             return []
 
     def selected_subtitle_track(self):
@@ -145,7 +145,7 @@ class VlcPlayer(Player):
             return -1
         try:
             return int(getter())
-        except (TypeError, ValueError, RuntimeError):
+        except Exception:
             return -1
 
     def select_subtitle_track(self, track_id):
@@ -157,7 +157,7 @@ class VlcPlayer(Player):
             return False
         try:
             return setter(int(track_id)) == 0
-        except (TypeError, ValueError, RuntimeError):
+        except Exception:
             return False
 
     def is_playing(self) -> bool:
