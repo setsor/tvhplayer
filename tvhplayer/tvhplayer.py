@@ -2011,6 +2011,13 @@ class TVHeadendClient(QMainWindow):
         self._playback_active = False
         self._awaiting_playback = False
         self._playback_channel = None
+        self._subtitle_default_timer = QTimer(self)
+        self._subtitle_default_timer.setInterval(400)
+        self._subtitle_default_timer.timeout.connect(self._apply_subtitle_default)
+        self._subtitle_preference = None
+        self._subtitle_attempts = 0
+        self._subtitle_manual_override = False
+        self._subtitle_auto_applied = False
         self._video_menu = None
         self._status_state = StatusState()
 
@@ -2971,6 +2978,7 @@ class TVHeadendClient(QMainWindow):
     def stop_playback(self):
         """Stop current playback"""
         print("Debug: Stopping playback")
+        self._reset_subtitle_default()
         self._awaiting_playback = False
         self._playback_active = False
         self._playback_channel = None
@@ -3076,6 +3084,64 @@ class TVHeadendClient(QMainWindow):
         if getattr(self, '_playback_active', False) and getattr(self, 'player', None) is not None:
             self.player.show_message(text)
 
+
+    def _reset_subtitle_default(self, for_live_channel=False):
+        """Start each new stream without carrying over manual subtitle choices."""
+        self._subtitle_default_timer.stop()
+        self._subtitle_attempts = 0
+        self._subtitle_manual_override = False
+        self._subtitle_auto_applied = False
+        self._subtitle_preference = (
+            normalize_subtitle_language((self.current_server() or {}).get('subtitle_language'))
+            if for_live_channel else None
+        )
+
+    def _start_subtitle_default(self):
+        """VLC discovers DVB subtitle tracks asynchronously after video starts."""
+        if self._subtitle_preference is None or self._subtitle_manual_override or self._subtitle_auto_applied:
+            return
+        self._subtitle_default_timer.start()
+        self._apply_subtitle_default()
+
+    def _apply_subtitle_default(self):
+        """Apply the saved language once, when the chosen track is actually known.
+
+        Never select an arbitrary language, and never override an in-player
+        manual choice. The timer is bounded to 12 seconds per channel.
+        """
+        if (self._subtitle_preference is None or self._subtitle_manual_override
+                or self._subtitle_auto_applied or self._playback_channel is None):
+            self._subtitle_default_timer.stop()
+            return
+        self._subtitle_attempts += 1
+        if self._subtitle_attempts > 30:
+            self._subtitle_default_timer.stop()
+            return
+        try:
+            player = self.player
+            if player is None or not player.is_playing():
+                return
+            tracks = player.subtitle_tracks()
+            if not tracks:
+                return
+
+            language = self._subtitle_preference
+            track_id = preferred_subtitle_track(tracks, language) if language else -1
+            if track_id is None:
+                # VLC may choose a different language on its own. Leave it off
+                # while waiting for the user's preferred track to appear.
+                if player.selected_subtitle_track() >= 0:
+                    player.select_subtitle_track(-1)
+                return
+            if player.select_subtitle_track(track_id):
+                self._subtitle_auto_applied = True
+                self._subtitle_default_timer.stop()
+        except Exception as exc:
+            # Qt calls callbacks on its main thread; never let an exception
+            # abort PyQt6/macOS. The in-player manual selector stays available.
+            self._subtitle_default_timer.stop()
+            print(f"Debug: Default subtitle selection failed: {exc}")
+
     def _on_playback_started(self):
         self._awaiting_playback = False
         self._set_playback_spinner(False)
@@ -3085,8 +3151,10 @@ class TVHeadendClient(QMainWindow):
         channel = self._playing_channel()
         if channel is not None:
             self._show_on_picture(f"{channel.number}  {channel.name}" if channel.number else channel.name)
+        self._start_subtitle_default()
 
     def _on_playback_failed(self):
+        self._reset_subtitle_default()
         self._awaiting_playback = False
         self._playback_active = False
         self._playback_channel = None
@@ -3452,6 +3520,10 @@ class TVHeadendClient(QMainWindow):
             if not self.player.select_subtitle_track(track_id):
                 self.show_status("Subtitle track is unavailable")
                 return
+            # A manual choice for this channel wins over the server default,
+            # including an explicit Off selection.
+            self._subtitle_manual_override = True
+            self._subtitle_default_timer.stop()
             self.show_status("Subtitles off" if track_id < 0 else f"Subtitles: {label}")
         except Exception as exc:
             # An exception from a Qt signal callback can terminate PyQt6/macOS.
@@ -3562,6 +3634,7 @@ class TVHeadendClient(QMainWindow):
             print(f"Debug: Traceback: {traceback.format_exc()}")
 
     def on_server_changed(self, index):
+        self._reset_subtitle_default()
         """
         Handle when user switches to a different TVHeadend server in the dropdown.
         Updates the config file with the newly selected server index and refreshes channel list.
@@ -3867,6 +3940,7 @@ class TVHeadendClient(QMainWindow):
     def play_url(self, url):
         """Play media from URL"""
         try:
+            self._reset_subtitle_default()
             self._playback_channel = None
             self._refresh_playback_status()
             self._show_playback_wait()
@@ -4324,8 +4398,9 @@ class TVHeadendClient(QMainWindow):
                 channel = channel_data
             else:
                 channel = Channel.from_raw(channel_data)
-            self._playback_channel = channel
             stream_url = self.get_backend().stream_url(channel)
+            self._reset_subtitle_default(for_live_channel=True)
+            self._playback_channel = channel
             print(f"Debug: Starting playback for {channel.name}")
             self._show_playback_wait()
             self._mark_playing_channel(scroll=True)

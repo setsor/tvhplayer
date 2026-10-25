@@ -321,6 +321,122 @@ def test_subtitles_context_menu_lists_tracks_switches_and_disables(monkeypatch, 
         app.processEvents()
 
 
+
+def test_server_subtitle_default_applies_after_track_discovery(monkeypatch, tmp_path):
+    """VLC often exposes DVB subtitle tracks only after the Playing event."""
+    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        class Backend:
+            def stream_url(self, channel):
+                return 'http://tv.example/stream/channel/' + channel.uuid
+
+        window.current_server = lambda: {'subtitle_language': 'ron'}
+        window.get_backend = lambda: Backend()
+        window.play_channel_by_data(ui.Channel(uuid='a', name='Beauty.ON'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert window._subtitle_default_timer.isActive()
+        assert fake.subtitle_id == -1
+
+        fake.subtitle_options = [(3, b'English [eng]'), (7, b'DVB Subtitle (Romanian)')]
+        window._apply_subtitle_default()
+        assert fake.subtitle_id == 7
+        assert not window._subtitle_default_timer.isActive()
+        assert window._subtitle_auto_applied
+
+        # Once selected, a later menu choice must remain manual for this channel.
+        window._select_subtitle_track(3, 'English')
+        assert fake.subtitle_id == 3
+        assert window._subtitle_manual_override
+        window._apply_subtitle_default()
+        assert fake.subtitle_id == 3
+
+        # A new channel starts with the server preference, not the old override.
+        window.play_channel_by_data(ui.Channel(uuid='b', name='Nat Geo Wild'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert fake.subtitle_id == 7
+        assert not window._subtitle_manual_override
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_manual_subtitles_override_pending_default_and_off_option(monkeypatch, tmp_path):
+    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        class Backend:
+            def stream_url(self, channel):
+                return 'http://tv.example/' + channel.uuid
+
+        window.get_backend = lambda: Backend()
+        window.current_server = lambda: {'subtitle_language': 'ron'}
+        fake.subtitle_options = [(3, b'English')]
+        fake.subtitle_id = 3
+
+        window.play_channel_by_data(ui.Channel(uuid='a', name='News'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        # Wrong-language auto subtitles are switched off, not substituted.
+        assert fake.subtitle_id == -1
+        assert window._subtitle_default_timer.isActive()
+
+        window._select_subtitle_track(3, 'English')
+        fake.subtitle_options.append((7, b'Romanian'))
+        window._apply_subtitle_default()
+        assert fake.subtitle_id == 3
+        assert not window._subtitle_default_timer.isActive()
+
+        # An explicit server Off setting means manual control, not English auto.
+        window.current_server = lambda: {'subtitle_language': ''}
+        fake.subtitle_id = 3
+        window.play_channel_by_data(ui.Channel(uuid='b', name='Viasat Nature'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert fake.subtitle_id == -1
+        assert window._subtitle_auto_applied
+        window._select_subtitle_track(3, 'English')
+        assert fake.subtitle_id == 3
+
+        # URL playback must not inherit the prior server language.
+        window.play_url('http://example.com/movie.mkv')
+        assert window._subtitle_preference is None
+        assert not window._subtitle_default_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_subtitle_preference_timeout_and_stop_cancel(monkeypatch, tmp_path):
+    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        class Backend:
+            def stream_url(self, channel):
+                return 'http://tv.example/' + channel.uuid
+
+        window.current_server = lambda: {'subtitle_language': 'eng'}
+        window.get_backend = lambda: Backend()
+        window.play_channel_by_data(ui.Channel(uuid='a', name='Test'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert window._subtitle_default_timer.isActive()
+        for _ in range(32):
+            window._apply_subtitle_default()
+        assert not window._subtitle_default_timer.isActive()
+        assert fake.subtitle_id == -1
+
+        window.play_channel_by_data(ui.Channel(uuid='b', name='Other'))
+        fake._events.handlers['playing'](None)
+        app.processEvents()
+        assert window._subtitle_default_timer.isActive()
+        window.stop_playback()
+        assert not window._subtitle_default_timer.isActive()
+        assert window._subtitle_preference is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_video_context_menu_and_double_click(monkeypatch, tmp_path):
     from PyQt6.QtCore import QEvent, QPointF, Qt
     from PyQt6.QtGui import QMouseEvent
