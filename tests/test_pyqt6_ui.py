@@ -287,7 +287,7 @@ def test_subtitles_context_menu_lists_tracks_switches_and_disables(monkeypatch, 
         assert subtitles.actions()[0].isChecked()
         assert subtitles.actions()[1].isChecked() is False
 
-        subtitles.actions()[1].trigger()
+        next(action for action in subtitles.actions() if action.text() == 'Romanian').trigger()
         assert fake_player.subtitle_id == 3
         assert window.status_notice_label.text() == 'Subtitles: Romanian'
 
