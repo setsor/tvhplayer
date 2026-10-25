@@ -156,9 +156,15 @@ class _FakeVlcPlayer:
 def _make_player(monkeypatch, tmp_path):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     fake_player = _FakeVlcPlayer()
+    def media_new(url):
+        media = types.SimpleNamespace(url=url, options=[])
+        media.add_option = media.options.append
+        fake_player.last_media = media
+        return media
+
     fake_instance = types.SimpleNamespace(
         media_player_new=lambda: fake_player,
-        media_new=lambda url: object(),
+        media_new=media_new,
     )
     monkeypatch.setitem(
         sys.modules,
@@ -366,6 +372,27 @@ def test_playback_surface_ignores_transient_stop_and_qt_paints(monkeypatch, tmp_
         assert not window._playback_active
         assert window.idle_splash.isVisible()
         assert window.video_frame.updatesEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_live_tv_ts_mpeg_option_is_isolated_from_other_playback(monkeypatch, tmp_path):
+    """The UI enables MPEG TS mode per live channel, not for arbitrary URLs."""
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        class Backend:
+            def stream_url(self, channel):
+                return f'http://tv.example/stream/channel/{channel.uuid}'
+
+        window.get_backend = lambda: Backend()
+        window.servers = []
+        window.play_channel_by_data(ui.Channel(uuid='news', name='News'))
+        assert fake_player.last_media.url == 'http://tv.example/stream/channel/news'
+        assert fake_player.last_media.options == [':ts-standard=mpeg']
+
+        window.play_url('http://tv.example/archive/movie.mp4')
+        assert fake_player.last_media.options == []
     finally:
         window.close()
         app.processEvents()

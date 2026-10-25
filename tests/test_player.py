@@ -145,6 +145,44 @@ def test_play_stop_mute_and_stopped_callback_is_scheduled(monkeypatch):
     assert engine.is_playing() is False
 
 
+def test_ts_standard_mpeg_applies_only_to_live_tv_media(monkeypatch):
+    """No DVB EIT decoder for TVHeadend live TV, no global VLC change."""
+
+    class TrackedMedia:
+        def __init__(self, url):
+            self.url = url
+            self.options = []
+
+        def add_option(self, option):
+            self.options.append(option)
+
+    class TrackedInstance(_Instance):
+        def __init__(self, player):
+            super().__init__(player)
+            self.medias = []
+
+        def media_new(self, url):
+            media = TrackedMedia(url)
+            self.medias.append(media)
+            return media
+
+    player = _MediaPlayer()
+    instance = TrackedInstance(player)
+    _install_vlc(monkeypatch, instance)
+    engine = VlcPlayer()
+    try:
+        engine.play('http://nas:9981/stream/channel/c1', tvheadend_live=True)
+        assert instance.medias[-1].options == [':ts-standard=mpeg']
+        assert player.media is instance.medias[-1]
+        assert player.is_playing()
+
+        engine.play('http://nas:9981/recordings/old.ts')
+        assert instance.medias[-1].options == []
+        assert player.media is instance.medias[-1]
+    finally:
+        engine.close()
+
+
 def test_close_stops_and_drops_the_player(monkeypatch):
     media = _MediaPlayer()
     _install_vlc(monkeypatch, _Instance(media))

@@ -65,11 +65,19 @@ class VlcPlayer(Player):
             manager.event_attach(error, lambda _event: self._emit(self._on_error))
         self._events_bound = True
 
-    def play(self, url: str):
+    def play(self, url: str, *, tvheadend_live: bool = False):
         # Each new picture inherits the last marquee text. Clear it so the
         # previous channel's message does not reappear.
         self._set_marquee_text('')
         media = self._instance.media_new(url)
+        if tvheadend_live:
+            # VLC's DVB transport demux attaches SI/EIT decoders by default.
+            # TVHeadend already provides EPG separately. In MPEG-standard
+            # mode, VLC keeps the original MPEG-TS A/V/PCR processing but
+            # does not attach the DVB EIT parser (which reports version
+            # discontinuities on some TVHeadend pass streams).
+            # Applied to this media only: other URLs retain VLC defaults.
+            media.add_option(':ts-standard=mpeg')
         self._player.set_media(media)
         self._player.play()
         self._release_input()

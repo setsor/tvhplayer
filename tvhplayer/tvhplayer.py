@@ -4271,7 +4271,9 @@ class TVHeadendClient(QMainWindow):
             self._show_playback_wait()
             self._mark_playing_channel(scroll=True)
             self._refresh_playback_status()
-            self.player.play(stream_url)
+            # Keep TVHeadend's default MPEG-TS pass profile. Only the
+            # per-media VLC demux standard changes for live channel playback.
+            self.player.play(stream_url, tvheadend_live=True)
             self.show_status(f"Starting: {channel.name}")
         except Exception as e:
             print(f"Debug: Error in play_channel: {str(e)}")
