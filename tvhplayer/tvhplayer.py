@@ -4266,7 +4266,10 @@ class TVHeadendClient(QMainWindow):
             else:
                 channel = Channel.from_raw(channel_data)
             self._playback_channel = channel
-            stream_url = self.get_backend().stream_url(channel)
+            # Diagnostic trial: preserve the source A/V codecs but drop MPEG-TS
+            # EIT/SI metadata for VLC by requesting the built-in MKV muxer.
+            # Local recording and TVHeadend DVR deliberately retain their profiles.
+            stream_url = self.get_backend().stream_url(channel, profile="matroska")
             print(f"Debug: Starting playback for {channel.name}")
             self._show_playback_wait()
             self._mark_playing_channel(scroll=True)

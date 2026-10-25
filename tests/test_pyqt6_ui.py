@@ -381,7 +381,8 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert not window.playback_spinner.isVisible()
 
         class Backend:
-            def stream_url(self, channel):
+            def stream_url(self, channel, profile=None):
+                assert profile == "matroska"
                 return 'http://tv.example/stream'
 
         window.get_backend = lambda: Backend()
@@ -446,7 +447,8 @@ def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
             def get_channels(self):
                 return [news, sport]
 
-            def stream_url(self, channel):
+            def stream_url(self, channel, profile=None):
+                assert profile == "matroska"
                 return f'http://tv.example/stream/{channel.uuid}'
 
         window.get_backend = lambda: Backend()
