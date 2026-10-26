@@ -1655,3 +1655,100 @@ def test_status_is_repeated_on_the_picture_only_while_a_channel_shows(monkeypatc
     window.toggle_mute()
     assert shown[1:] == ['Volume 40', 'Muted', 'Sound on']
     app.processEvents()
+
+
+
+def _assert_native_vlc_event_runs_on_qt_thread(app, window, fake_player, event_name, handler_attr):
+    """The mocked VLC event must cross a real Python thread into the Qt GUI."""
+    import threading
+
+    from PyQt6.QtCore import QThread
+    from PyQt6.QtTest import QTest
+
+    observed = []
+    original = getattr(window.player, handler_attr)
+
+    def record_and_handle():
+        observed.append((threading.get_ident(), QThread.currentThread() == app.thread()))
+        original()
+
+    # VlcPlayer's registered event lambdas read _on_playing/_on_stopped/_on_error
+    # at callback time, so instrument the actual path without re-binding events.
+    setattr(window.player, handler_attr, record_and_handle)
+    worker_errors = []
+
+    def native_event():
+        try:
+            fake_player._events.handlers[event_name](None)
+        except BaseException as exc:
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=native_event, name=f'vlc-{event_name}-callback')
+    worker.start()
+    worker.join(timeout=3)
+    assert not worker.is_alive()
+    assert not worker_errors
+    assert observed == [], 'VLC callbacks must not run in the source thread'
+
+    # QTimer.singleShot created on the foreign thread would not fire, because
+    # that thread has no Qt event loop. The Qt signal should be queued to GUI.
+    for _ in range(100):
+        app.processEvents()
+        if observed:
+            break
+        QTest.qWait(10)
+    assert observed == [(threading.get_ident(), True)]
+
+
+def test_native_vlc_playing_event_runs_on_qt_gui_thread(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window._playback_channel = ui.Channel(uuid='threaded', name='Thread test')
+        window._subtitle_preference = 'ron'
+        window._show_playback_wait()
+        fake_player._playing = True
+
+        _assert_native_vlc_event_runs_on_qt_thread(
+            app, window, fake_player, 'playing', '_on_playing'
+        )
+        assert window._playback_active
+        assert not window._awaiting_playback
+        assert window._subtitle_default_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_native_vlc_stopped_event_runs_on_qt_gui_thread(monkeypatch, tmp_path):
+    app, _ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window._playback_active = False
+        window._awaiting_playback = False
+        window._splash_idle_timer.stop()
+        fake_player._playing = False
+
+        _assert_native_vlc_event_runs_on_qt_thread(
+            app, window, fake_player, 'stopped', '_on_stopped'
+        )
+        assert window._splash_idle_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_native_vlc_error_event_runs_on_qt_gui_thread(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window._playback_channel = ui.Channel(uuid='threaded', name='Thread test')
+        window._show_playback_wait()
+
+        _assert_native_vlc_event_runs_on_qt_thread(
+            app, window, fake_player, 'error', '_on_error'
+        )
+        assert not window._awaiting_playback
+        assert not window._playback_active
+        assert window._playback_channel is None
+        assert window.status_notice_label.text() == 'Playback failed'
+    finally:
+        window.close()
+        app.processEvents()

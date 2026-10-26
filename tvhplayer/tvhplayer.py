@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QMenu, QListWidgetItem, QTableWidget, QTableWidgetItem, QHeaderView, QTabWidget, QTextEdit, QSizePolicy, QToolButton,
     QAbstractItemView, QStyledItemDelegate, QStyle, QStyleOptionViewItem, QCheckBox,
 )
-from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QUrl, QObject, QRunnable, QThreadPool, pyqtSignal
+from PyQt6.QtCore import Qt, QSize, QTimer, QPropertyAnimation, QEasingCurve, QEvent, QPoint, QPointF, QRect, QRectF, QUrl, QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QIcon, QAction, QShortcut, QPainter, QPen, QColor, QPixmap, QDesktopServices
 import json
 # Replace this line:
@@ -1958,6 +1958,9 @@ class PlaybackSpinner(QWidget):
 
 
 class TVHeadendClient(QMainWindow):
+    # libVLC invokes playback callbacks from native threads.
+    _player_callback = pyqtSignal(object)
+
     def __init__(self):
         super().__init__()
         self.setup_paths()
@@ -3226,16 +3229,24 @@ class TVHeadendClient(QMainWindow):
         self._protect_video_surface(False)
         self._refresh_playback_status()
 
+    @pyqtSlot(object)
+    def _dispatch_player_callback(self, callback):
+        """Deliver native VLC events on Qt's GUI thread."""
+        callback()
+
     def _bind_playback_splash(self):
         """Keep the splash in sync if playback starts or stops on its own."""
         self._splash_idle_timer = QTimer(self)
         self._splash_idle_timer.setSingleShot(True)
         self._splash_idle_timer.timeout.connect(self._show_splash_if_idle)
+        self._player_callback.connect(
+            self._dispatch_player_callback, Qt.ConnectionType.QueuedConnection
+        )
         try:
             self.player.set_handlers(
                 self._on_playback_started,
                 self._on_playback_stopped,
-                lambda fn: QTimer.singleShot(0, fn),
+                self._player_callback.emit,
                 on_error=self._on_playback_failed,
             )
         except Exception as e:
