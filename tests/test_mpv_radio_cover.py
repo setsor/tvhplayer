@@ -64,3 +64,56 @@ def test_stop_hides_channel_cover_and_restores_idle_splash():
     TVHeadendClient._protect_video_surface(win, False)
     win._set_channel_cover.assert_called_once_with(False)
     win._set_idle_splash.assert_called_once_with(True)
+
+
+def test_shutdown_retains_ctypes_callback_until_renderer_free():
+    from tvhplayer.video_widget import MpvVideoWidget
+
+    calls = []
+
+    class Render:
+        def __init__(self):
+            self.update_cb = object()
+
+        def free(self):
+            assert self.update_cb is not None
+            calls.append('free')
+
+    render = Render()
+    surface = SimpleNamespace(
+        _render_context=render, _wayland=None, _engine=object(),
+        makeCurrent=lambda: calls.append('makeCurrent'),
+        doneCurrent=lambda: calls.append('doneCurrent'),
+    )
+    surface.release = lambda: MpvVideoWidget.release(surface)
+    MpvVideoWidget.shutdown(surface)
+
+    assert calls == ['makeCurrent', 'free', 'doneCurrent']
+    assert surface._render_context is None
+    assert surface._engine is None
+    assert surface._shutting_down
+    assert render.update_cb is not None  # no setter that frees a live closure
+
+
+def test_player_close_stops_decoder_before_releasing_renderer():
+    calls = []
+    class Native:
+        def command(self, name):
+            calls.append(name)
+
+        def terminate(self):
+            calls.append('terminate')
+
+    surface = SimpleNamespace(shutdown=lambda: calls.append('shutdown'))
+    player = object.__new__(MpvPlayer)
+    player._mpv = Native()
+    player._surface = surface
+    player._on_playing = Mock()
+    player._on_stopped = Mock()
+    player._on_error = Mock()
+    player.close()
+
+    assert calls == ['stop', 'shutdown', 'terminate']
+    assert player._mpv is None
+    assert player._surface is None
+    assert player._on_playing is None
