@@ -38,7 +38,49 @@ jobs:
             python=3.11
             mpv=0.40.*
             ffmpeg=7.1.*
+            meson
+            ninja
+            pkgconf
+            expat
+            libiconv
           init-shell: bash
+
+      - name: Rebuild pinned MPV 0.40 with Cocoa utils and CoreFoundation
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          SRC_TAR="$RUNNER_TEMP/mpv-0.40.0.tar.gz"
+          curl --fail --location --retry 3 --retry-delay 2 -o "$SRC_TAR" \
+            'https://github.com/mpv-player/mpv/archive/v0.40.0/mpv-0.40.0.tar.gz'
+          echo "10a0f4654f62140a6dd4d380dcf0bbdbdcf6e697556863dc499c296182f081a3  $SRC_TAR" | shasum -a 256 -c -
+          tar -xzf "$SRC_TAR" -C "$RUNNER_TEMP"
+          SRC="$RUNNER_TEMP/mpv-0.40.0"
+          test -s "$SRC/osdep/utils-mac.c"
+          grep -q "'osdep/utils-mac.c'" "$SRC/meson.build"
+          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
+          export CFLAGS="-mmacosx-version-min=13.0"
+          export LDFLAGS="-mmacosx-version-min=13.0 -framework CoreFoundation"
+          pkg-config --modversion expat
+          pkg-config --modversion libavcodec
+          meson setup "$RUNNER_TEMP/mpv-build" "$SRC" \
+            --prefix "$CONDA_PREFIX" \
+            --buildtype release \
+            -Dcplayer=false -Dlibmpv=true -Dcocoa=enabled \
+            -Dplain-gl=enabled -Dgl-cocoa=enabled \
+            -Dswift-build=disabled -Dmacos-cocoa-cb=disabled \
+            -Dlua=disabled -Djavascript=disabled -Dmanpage-build=disabled
+          meson compile -C "$RUNNER_TEMP/mpv-build" -j 4
+          meson install -C "$RUNNER_TEMP/mpv-build" --no-rebuild
+          test -f "$CONDA_PREFIX/lib/libmpv.2.dylib"
+          DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib" python - <<'PY'
+          import ctypes
+          import os
+          path = os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'libmpv.2.dylib')
+          lib = ctypes.CDLL(path)
+          lib.mpv_client_api_version.restype = ctypes.c_ulong
+          print("Rebuilt MPV 0.40 dlopen OK, API:", lib.mpv_client_api_version())
+          PY
 
       - name: Install official Python 3.15 x86_64 framework
         run: |
