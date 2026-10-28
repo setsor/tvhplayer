@@ -1597,6 +1597,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
     recorder = FakeRecorder()
     window.get_backend = lambda: backend
     window.tasks_pane.open_backend = lambda server: backend
+    # DVR writes use a separate Qt worker and backend from the read-only pane.
+    window._dvr_gate.backend_factory = lambda _server: backend
     window.current_server = lambda: {'name': 'tv', 'url': 'http://tv'}
     window.local_jobs = [ui.LocalJob(recorder, Channel(uuid='c', name='IRINN'))]
     try:
@@ -1705,8 +1707,15 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.action_btn.isEnabled() is True
         assert panel.reveal_btn.isEnabled() is False
         panel.run_action()
-        _wait_for_tasks(app, panel)
+        from PyQt6.QtTest import QTest
+        for _ in range(300):
+            app.processEvents()
+            if (backend.stopped == ['run'] and
+                    not window._dvr_gate.awaiting_verification and not panel._fetching):
+                break
+            QTest.qWait(10)
         assert backend.stopped == ['run']
+        assert not window._dvr_gate.awaiting_verification
         assert recorder.running is True
         assert window.is_recording is True
         assert all('News' not in text for text in _task_texts(panel))
@@ -1788,7 +1797,14 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.action_btn.accessibleName() == 'Cancel'
         assert panel.action_btn.text() == 'Cancel'
         panel.run_action()
+        for _ in range(300):
+            app.processEvents()
+            if (backend.cancelled == ['soon'] and
+                    not window._dvr_gate.awaiting_verification and not panel._fetching):
+                break
+            QTest.qWait(10)
         assert backend.cancelled == ['soon']
+        assert not window._dvr_gate.awaiting_verification
         assert window.is_recording is True
         assert any('Old' in text for text in _task_texts(panel))
         assert panel.task_table.isVisible()

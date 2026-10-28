@@ -7,6 +7,8 @@ from PyQt6.QtTest import QTest
 
 from tvhplayer.dvr_gate import DvrGate
 
+_qt_app = None
+
 
 class Entry:
     def __init__(self, uuid, category='recording'):
@@ -18,7 +20,9 @@ class Entry:
 
 
 def _app():
-    return QCoreApplication.instance() or QCoreApplication([])
+    global _qt_app
+    _qt_app = QCoreApplication.instance() or QCoreApplication([])
+    return _qt_app
 
 
 def _until(condition):
