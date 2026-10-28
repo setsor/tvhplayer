@@ -37,7 +37,14 @@ def main():
     app = pathlib.Path(sys.argv[1])
     report = pathlib.Path(sys.argv[2])
     found, unknown, unsuitable = [], [], []
+    conda_prefix = (app / "conda-meta").exists()
     for path in sorted(p for p in app.rglob("*") if p.is_file() and not p.is_symlink()):
+        # A conda installation includes thousands of Python scripts, caches,
+        # package metadata and other files never bundled into the app.
+        # Only native libraries and media executables matter in this preflight.
+        if conda_prefix and not (path.name.endswith((".dylib", ".so"))
+                                 or path.name in ("ffmpeg", "ffprobe", "mpv")):
+            continue
         description = subprocess.run(
             ["file", "-b", str(path)], capture_output=True, text=True, errors='replace', check=False
         ).stdout
