@@ -153,3 +153,46 @@ def test_light_or_dark_choice_is_kept_and_unknown_values_follow_the_system(tmp_p
     for saved, loaded in (('dark', 'dark'), ('light', 'light'), ('purple', 'system'), (None, 'system')):
         path.write_text(json.dumps({'color_scheme': saved}), encoding='utf-8')
         assert ConfigStore(path).data['color_scheme'] == loaded
+
+
+def test_per_server_subtitle_settings_roundtrip_and_normalization(tmp_path):
+    from tvhplayer.core.subtitle_preferences import normalize_subtitle_language, preferred_subtitle_track
+
+    path = tmp_path / 'tvhplayer.conf'
+    store = ConfigStore(path)
+    store.servers = [
+        {'name': 'NAS', 'url': 'http://nas:9981', 'subtitle_language': 'Romanian',
+         'remember_subtitle_selection': True},
+        {'name': 'Other', 'url': 'http://other:9981', 'subtitle_language': 'English',
+         'remember_subtitle_selection': False},
+    ]
+    store.save()
+
+    loaded = ConfigStore(path)
+    assert [(s['subtitle_language'], s['remember_subtitle_selection'])
+            for s in loaded.servers] == [('ron', True), ('eng', False)]
+    loaded.servers[0]['subtitle_language'] = ''
+    loaded.save()
+    assert ConfigStore(path).servers[0]['subtitle_language'] == ''
+    assert ConfigStore(path).servers[0]['remember_subtitle_selection'] is True
+
+    assert normalize_subtitle_language('rum') == 'ron'
+    assert normalize_subtitle_language('ro') == 'ron'
+    assert normalize_subtitle_language('not-a-language') == ''
+    assert preferred_subtitle_track([
+        (1, 'English [eng]'), (7, 'DVB Subtitle (Romanian) - ron'),
+    ], 'ron') == 7
+    assert preferred_subtitle_track([(3, 'English [eng]')], 'ron') is None
+    assert preferred_subtitle_track([(2, 'DVB Subtitle (Unknown)')], 'ron') is None
+
+
+def test_bad_subtitle_preferences_do_not_enable_a_track(tmp_path):
+    store = ConfigStore(tmp_path / 'tvhplayer.conf')
+    store.servers = [
+        {'name': 'NAS', 'url': 'http://nas:9981', 'subtitle_language': 'unknown',
+         'remember_subtitle_selection': 'yes'},
+    ]
+    store.save()
+    server = ConfigStore(store.path).servers[0]
+    assert server['subtitle_language'] == ''
+    assert server['remember_subtitle_selection'] is False

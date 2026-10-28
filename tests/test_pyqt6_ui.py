@@ -3179,3 +3179,74 @@ def test_the_window_carries_the_app_icon(monkeypatch, tmp_path):
         assert window.windowIcon().cacheKey() == app.windowIcon().cacheKey()
     finally:
         window.close()
+
+
+def test_server_subtitle_default_survives_track_discovery_and_manual_off(monkeypatch, tmp_path):
+    """Use v4.1's generic Player track API, not fork-only VLC methods."""
+    app, module, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        server = {
+            'name': 'NAS', 'url': 'http://nas.test:9981',
+            'subtitle_language': 'ron', 'remember_subtitle_selection': True,
+            'protocol': 'http',
+        }
+        window.servers = [server]
+        window.server_combo.blockSignals(True)
+        window.server_combo.clear()
+        window.server_combo.addItem('NAS')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        window._playback_server = module.server_key(server)
+        window._playback_channel = module.Channel(uuid='channel1', name='News')
+        fake._playing = True
+        fake.spu = [(2, b'English [eng]')]
+        fake.spu_id = 2
+
+        window._reset_subtitle_default(for_live_channel=True)
+        window._on_playback_started()
+        assert window._subtitle_default_timer.isActive()
+        assert fake.spu_id == -1  # Never leave wrong-language subtitles on
+
+        fake.spu.append((7, b'DVB Subtitle (Romanian) - rum'))
+        window._apply_subtitle_default()
+        assert fake.spu_id == 7
+        assert not window._subtitle_default_timer.isActive()
+
+        window._select_subtitle_track(2, 'English [eng]')
+        assert window._subtitle_manual_override
+        assert fake.spu_id == 2
+        assert window.servers[0]['subtitle_language'] == 'eng'
+        assert window.config_store.servers[0]['subtitle_language'] == 'eng'
+
+        window._select_subtitle_track(-1, 'Off')
+        assert fake.spu_id == -1
+        assert window.servers[0]['subtitle_language'] == ''
+        assert window.config_store.servers[0]['remember_subtitle_selection']
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_subtitles_never_persist_ambiguous_track_labels(monkeypatch, tmp_path):
+    app, module, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        server = {
+            'name': 'NAS', 'url': 'http://nas.test:9981',
+            'subtitle_language': 'ron', 'remember_subtitle_selection': True,
+        }
+        window.servers = [server]
+        window.server_combo.blockSignals(True)
+        window.server_combo.clear()
+        window.server_combo.addItem('NAS')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        window._playback_server = module.server_key(server)
+        window._playback_channel = module.Channel(uuid='channel1', name='News')
+        fake._playing = True
+        fake.spu = [(4, 'Unnamed track')]
+        window._select_subtitle_track(4, 'Unnamed track')
+        assert window.servers[0]['subtitle_language'] == 'ron'
+        assert window._subtitle_manual_override
+    finally:
+        window.close()
+        app.processEvents()

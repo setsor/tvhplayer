@@ -217,3 +217,33 @@ def test_builtin_server_page(ui):
     dialog.server_list.setCurrentRow(1)
     assert dialog.pages.currentIndex() == 0
     assert not dialog.duplicate_btn.isHidden()
+
+
+def test_server_subtitle_defaults_are_per_server_and_editable(ui):
+    dialog = ui.ServerDialog()
+    dialog.load_servers([
+        _remote('NAS', subtitle_language='ron', remember_subtitle_selection=True),
+        _remote('Backup'),
+    ])
+    try:
+        assert dialog.subtitle_language_combo.currentData() == 'ron'
+        assert dialog.remember_subtitle_checkbox.isChecked()
+
+        dialog.server_list.setCurrentRow(1)
+        assert dialog.subtitle_language_combo.currentData() == ''
+        assert not dialog.remember_subtitle_checkbox.isChecked()
+        dialog.subtitle_language_combo.setCurrentIndex(
+            dialog.subtitle_language_combo.findData('eng')
+        )
+        dialog.remember_subtitle_checkbox.setChecked(True)
+        assert dialog.servers[1]['subtitle_language'] == 'eng'
+        assert dialog.servers[1]['remember_subtitle_selection'] is True
+
+        dialog.server_list.setCurrentRow(0)
+        assert dialog.subtitle_language_combo.currentData() == 'ron'
+        assert dialog.remember_subtitle_checkbox.isChecked()
+        dialog.subtitle_language_combo.setCurrentIndex(0)  # Explicit Off
+        assert dialog.servers[0]['subtitle_language'] == ''
+        assert dialog.servers[1]['subtitle_language'] == 'eng'
+    finally:
+        dialog.close()

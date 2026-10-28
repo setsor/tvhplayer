@@ -1,0 +1,48 @@
+name: v4.1 fork integration tests
+
+on:
+  push:
+    branches:
+      - integration/upstream-v4.1-ventura
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos-intel-regression:
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - name: Checkout the integration branch
+        uses: actions/checkout@v4
+      - name: Install Python 3.15.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 \
+            -o "$RUNNER_TEMP/python-3.15.0-macos11.pkg" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $RUNNER_TEMP/python-3.15.0-macos11.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "$RUNNER_TEMP/python-3.15.0-macos11.pkg" -target / >/dev/null
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 --version
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install -r macos/requirements-build.txt 'pytest>=9,<11'
+      - name: Run fork regression tests on v4.1
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m pytest -q \
+            tests/test_config.py \
+            tests/test_macos_legacy_migration.py \
+            tests/test_server_dialog.py \
+            tests/test_pyqt6_ui.py \
+            tests/test_mpv_player.py \
+            tests/test_engine.py \
+            tests/test_dvr_api.py \
+            tests/test_recorder.py
