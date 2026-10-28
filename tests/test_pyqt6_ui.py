@@ -2915,6 +2915,7 @@ def test_playback_menu_lists_tracks_and_deinterlace(monkeypatch, tmp_path):
         fake_player.audio = [(-1, b'Disable'), (1, b'Track 1 - [English]'), (2, b'Track 2 - [Deutsch]')]
         fake_player.audio_id = 1
         fake_player.spu = [(-1, b'Disable'), (5, b'DVB subtitles')]
+        fake_player._playing = True
         menu = window.playback_menu
         window._fill_playback_menu(menu)
         submenus = {action.text(): action.menu() for action in menu.actions()}
@@ -2925,8 +2926,11 @@ def test_playback_menu_lists_tracks_and_deinterlace(monkeypatch, tmp_path):
         assert fake_player.audio_id == 2
 
         subtitles = submenus['&Subtitles']
-        assert [a.text() for a in subtitles.actions()] == ['Off', 'DVB subtitles']
+        assert [a.text() for a in subtitles.actions()] == [
+            'Off', 'DVB subtitles', 'Remember subtitle choices for this server'
+        ]
         assert subtitles.actions()[0].isChecked()
+        assert not subtitles.actions()[-1].isEnabled()  # No server playback
         subtitles.actions()[1].trigger()
         assert fake_player.spu_id == 5
 

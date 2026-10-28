@@ -45,4 +45,5 @@ jobs:
             tests/test_mpv_player.py \
             tests/test_engine.py \
             tests/test_dvr_api.py \
+            tests/test_dvr_gate_v41.py \
             tests/test_recorder.py

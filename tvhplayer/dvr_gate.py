@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
 
-from .core.playlist_sync import server_key
+try:
+    from .core.playlist_sync import server_key
+except ImportError:
+    from core.playlist_sync import server_key
 
 
 class _DvrWrite(QRunnable):
