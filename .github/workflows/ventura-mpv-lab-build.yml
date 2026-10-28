@@ -50,7 +50,6 @@ jobs:
 
       - name: Build isolated MPV LAB
         env:
-          TVHPLAYER_NATIVE_PREFIX: ${{ env.CONDA_PREFIX }}
           TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-Ventura-LAB
           TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.mpv.lab
         run: |
