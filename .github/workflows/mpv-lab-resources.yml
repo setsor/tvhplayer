@@ -1,0 +1,38 @@
+name: MPV LAB resource verification
+
+on:
+  push:
+    branches:
+      - build/ventura-conda-mpv-lab
+    paths:
+      - 'icons/epg.svg'
+      - 'macos/build-macos.sh'
+      - '.github/workflows/mpv-lab-resources.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-resources:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify EPG icon and macOS packaging guards
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s icons/epg.svg
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          icon = Path("icons/epg.svg")
+          root = ET.parse(icon).getroot()
+          assert root.tag == "{http://www.w3.org/2000/svg}svg"
+          build = Path("macos/build-macos.sh").read_text()
+          assert '--add-data "$ROOT/icons:icons"' in build
+          assert '$ROOT/icons/epg.svg' in build
+          assert '$BUNDLE/Contents/Frameworks/icons/epg.svg' in build
+          print("EPG source icon and macOS bundle checks OK")
+          PY
+          bash -n macos/build-macos.sh
