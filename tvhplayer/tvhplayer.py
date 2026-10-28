@@ -5270,6 +5270,9 @@ class TVHeadendClient(QMainWindow):
     def _on_video_frame_presented(self):
         """Only a newly rendered video frame removes the MPV channel cover."""
         if self.engine == ENGINE_MPV and self._playback_active and not self._awaiting_playback:
+            if self.channel_cover is not None and not self.channel_cover.isHidden():
+                channel = getattr(self, '_playback_channel', None)
+                print(f"Debug: First video frame shown: {channel.name if channel else 'unknown'}")
             self._set_channel_cover(False)
 
     def _set_idle_splash(self, visible):
