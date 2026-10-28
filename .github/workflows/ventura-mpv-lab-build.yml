@@ -1,0 +1,78 @@
+name: Ventura MPV LAB build
+
+on:
+  push:
+    branches:
+      - build/ventura-conda-mpv-lab
+    paths:
+      - 'icons/**'
+      - 'macos/**'
+      - 'tvhplayer/**'
+      - '.github/workflows/ventura-mpv-lab-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ventura-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - name: Checkout LAB branch
+        uses: actions/checkout@v4
+
+      - name: Install isolated conda-forge native runtime
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: tvhplayer-lab
+          cache-environment: true
+          create-args: >-
+            python=3.11
+            mpv
+            ffmpeg
+            pyqt
+            pyinstaller
+            pip
+            requests
+            python-dateutil
+            pillow
+            psutil
+            setuptools
+
+      - name: Install Python bindings
+        run: |
+          python -m pip install mpv==1.0.8 python-vlc==3.0.21203 pyxdg==0.28
+          python -c 'import PyInstaller, PyQt6, mpv, requests'
+
+      - name: Build isolated MPV LAB
+        env:
+          TVHPLAYER_NATIVE_PREFIX: ${{ env.CONDA_PREFIX }}
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-Ventura-LAB
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.mpv.lab
+        run: |
+          set -euo pipefail
+          export TVHPLAYER_NATIVE_PREFIX="$CONDA_PREFIX"
+          export PYTHON="$CONDA_PREFIX/bin/python"
+          bash macos/build-macos.sh
+
+      - name: Verify packaged EPG icon and native binaries
+        run: |
+          set -euo pipefail
+          APP=macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.app
+          test -s "$APP/Contents/Frameworks/icons/epg.svg"
+          test -f "$APP/Contents/Frameworks/libmpv.2.dylib"
+          test -x "$APP/Contents/Frameworks/ffprobe"
+          file "$APP/Contents/MacOS/TVHplayer-v4.1-MPV-Ventura-LAB"
+          file "$APP/Contents/Frameworks/libmpv.2.dylib"
+
+      - name: Upload experimental bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVHplayer-v4.1-MPV-Ventura-LAB-intel
+          path: macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.app
+          if-no-files-found: error
+          retention-days: 7
