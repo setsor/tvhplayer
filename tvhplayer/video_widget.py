@@ -44,6 +44,7 @@ class MpvVideoWidget(QOpenGLWidget):
         self._engine = None
         self._render_context = None
         self._wayland = None
+        self._shutting_down = False
         self._awaiting_new_picture = False
         self._accept_new_picture = False
         self._frame_ready.connect(self.update, Qt.ConnectionType.QueuedConnection)
@@ -74,7 +75,7 @@ class MpvVideoWidget(QOpenGLWidget):
         self._create_render_context()
 
     def _create_render_context(self):
-        if self._engine is None or self._render_context is not None:
+        if self._shutting_down or self._engine is None or self._render_context is not None:
             return
         if self._wayland is None and QGuiApplication.platformName() == 'wayland':
             self._wayland = _WaylandConnection()
@@ -84,6 +85,11 @@ class MpvVideoWidget(QOpenGLWidget):
         self._render_context = context
 
     def paintGL(self):
+        if self._shutting_down:
+            gl = self.context().functions()
+            gl.glClearColor(0.0, 0.0, 0.0, 1.0)
+            gl.glClear(GL_COLOR_BUFFER_BIT)
+            return
         if self._render_context is None:
             self._create_render_context()
         if self._render_context is None:
@@ -113,14 +119,27 @@ class MpvVideoWidget(QOpenGLWidget):
             self._awaiting_new_picture = False
             self.video_frame_presented.emit()
 
+    def shutdown(self):
+        """Disable GL context creation before releasing libmpv on app exit."""
+        self._shutting_down = True
+        self._engine = None
+        self.release()
+
     def release(self):
-        """Free the render context while its OpenGL context still exists."""
+        """Free the renderer without replacing a live ctypes callback.
+
+        python-mpv's update_cb = None installs a new no-op ctypes closure.
+        The VO thread may still be running the old closure, which gets freed
+        too soon and can cause EXC_BAD_ACCESS. Keep the original callback on
+        the context object alive through the synchronous free() call.
+        """
         context, self._render_context = self._render_context, None
         if context is not None:
-            context.update_cb = None
             self.makeCurrent()
-            context.free()
-            self.doneCurrent()
+            try:
+                context.free()
+            finally:
+                self.doneCurrent()
         wayland, self._wayland = self._wayland, None
         if wayland is not None:
             wayland.close()
