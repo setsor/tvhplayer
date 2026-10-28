@@ -16,7 +16,7 @@ concurrency:
 jobs:
   intel-ventura-candidate:
     runs-on: macos-15-intel
-    timeout-minutes: 55
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@v7
       - name: Install conda-forge native mpv and FFmpeg for macOS Intel
@@ -27,8 +27,11 @@ jobs:
             -c conda-forge
             mpv=0.40.0
             ffmpeg=7.1
+            meson
+            ninja
+            pkg-config
 
-      - name: Locate and audit conda mpv libraries before building
+      - name: Rebuild corrected libmpv and audit conda Mach-O libraries
         shell: bash
         run: |
           set -euo pipefail
@@ -37,6 +40,10 @@ jobs:
           test -x "$PREFIX/bin/ffmpeg"
           test -x "$PREFIX/bin/ffprobe"
           echo "TVHPLAYER_NATIVE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          # Rebuild only libmpv against the existing conda dependencies.
+          # The upstream mpv 0.40 source tarball is SHA-256 pinned;
+          # no TVHplayer checkout is cloned or replaced.
+          bash macos/rebuild-conda-libmpv.sh "$PREFIX"
           # Catch missing or unresolved native symbols before the expensive
           # PyInstaller build, using conda's own Python runtime for preflight.
           PREFIX="$PREFIX" micromamba run -n mpv-native python -c \
