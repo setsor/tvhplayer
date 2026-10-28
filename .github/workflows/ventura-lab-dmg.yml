@@ -1,0 +1,130 @@
+name: Ventura 13 MPV LAB Intel DMG
+
+on:
+  push:
+    branches:
+      - build/ventura-conda-mpv-lab
+    paths:
+      - 'tvhplayer/**'
+      - 'icons/**'
+      - 'macos/**'
+      - 'tests/**'
+      - '.github/workflows/ventura-lab-dmg.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ventura-lab-intel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 85
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - name: Checkout experimental Ventura branch
+        uses: actions/checkout@v4
+
+      - name: Install macOS 13-compatible conda native mpv and FFmpeg
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: tvhplayer-native
+          create-args: >-
+            python=3.11
+            mpv=0.40.*
+            ffmpeg=7.1.*
+          init-shell: bash
+
+      - name: Install official Python 3.15 x86_64 framework
+        run: |
+          set -euo pipefail
+          PKG="$RUNNER_TEMP/python-3.15.0-macos11.pkg"
+          curl --fail --location --retry 3 --retry-delay 2 -o "$PKG" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $PKG" | shasum -a 256 -c -
+          sudo installer -pkg "$PKG" -target / >/dev/null
+
+      - name: Install pinned Python dependencies and run regression tests
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install -r macos/requirements-build.txt pytest
+          "$RUNNER_TEMP/venv/bin/python" -m pip check
+          QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest -q \
+            tests/test_mpv_radio_cover.py tests/test_channel_view.py \
+            -k 'no_epg_display or mpvrender or audio_only or audio_start or stop_hides or shutdown_retains or player_close'
+
+      - name: Build isolated Ventura 13 Intel MPV application
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-Ventura-LAB
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.ventura.conda.lab
+          TVHPLAYER_BUILD_NOTICE: Ventura 13 / Intel MPV LAB - experimental build.
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          export TVHPLAYER_NATIVE_PREFIX="$CONDA_PREFIX"
+          export TVHPLAYER_RUNTIME_HOOK="$GITHUB_WORKSPACE/macos/runtime_hook_ventura_lab.py"
+          export PYTHON="$RUNNER_TEMP/venv/bin/python"
+          test -f "$CONDA_PREFIX/lib/libmpv.2.dylib"
+          test -x "$CONDA_PREFIX/bin/ffmpeg"
+          test -x "$CONDA_PREFIX/bin/ffprobe"
+          bash macos/build-macos.sh
+
+      - name: Audit portable x86_64 bundle and Ventura deployment target
+        run: |
+          set -euo pipefail
+          APP="macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.app"
+          test -x "$APP/Contents/MacOS/TVHplayer-v4.1-MPV-Ventura-LAB"
+          test -s "$APP/Contents/Frameworks/icons/epg.svg"
+          test -f "$APP/Contents/Frameworks/libmpv.2.dylib"
+          file "$APP/Contents/MacOS/TVHplayer-v4.1-MPV-Ventura-LAB"
+          codesign --verify --deep --verbose=2 "$APP"
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          app = Path("macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.app/Contents")
+          binaries = [
+              app / "MacOS/TVHplayer-v4.1-MPV-Ventura-LAB",
+              app / "Frameworks/libmpv.2.dylib",
+              app / "Frameworks/ffmpeg",
+              app / "Frameworks/ffprobe",
+          ]
+          for item in binaries:
+              data = subprocess.check_output(["otool", "-l", str(item)], text=True)
+              versions = re.findall(r"\\bminos\\s+(\\d+\\.\\d+)", data)
+              versions += re.findall(r"\\bversion\\s+(\\d+\\.\\d+)\\s*\\n\\s*sdk", data)
+              if not versions:
+                  print("WARNING: No minimum OS command:", item)
+                  continue
+              minimum = max(tuple(map(int, v.split("."))) for v in versions)
+              print(item.name, "minimum macOS", ".".join(map(str, minimum)))
+              if minimum > (13, 0):
+                  raise SystemExit(f"Not compatible with macOS 13: {item} requires {minimum}")
+          PY
+
+      - name: Package and verify Ventura DMG
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-Ventura-LAB
+          TVHPLAYER_BUILD_NOTICE: Ventura 13 Intel MPV LAB - use separate config, cache and log folders.
+        run: |
+          set -euo pipefail
+          bash macos/package-dmg.sh
+          ls -lh macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.dmg
+          shasum -a 256 -c macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.dmg.sha256
+
+      - name: Publish verified Intel DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: TVHplayer-v4.1-MPV-Ventura13-Intel-DMG
+          path: |
+            macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.dmg
+            macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
