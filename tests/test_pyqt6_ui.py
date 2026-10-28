@@ -963,6 +963,12 @@ def test_dvr_status_dialog_stops_selected_recording(monkeypatch):
             self.local_recording_running = lambda: False
             self.messages = []
             self.statusbar = types.SimpleNamespace(showMessage=self.messages.append)
+            self.submitted = []
+
+        def submit_dvr_mutation(self, action, entry, origin='OTHER'):
+            self.submitted.append((action, entry.uuid, origin))
+            backend.stop_dvr_entry(entry)
+            return True
 
         def stop_recording_indicator(self):
             self.is_recording = False
@@ -987,11 +993,15 @@ def test_dvr_status_dialog_stops_selected_recording(monkeypatch):
         assert dialog.stop_btn.isEnabled() is True
         dialog.stop_selected()
         assert backend.stopped == ['run']
+        assert parent.submitted == [('stop', 'run', 'DIALOG_STOP')]
         assert 'News' in dialog.action_label.text()
-        assert dialog.upcoming_table.rowCount() == 1
+        # Keep cached state until a fresh server read; do not falsely claim a stop.
+        assert dialog.upcoming_table.rowCount() == 2
         assert dialog.stop_btn.isEnabled() is False
-        assert parent.cleared is True
-        assert parent.messages == ['Recording stopped']
+        assert parent.cleared is False
+        dialog.update_status()
+        assert dialog.upcoming_table.rowCount() == 1
+        assert parent.messages == []
 
         dialog.tabs.setCurrentWidget(dialog.finished_table)
         dialog.finished_table.selectRow(0)
@@ -3247,6 +3257,31 @@ def test_subtitles_never_persist_ambiguous_track_labels(monkeypatch, tmp_path):
         window._select_subtitle_track(4, 'Unnamed track')
         assert window.servers[0]['subtitle_language'] == 'ron'
         assert window._subtitle_manual_override
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_v41_tasks_server_stop_routes_only_through_dvr_gate(monkeypatch, tmp_path):
+    app, module, window, fake = _make_player(monkeypatch, tmp_path)
+    from tvhplayer.core.models import DvrEntry
+    calls = []
+    try:
+        entry = DvrEntry(
+            uuid='run1', title='News', channel_name='One',
+            start=100, duration=60, status='Running', sched_status='recording'
+        )
+        pane = window.tasks_pane
+        pane.selected_task = lambda: {
+            'kind': 'Server', 'bucket': 'recording', 'entry': entry,
+            'title': 'News', 'channel': 'One'
+        }
+        window.submit_dvr_mutation = lambda action, item, origin='OTHER': (
+            calls.append((action, item.uuid, origin)) or True
+        )
+        window.get_backend = lambda: (_ for _ in ()).throw(AssertionError('Direct UI backend access'))
+        pane.run_action()
+        assert calls == [('stop', 'run1', 'TASKS_STOP')]
     finally:
         window.close()
         app.processEvents()
