@@ -201,3 +201,21 @@ def test_channel_model_handles_a_very_large_list_quickly():
     # An item per cell took tens of seconds for this many channels.
     assert time.monotonic() - started < 5
     view.close()
+
+
+def test_no_epg_display_only_after_successful_now_next_fetch():
+    from PyQt6.QtCore import Qt
+    from tvhplayer.channel_view import COL_NOW, COL_NEXT
+    from tvhplayer.core.models import Channel
+
+    app, model, view = _model([Channel(uuid='no-guide', name='No Guide', number=123)])
+    now = model.index(0, COL_NOW)
+    next_ = model.index(0, COL_NEXT)
+    assert now.data() == ''  # No reply yet, not proof of missing EPG.
+    model.set_programmes({}, True, fetched=True)
+    assert now.data() == 'No EPG'
+    assert next_.data() == ''
+    assert now.data(Qt.ItemDataRole.ToolTipRole) == 'No EPG available for this channel'
+    model.set_programmes({}, True, fetched=False)
+    assert now.data() == ''  # Request failed / still pending.
+    view.close()
