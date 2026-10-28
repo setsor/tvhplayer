@@ -1,0 +1,152 @@
+name: Ventura 13 candidate - conda-forge mpv (Intel lab)
+
+on:
+  push:
+    branches:
+      - build/ventura-conda-mpv-lab
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: conda-ventura-mpv-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  intel-ventura-candidate:
+    runs-on: macos-15-intel
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install conda-forge native mpv and FFmpeg for macOS Intel
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-name: mpv-native
+          create-args: >-
+            -c conda-forge
+            mpv=0.41.0
+            ffmpeg
+
+      - name: Locate and audit conda mpv libraries before building
+        shell: bash
+        run: |
+          set -euo pipefail
+          PREFIX="$(dirname "$(dirname "$(micromamba run -n mpv-native which mpv)")")"
+          test -s "$PREFIX/lib/libmpv.2.dylib"
+          test -x "$PREFIX/bin/ffmpeg"
+          test -x "$PREFIX/bin/ffprobe"
+          echo "TVHPLAYER_NATIVE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          python3 macos/audit-native-minos.py "$PREFIX" "$RUNNER_TEMP/conda-native-minos.tsv"
+          python3 - "$RUNNER_TEMP/conda-native-minos.tsv" <<'PY'
+          import pathlib, sys
+          lines = pathlib.Path(sys.argv[1]).read_text().splitlines()[1:]
+          incompatible = [x for x in lines if x.split('\t')[1] not in ('UNKNOWN', '')
+                          and tuple(int(v) for v in x.split('\t')[1].split('.')) > (13, 0)]
+          if incompatible:
+              print('Conda native dependencies require newer macOS; cannot build Ventura candidate:')
+              print('\n'.join(incompatible[:12]))
+              sys.exit(1)
+          if any(x.split('\t')[1] == 'UNKNOWN' for x in lines):
+              print('Unknown binary minima; refusing Ventura candidate.')
+              sys.exit(1)
+          print(f'{len(lines)} conda-forge Mach-O files declare macOS 13 or older.')
+          PY
+
+      - name: Install verified Python 3.15.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 2 \
+            -o "$RUNNER_TEMP/python-3.15.0-macos11.pkg" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $RUNNER_TEMP/python-3.15.0-macos11.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "$RUNNER_TEMP/python-3.15.0-macos11.pkg" -target / >/dev/null
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 --version
+
+      - name: Install PyInstaller and app dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/ventura-venv"
+          echo "$RUNNER_TEMP/ventura-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/ventura-venv/bin/python" -m pip install -r macos/requirements-build.txt
+          "$RUNNER_TEMP/ventura-venv/bin/python" -m pip check
+
+      - name: Build app with conda-forge native libraries
+        env:
+          PYTHON: python
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-Ventura-LAB
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.ventura.conda.lab
+          TVHPLAYER_RUNTIME_HOOK: macos/lab_runtime_hook.py
+        run: |
+          set -euo pipefail
+          export DYLD_FALLBACK_LIBRARY_PATH="$TVHPLAYER_NATIVE_PREFIX/lib"
+          bash macos/build-macos.sh
+          codesign --verify --deep --verbose=2 "macos/dist/$TVHPLAYER_APP_NAME.app"
+
+      - name: Audit all packaged Mach-O binaries for macOS 13
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          APP='macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.app'
+          python3 macos/audit-native-minos.py "$APP" 'release-assets/native-minos-report.tsv'
+          python3 - <<'PY'
+          import pathlib, sys
+          rows = pathlib.Path('release-assets/native-minos-report.tsv').read_text().splitlines()[1:]
+          unknown = [r for r in rows if r.split('\t')[1] == 'UNKNOWN']
+          too_new = [r for r in rows if r.split('\t')[1] != 'UNKNOWN' and
+                     tuple(map(int, r.split('\t')[1].split('.'))) > (13, 0)]
+          if unknown or too_new:
+              print(f'Ventura candidate rejected: {len(too_new)} native binaries too new, {len(unknown)} unknown.')
+              sys.exit(1)
+          print(f'Candidate passes Mach-O minOS check for Ventura: {len(rows)} files.')
+          PY
+
+      - name: Package candidate DMG and app ZIP
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-Ventura-LAB
+          TVHPLAYER_BUILD_NOTICE: 'EXPERIMENTAL Ventura 13 candidate: native minOS audit passes, but real playback on Ventura is untested. Keep the validated application installed.'
+        run: |
+          set -euo pipefail
+          bash macos/package-dmg.sh
+          cp "macos/dist/$TVHPLAYER_APP_NAME.dmg" \
+            'release-assets/TVHplayer-v4.1-MPV-Ventura13-CANDIDATE-Intel.dmg'
+          ditto -c -k --sequesterRsrc --keepParent \
+            "macos/dist/$TVHPLAYER_APP_NAME.app" \
+            'release-assets/TVHplayer-v4.1-MPV-Ventura13-CANDIDATE-Intel.app.zip'
+          (cd release-assets && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt)
+
+      - name: Confirm standalone mpv launch without conda installation
+        env:
+          QT_QPA_PLATFORM: offscreen
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A finished bundle must not rely on the temporary conda folder.
+          mv "$TVHPLAYER_NATIVE_PREFIX" "$TVHPLAYER_NATIVE_PREFIX.disabled"
+          unset DYLD_FALLBACK_LIBRARY_PATH || true
+          APP='macos/dist/TVHplayer-v4.1-MPV-Ventura-LAB.app/Contents/MacOS/TVHplayer-v4.1-MPV-Ventura-LAB'
+          LOG="$HOME/Library/Logs/TVHplayer-MPV-LAB/app.log"
+          "$APP" > "$RUNNER_TEMP/mpv-lab-stdout.txt" 2>&1 &
+          pid=$!
+          sleep 18
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$RUNNER_TEMP/mpv-lab-stdout.txt"
+            echo 'Native runtime failed after removing conda prefix' >&2
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" || true
+          test -s "$LOG"
+          grep -Fq 'Playback engine: mpv' "$LOG"
+          grep -Fq 'Media player created successfully' "$LOG"
+          ! grep -Fq 'Error starting application' "$LOG"
+
+      - name: Publish Ventura candidate artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: TVHplayer-v4.1-MPV-Ventura13-CANDIDATE-Intel-${{ github.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14

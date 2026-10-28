@@ -36,14 +36,14 @@ if [[ ! "$APP_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
   exit 1
 fi
 
-BREW_MPV="$(brew --prefix mpv 2>/dev/null || true)"
+BREW_MPV="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix mpv 2>/dev/null || true)}"
 LIBMPV="$BREW_MPV/lib/libmpv.2.dylib"
 if [[ ! -f "$LIBMPV" ]]; then
   echo "ERROR: libmpv not found. Install it with: brew install mpv" >&2
   exit 1
 fi
 
-BREW_FFMPEG="$(brew --prefix ffmpeg 2>/dev/null || true)"
+BREW_FFMPEG="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix ffmpeg 2>/dev/null || true)}"
 for program in ffmpeg ffprobe; do
   if [[ ! -x "$BREW_FFMPEG/bin/$program" ]]; then
     echo "ERROR: $program not found. Install it with: brew install ffmpeg" >&2
@@ -55,8 +55,13 @@ done
 # Homebrew lives in /opt/homebrew.
 DYLD_FALLBACK_LIBRARY_PATH="$BREW_MPV/lib" "$PYTHON" -c 'import PyInstaller, PyQt6, mpv, requests'
 
+if [[ -n "${TVHPLAYER_NATIVE_PREFIX:-}" ]]; then
+  LIBMPV_VERSION="conda-forge native libraries from $TVHPLAYER_NATIVE_PREFIX"
+else
+  LIBMPV_VERSION="$(brew list --versions mpv)"
+fi
 printf 'Building %s for %s (Python: %s, libmpv: %s)\n' \
-  "$APP_NAME" "$ARCH" "$("$PYTHON" --version 2>&1)" "$(brew list --versions mpv)"
+  "$APP_NAME" "$ARCH" "$("$PYTHON" --version 2>&1)" "$LIBMPV_VERSION"
 
 # A sharp app icon: PyInstaller makes the .icns from a 1024 px render of the SVG.
 mkdir -p "$MACOS_DIR/build"
@@ -66,6 +71,12 @@ ICON="$MACOS_DIR/build/tvhplayer-1024.png"
 # Only experimental builds use an early runtime hook. It sets isolated
 # data paths before application imports and before logging is initialized.
 RUNTIME_HOOK_ARGS=()
+NATIVE_BINARY_ARGS=()
+if [[ -n "${TVHPLAYER_NATIVE_PREFIX:-}" ]]; then
+  # All conda-native dynamic libraries are included: the resulting app must
+  # not require an external conda installation on the user's Mac.
+  NATIVE_BINARY_ARGS=(--add-binary "$TVHPLAYER_NATIVE_PREFIX/lib:.")
+fi
 if [[ -n "${TVHPLAYER_RUNTIME_HOOK:-}" ]]; then
   [[ -f "$TVHPLAYER_RUNTIME_HOOK" ]] || { echo "ERROR: No such runtime hook: $TVHPLAYER_RUNTIME_HOOK" >&2; exit 1; }
   RUNTIME_HOOK_ARGS=(--runtime-hook "$TVHPLAYER_RUNTIME_HOOK")
@@ -82,6 +93,7 @@ fi
   --collect-submodules core \
   --hidden-import resources_rc \
   "${RUNTIME_HOOK_ARGS[@]}" \
+  "${NATIVE_BINARY_ARGS[@]}" \
   --add-binary "$LIBMPV:." \
   --add-binary "$BREW_FFMPEG/bin/ffmpeg:." \
   --add-binary "$BREW_FFMPEG/bin/ffprobe:." \
@@ -101,6 +113,11 @@ fi
 # Every library must come from the bundle or macOS itself, never from Homebrew.
 leaks="$(find "$BUNDLE/Contents" -type f \( -name '*.dylib' -o -name '*.so' -o -perm -u+x \) -print0 |
   xargs -0 otool -L 2>/dev/null | grep -E '^\s+(/opt/homebrew|/usr/local)/' | sort -u || true)"
+if [[ -n "${TVHPLAYER_NATIVE_PREFIX:-}" ]]; then
+  other_leaks="$(find "$BUNDLE/Contents" -type f \( -name '*.dylib' -o -name '*.so' -o -perm -u+x \) -print0 |
+    xargs -0 otool -L 2>/dev/null | grep -F "$TVHPLAYER_NATIVE_PREFIX/" | sort -u || true)"
+  leaks="${leaks}${other_leaks}"
+fi
 if [[ -n "$leaks" ]]; then
   echo 'ERROR: The bundle still links libraries outside it:' >&2
   echo "$leaks" >&2
