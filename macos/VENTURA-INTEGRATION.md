@@ -85,3 +85,22 @@ native-library requirements.
 Passing these tests does **not** prove mpv fixes any libVLC native deadlock;
 the two media backends have different code paths and must be evaluated as
 alternatives.
+
+
+## GitHub-built experimental macOS Intel DMG
+
+The dedicated workflow `.github/workflows/build-v41-mpv-lab.yml` builds the
+integration branch into a **separately named** `TVHplayer-v4.1-MPV-LAB.app`,
+with an isolated bundle identifier. A PyInstaller runtime hook redirects
+config, cache, logs and picons *even when launched from Finder*, so this app
+cannot silently reuse the validated installation's profile. It also provides
+a DMG, application ZIP, checksums and an inventory of the minimum macOS
+versions declared by all Mach-O binaries inside the bundle.
+
+The public GitHub runner is **macOS 15 Intel**, so the resulting artifact is
+labeled `macos15-intel`. A successful build and headless smoke test do NOT
+establish binary compatibility with Ventura 13. Check the native-minos report
+before attempting it on Ventura; if any library requires macOS 14/15, the
+artifact is not suitable for Ventura. A truly Ventura-compatible artifact
+requires a Ventura-compatible native libmpv/FFmpeg dependency graph built
+and tested against macOS 13.

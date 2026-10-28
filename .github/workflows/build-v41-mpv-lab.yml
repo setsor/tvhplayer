@@ -1,0 +1,158 @@
+name: Build experimental TVHplayer v4.1 mpv lab (macOS Intel)
+
+on:
+  push:
+    branches:
+      - integration/upstream-v4.1-ventura
+    paths:
+      - 'tvhplayer/**'
+      - 'tests/**'
+      - 'macos/**'
+      - '.github/workflows/build-v41-mpv-lab.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-mpv-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  intel-lab:
+    runs-on: macos-15-intel
+    timeout-minutes: 55
+    steps:
+      - name: Checkout exact integration revision
+        uses: actions/checkout@v7
+
+      - name: Install verified Python 3.15.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --retry-delay 2 \
+            -o "$RUNNER_TEMP/python-3.15.0-macos11.pkg" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $RUNNER_TEMP/python-3.15.0-macos11.pkg" | shasum -a 256 -c -
+          sudo installer -pkg "$RUNNER_TEMP/python-3.15.0-macos11.pkg" -target / >/dev/null
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 --version
+
+      - name: Install pinned build dependencies and pytest
+        shell: bash
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/mpv-lab-venv"
+          echo "$RUNNER_TEMP/mpv-lab-venv/bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/mpv-lab-venv/bin/python" -m pip install -r macos/requirements-build.txt 'pytest>=9,<11'
+          "$RUNNER_TEMP/mpv-lab-venv/bin/python" -m pip check
+
+      - name: Run isolated regression suite
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          python -m pytest -q \
+            tests/test_config.py \
+            tests/test_macos_legacy_migration.py \
+            tests/test_server_dialog.py \
+            tests/test_pyqt6_ui.py \
+            tests/test_mpv_player.py \
+            tests/test_engine.py \
+            tests/test_dvr_api.py \
+            tests/test_dvr_gate_v41.py \
+            tests/test_recorder.py \
+            tests/test_lab_runtime_hook.py
+
+      - name: Install bundled native mpv and ffmpeg build prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install mpv ffmpeg
+          brew list --versions mpv ffmpeg
+
+      - name: Build separately named and isolated macOS Intel .app
+        shell: bash
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-LAB
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.mpv.lab
+          TVHPLAYER_RUNTIME_HOOK: macos/lab_runtime_hook.py
+          PYTHON: python
+        run: |
+          set -euo pipefail
+          bash macos/build-macos.sh
+          APP="macos/dist/$TVHPLAYER_APP_NAME.app"
+          test -x "$APP/Contents/MacOS/$TVHPLAYER_APP_NAME"
+          test -s "$APP/Contents/Frameworks/libmpv.2.dylib"
+          test -x "$APP/Contents/Frameworks/ffmpeg"
+          codesign --verify --deep --verbose=2 "$APP"
+
+      - name: Inspect every bundled Mach-O for Ventura minimum OS
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          python macos/audit-native-minos.py \
+            'macos/dist/TVHplayer-v4.1-MPV-LAB.app' \
+            'release-assets/native-minos-report.tsv'
+
+      - name: Package isolated experimental DMG and app ZIP
+        shell: bash
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.1-MPV-LAB
+          TVHPLAYER_BUILD_NOTICE: 'EXPERIMENTAL BUILD: compiled on macOS 15 Intel. Compatibility with Ventura/macOS 13 is NOT established. This app stores its data separately from standard TVHplayer.'
+        run: |
+          set -euo pipefail
+          bash macos/package-dmg.sh
+          cp "macos/dist/$TVHPLAYER_APP_NAME.dmg" \
+            'release-assets/TVHplayer-v4.1-MPV-LAB-macos15-intel.dmg'
+          ditto -c -k --sequesterRsrc --keepParent \
+            "macos/dist/$TVHPLAYER_APP_NAME.app" \
+            'release-assets/TVHplayer-v4.1-MPV-LAB-macos15-intel.app.zip'
+          (cd release-assets && shasum -a 256 *.dmg *.zip > SHA256SUMS.txt)
+          cat > release-assets/README-FIRST.txt <<'NOTICE'
+          TVHplayer v4.1 mpv experimental build (Intel, built on macOS 15).
+          Not confirmed compatible with macOS Ventura 13.
+          This package has an isolated app name, bundle identifier and
+          built-in runtime hook that redirects config, cache, logs and picons.
+          It does not replace the installed validated TVHplayer.
+          See native-minos-report.tsv for binary minimum OS requirements.
+          CI's headless launch is not a test of DVB playback on a real Mac.
+          NOTICE
+
+      - name: Smoke-test bundle without system mpv
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          # Uninstall just system mpv/ffmpeg executables; the bundle must contain both.
+          brew uninstall --ignore-dependencies mpv ffmpeg
+          APP='macos/dist/TVHplayer-v4.1-MPV-LAB.app/Contents/MacOS/TVHplayer-v4.1-MPV-LAB'
+          # The runtime hook chooses these paths even for Finder launches.
+          LOG="$HOME/Library/Logs/TVHplayer-MPV-LAB/app.log"
+          "$APP" > "$RUNNER_TEMP/mpv-lab-stdout.txt" 2>&1 &
+          pid=$!
+          sleep 18
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$RUNNER_TEMP/mpv-lab-stdout.txt"
+            echo 'Experimental .app terminated during smoke test' >&2
+            exit 1
+          fi
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" || true
+          test -s "$LOG"
+          grep -Fq 'Playback engine: mpv' "$LOG"
+          grep -Fq 'Media player created successfully' "$LOG"
+          ! grep -Fq 'Error starting application' "$LOG"
+          # Logs, config and picons for the standard app must not be used.
+          test -d "$HOME/Library/Logs/TVHplayer-MPV-LAB"
+          'macos/dist/TVHplayer-v4.1-MPV-LAB.app/Contents/Frameworks/ffmpeg' -hide_banner -version | head -n 1
+
+      - name: Upload experimental DMG, application ZIP, checksums and compatibility audit
+        uses: actions/upload-artifact@v7
+        with:
+          name: TVHplayer-v4.1-MPV-LAB-macos15-intel-${{ github.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14

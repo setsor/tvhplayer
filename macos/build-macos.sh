@@ -63,6 +63,14 @@ mkdir -p "$MACOS_DIR/build"
 ICON="$MACOS_DIR/build/tvhplayer-1024.png"
 "$PYTHON" "$ROOT/packaging/render_icon.py" "$ICON"
 
+# Only experimental builds use an early runtime hook. It sets isolated
+# data paths before application imports and before logging is initialized.
+RUNTIME_HOOK_ARGS=()
+if [[ -n "${TVHPLAYER_RUNTIME_HOOK:-}" ]]; then
+  [[ -f "$TVHPLAYER_RUNTIME_HOOK" ]] || { echo "ERROR: No such runtime hook: $TVHPLAYER_RUNTIME_HOOK" >&2; exit 1; }
+  RUNTIME_HOOK_ARGS=(--runtime-hook "$TVHPLAYER_RUNTIME_HOOK")
+fi
+
 # PyInstaller collects the libraries libmpv links and rewrites their paths.
 "$PYTHON" -m PyInstaller \
   --noconfirm --clean --onedir --windowed \
@@ -73,6 +81,7 @@ ICON="$MACOS_DIR/build/tvhplayer-1024.png"
   --paths "$ROOT/tvhplayer" \
   --collect-submodules core \
   --hidden-import resources_rc \
+  "${RUNTIME_HOOK_ARGS[@]}" \
   --add-binary "$LIBMPV:." \
   --add-binary "$BREW_FFMPEG/bin/ffmpeg:." \
   --add-binary "$BREW_FFMPEG/bin/ffprobe:." \

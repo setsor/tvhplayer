@@ -41,6 +41,7 @@ TVHplayer for macOS
 
 It plays with mpv, which is inside the app; nothing else needs installing.
 
+${TVHPLAYER_BUILD_NOTICE:-}
 The application is ad-hoc signed but not notarized by Apple.
 macOS may request approval via System Settings > Privacy & Security.
 
