@@ -26,7 +26,7 @@ jobs:
           create-args: >-
             -c conda-forge
             mpv=0.40.0
-            ffmpeg
+            ffmpeg=7.1
 
       - name: Locate and audit conda mpv libraries before building
         shell: bash
