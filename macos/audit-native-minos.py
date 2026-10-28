@@ -39,12 +39,12 @@ def main():
     found, unknown, unsuitable = [], [], []
     for path in sorted(p for p in app.rglob("*") if p.is_file() and not p.is_symlink()):
         description = subprocess.run(
-            ["file", "-b", str(path)], capture_output=True, text=True, check=False
+            ["file", "-b", str(path)], capture_output=True, text=True, errors='replace', check=False
         ).stdout
         if "Mach-O" not in description:
             continue
         otool = subprocess.run(
-            ["otool", "-l", str(path)], capture_output=True, text=True, check=False
+            ["otool", "-l", str(path)], capture_output=True, text=True, errors='replace', check=False
         )
         relative = str(path.relative_to(app))
         versions = required_versions(otool.stdout) if otool.returncode == 0 else []
