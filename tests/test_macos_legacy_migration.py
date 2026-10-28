@@ -97,6 +97,15 @@ class MacOSMigrationTests(unittest.TestCase):
         self.assertFalse(custom.exists())
         self.assertEqual(store.servers, [])
 
+    def test_isolated_test_build_does_not_import_legacy(self):
+        self.old.write_text(json.dumps(self._legacy_settings()), encoding='utf-8')
+        old_bytes = self.old.read_bytes()
+        with patch.dict(os.environ, {'TVHPLAYER_CONFIG_DIR': str(self.root / 'lab')}):
+            store = cfg.ConfigStore()
+        self.assertEqual(store.servers, [])
+        self.assertFalse(self.new.exists())
+        self.assertEqual(self.old.read_bytes(), old_bytes)
+
     def test_atomic_save_secures_existing_file(self):
         self.new.parent.mkdir(parents=True)
         self.new.write_text('{"servers":[]}', encoding="utf-8")

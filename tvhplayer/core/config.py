@@ -34,6 +34,10 @@ DEFAULT_GEOMETRY = {'x': 100, 'y': 100, 'width': 1200, 'height': 700}
 
 
 def default_config_dir():
+    # Explicit test builds must not modify the validated application's settings.
+    isolated = os.environ.get('TVHPLAYER_CONFIG_DIR')
+    if isolated:
+        return Path(isolated).expanduser()
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Application Support' / 'TVHplayer'
     if sys.platform == 'win32':
@@ -44,6 +48,9 @@ def default_config_dir():
 
 
 def default_cache_dir():
+    isolated = os.environ.get('TVHPLAYER_CACHE_DIR')
+    if isolated:
+        return Path(isolated).expanduser()
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Caches' / 'TVHplayer'
     if sys.platform == 'win32':
@@ -59,7 +66,7 @@ def default_config_path():
 
 def legacy_macos_config_path():
     """Settings from earlier macOS builds; never modify this legacy file."""
-    if sys.platform != 'darwin':
+    if sys.platform != 'darwin' or os.environ.get('TVHPLAYER_CONFIG_DIR'):
         return None
     return Path.home() / '.tvhplayer.conf'
 

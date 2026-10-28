@@ -24,6 +24,12 @@ case "$ARCH" in
   *) echo "ERROR: Unknown architecture $ARCH" >&2; exit 1 ;;
 esac
 APP_NAME="${TVHPLAYER_APP_NAME:-$DEFAULT_NAME}"
+BUNDLE_ID="${TVHPLAYER_BUNDLE_ID:-io.github.mfat.tvhplayer}"
+
+if [[ ! "$BUNDLE_ID" =~ ^[A-Za-z0-9]+(\.[A-Za-z0-9-]+)+$ ]]; then
+  echo "ERROR: Invalid TVHPLAYER_BUNDLE_ID" >&2
+  exit 1
+fi
 
 if [[ ! "$APP_NAME" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "ERROR: TVHPLAYER_APP_NAME must contain only letters, digits, dots, dashes or underscores." >&2
@@ -62,7 +68,7 @@ ICON="$MACOS_DIR/build/tvhplayer-1024.png"
   --noconfirm --clean --onedir --windowed \
   --name "$APP_NAME" \
   --target-arch "$ARCH" \
-  --osx-bundle-identifier io.github.mfat.tvhplayer \
+  --osx-bundle-identifier "$BUNDLE_ID" \
   --icon "$ICON" \
   --paths "$ROOT/tvhplayer" \
   --collect-submodules core \

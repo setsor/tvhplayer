@@ -196,3 +196,17 @@ def test_bad_subtitle_preferences_do_not_enable_a_track(tmp_path):
     server = ConfigStore(store.path).servers[0]
     assert server['subtitle_language'] == ''
     assert server['remember_subtitle_selection'] is False
+
+
+def test_isolated_integration_settings_and_cache_are_separate(monkeypatch, tmp_path):
+    from tvhplayer.core.config import default_config_path, default_cache_dir
+    config_dir = tmp_path / 'TVHplayer-MPV-Lab'
+    cache_dir = tmp_path / 'Cache-MPV-Lab'
+    monkeypatch.setenv('TVHPLAYER_CONFIG_DIR', str(config_dir))
+    monkeypatch.setenv('TVHPLAYER_CACHE_DIR', str(cache_dir))
+    assert default_config_path() == config_dir / 'tvhplayer.conf'
+    assert default_cache_dir() == cache_dir
+    store = ConfigStore()
+    store.servers = [{'name': 'Test only', 'url': 'http://localhost:9981'}]
+    store.save()
+    assert (config_dir / 'tvhplayer.conf').is_file()
