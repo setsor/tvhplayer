@@ -1711,7 +1711,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         for _ in range(300):
             app.processEvents()
             if (backend.stopped == ['run'] and
-                    not window._dvr_gate.awaiting_verification and not panel._fetching):
+                    not window._dvr_gate.awaiting_verification and not panel._fetching
+                    and all('News' not in text for text in _task_texts(panel))):
                 break
             QTest.qWait(10)
         assert backend.stopped == ['run']
@@ -1800,7 +1801,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         for _ in range(300):
             app.processEvents()
             if (backend.cancelled == ['soon'] and
-                    not window._dvr_gate.awaiting_verification and not panel._fetching):
+                    not window._dvr_gate.awaiting_verification and not panel._fetching
+                    and all('Later' not in text for text in _task_texts(panel))):
                 break
             QTest.qWait(10)
         assert backend.cancelled == ['soon']
