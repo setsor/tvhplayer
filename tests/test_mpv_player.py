@@ -314,3 +314,22 @@ def test_real_libmpv_reports_failure_and_playback(monkeypatch):
         player.stop()
     finally:
         player.close()
+
+
+def test_mpv_track_labels_match_per_server_romanian_default(engine):
+    """The v4.1 mpv Player API must support the fork's DVB language preferences."""
+    from tvhplayer.core.subtitle_preferences import preferred_subtitle_track
+
+    player, native, _seen = engine
+    native.track_list = [
+        {'id': 3, 'type': 'sub', 'title': 'DVB Subtitles', 'lang': 'eng'},
+        {'id': 7, 'type': 'sub', 'title': 'DVB Subtitles', 'lang': 'rum'},
+    ]
+    selected = preferred_subtitle_track(player.subtitle_tracks(), 'ron')
+    assert selected == 7
+    player.set_subtitle_track(selected)
+    assert player.subtitle_track() == 7
+
+    player.set_subtitle_track(NO_TRACK)
+    assert player.subtitle_track() == NO_TRACK
+    assert preferred_subtitle_track(player.subtitle_tracks(), 'hun') is None
