@@ -25,7 +25,7 @@ jobs:
           environment-name: mpv-native
           create-args: >-
             -c conda-forge
-            mpv=0.41.0
+            mpv=0.40.0
             ffmpeg
 
       - name: Locate and audit conda mpv libraries before building
@@ -37,6 +37,10 @@ jobs:
           test -x "$PREFIX/bin/ffmpeg"
           test -x "$PREFIX/bin/ffprobe"
           echo "TVHPLAYER_NATIVE_PREFIX=$PREFIX" >> "$GITHUB_ENV"
+          # Catch missing or unresolved native symbols before the expensive
+          # PyInstaller build, using conda's own Python runtime for preflight.
+          PREFIX="$PREFIX" micromamba run -n mpv-native python -c \
+            'import ctypes,os; ctypes.CDLL(os.environ["PREFIX"]+"/lib/libmpv.2.dylib"); print("libmpv native load OK")'
           python3 macos/audit-native-minos.py "$PREFIX" "$RUNNER_TEMP/conda-native-minos.tsv"
           python3 - "$RUNNER_TEMP/conda-native-minos.tsv" <<'PY'
           import pathlib, sys
