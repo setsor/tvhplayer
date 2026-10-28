@@ -63,6 +63,12 @@ fi
 printf 'Building %s for %s (Python: %s, libmpv: %s)\n' \
   "$APP_NAME" "$ARCH" "$("$PYTHON" --version 2>&1)" "$LIBMPV_VERSION"
 
+# The context-menu EPG icon must exist in source before spending time on the build.
+if [[ ! -s "$ROOT/icons/epg.svg" ]]; then
+  echo 'ERROR: Missing source icon: icons/epg.svg.' >&2
+  exit 1
+fi
+
 # A sharp app icon: PyInstaller makes the .icns from a 1024 px render of the SVG.
 mkdir -p "$MACOS_DIR/build"
 ICON="$MACOS_DIR/build/tvhplayer-1024.png"
