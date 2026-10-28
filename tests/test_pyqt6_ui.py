@@ -1807,7 +1807,9 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
             QTest.qWait(10)
         assert backend.cancelled == ['soon']
         assert not window._dvr_gate.awaiting_verification
-        assert window.is_recording is True
+        # The refreshed server snapshot contains no active recordings and
+        # the local job has already stopped, so a stale REC must clear.
+        assert window.is_recording is False
         assert any('Old' in text for text in _task_texts(panel))
         assert panel.task_table.isVisible()
         _select_task(panel, 'Old')
