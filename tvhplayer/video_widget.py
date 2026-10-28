@@ -14,6 +14,21 @@ from PyQt6.QtGui import QGuiApplication, QOpenGLContext
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
 GL_COLOR_BUFFER_BIT = 0x4000
+# mpv render.h: PRESENT denotes a queued frame; REDRAW and REPEAT are
+# not a new picture and must not dismiss the channel-logo cover.
+MPV_FRAME_PRESENT = 1
+MPV_FRAME_REDRAW = 2
+MPV_FRAME_REPEAT = 4
+
+
+def _new_video_picture(frame_info, frame_update):
+    """True only for an actual new mpv video frame, never a redraw."""
+    if frame_info is not None:
+        flags = int(frame_info.get('flags', 0))
+        return bool(flags & MPV_FRAME_PRESENT) and not bool(flags & (MPV_FRAME_REDRAW | MPV_FRAME_REPEAT))
+    # Older python-mpv bindings might not expose next_frame_info.
+    return bool(frame_update)
+
 
 
 class MpvVideoWidget(QOpenGLWidget):
@@ -21,12 +36,16 @@ class MpvVideoWidget(QOpenGLWidget):
 
     # mpv reports a new frame from its own thread; the signal repaints on this one.
     _frame_ready = pyqtSignal()
+    video_frame_presented = pyqtSignal()
+
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._engine = None
         self._render_context = None
         self._wayland = None
+        self._awaiting_new_picture = False
+        self._accept_new_picture = False
         self._frame_ready.connect(self.update, Qt.ConnectionType.QueuedConnection)
 
     def bind(self, engine):
@@ -35,6 +54,16 @@ class MpvVideoWidget(QOpenGLWidget):
             self.makeCurrent()
             self._create_render_context()
             self.doneCurrent()
+
+    def begin_stream(self):
+        """A different channel is starting; old video frames cannot reveal it."""
+        self._awaiting_new_picture = True
+        self._accept_new_picture = False
+
+    def accept_new_picture(self):
+        """A new stream is playing; reveal it after its own decoded frame is rendered."""
+        self._accept_new_picture = True
+        self.update()
 
     def platform_name(self):
         """Qt's windowing platform, e.g. "wayland" or "xcb" (X11 or XWayland)."""
@@ -62,6 +91,13 @@ class MpvVideoWidget(QOpenGLWidget):
             gl.glClearColor(0.0, 0.0, 0.0, 1.0)
             gl.glClear(GL_COLOR_BUFFER_BIT)
             return
+        # A mouse-triggered repaint can redraw the previous frame. Query the
+        # renderer's actual next-frame flags before rendering instead.
+        updated = self._render_context.update()
+        try:
+            frame_info = self._render_context.next_frame_info
+        except (AttributeError, ValueError, RuntimeError):
+            frame_info = None
         ratio = self.devicePixelRatioF()
         self._render_context.render(
             flip_y=True,
@@ -71,6 +107,11 @@ class MpvVideoWidget(QOpenGLWidget):
                 'fbo': self.defaultFramebufferObject(),
             },
         )
+        if (self._awaiting_new_picture and self._accept_new_picture
+                and _new_video_picture(frame_info, updated)
+                and self._engine is not None and self._engine.has_video()):
+            self._awaiting_new_picture = False
+            self.video_frame_presented.emit()
 
     def release(self):
         """Free the render context while its OpenGL context still exists."""
