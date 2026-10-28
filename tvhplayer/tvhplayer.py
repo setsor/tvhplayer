@@ -260,7 +260,7 @@ CHANNEL_RELOAD_SECONDS = 30
 # A reload of a big list freezes the window a while: space them by a second per this many channels.
 CHANNELS_PER_RELOAD_SECOND = 100
 # Now/next is asked for again this often, and sooner when a programme ends.
-NOW_NEXT_REFRESH_SECONDS = 600
+NOW_NEXT_REFRESH_SECONDS = 120
 NOW_NEXT_TICK_MS = 30000
 # How often to check whether a recording needs the computer awake.
 AWAKE_CHECK_MS = 30000
@@ -3006,7 +3006,11 @@ class NowNextFetch(QObject):
         backend = None
         try:
             backend = self._open_backend(self.server)
-            result = backend.get_now_next(self._channels)
+            # eventId/nextEventId from the previous channel-list fetch can expire.
+            # Take a fresh metadata snapshot on this worker connection before
+            # loading programme details; never re-query the old event IDs.
+            fresh_channels = backend.get_channels()
+            result = backend.get_now_next(fresh_channels)
         except Exception as e:
             print(f"Debug: Could not refresh now and next: {e}")
         finally:
@@ -4877,6 +4881,9 @@ class TVHeadendClient(QMainWindow):
         """
         # A fetch still running for an earlier request is ignored when it ends.
         self._channel_fetch = None
+        # Likewise, a pending now/next refresh must not replace the newer
+        # metadata and programmes returned by this channel-list reload.
+        self._now_next_fetch = None
         self.channel_busy.hide()
         server = self.current_server()
         if not server:
