@@ -101,7 +101,11 @@ class MacOSMigrationTests(unittest.TestCase):
         self.old.write_text(json.dumps(self._legacy_settings()), encoding='utf-8')
         old_bytes = self.old.read_bytes()
         with patch.dict(os.environ, {'TVHPLAYER_CONFIG_DIR': str(self.root / 'lab')}):
-            store = cfg.ConfigStore()
+            # setUp stubs default_config_path() to the normal user's path;
+            # use its real implementation for this isolated-build test.
+            with patch.object(cfg, 'default_config_path',
+                              side_effect=lambda: cfg.default_config_dir() / 'tvhplayer.conf'):
+                store = cfg.ConfigStore()
         self.assertEqual(store.servers, [])
         self.assertFalse(self.new.exists())
         self.assertEqual(self.old.read_bytes(), old_bytes)
