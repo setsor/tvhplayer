@@ -3289,3 +3289,35 @@ def test_v41_tasks_server_stop_routes_only_through_dvr_gate(monkeypatch, tmp_pat
     finally:
         window.close()
         app.processEvents()
+
+
+def test_subtitle_off_default_waits_for_late_dvb_track(monkeypatch, tmp_path):
+    app, module, window, fake = _make_player(monkeypatch, tmp_path)
+    try:
+        server = {'name': 'NAS', 'url': 'http://nas.test:9981', 'subtitle_language': ''}
+        window.servers = [server]
+        window.server_combo.blockSignals(True)
+        window.server_combo.clear()
+        window.server_combo.addItem('NAS')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        window._playback_server = module.server_key(server)
+        window._playback_channel = module.Channel(uuid='late', name='Late DVB')
+        fake._playing = True
+        fake.spu = []
+        fake.spu_id = -1
+        window._reset_subtitle_default(for_live_channel=True)
+        window._on_playback_started()
+        assert window._subtitle_default_timer.isActive()
+        assert not window._subtitle_auto_applied
+
+        # The engine discovers an automatically selected subtitle later.
+        fake.spu = [(9, b'DVB Subtitle (English)')]
+        fake.spu_id = 9
+        window._apply_subtitle_default()
+        assert fake.spu_id == -1
+        assert window._subtitle_auto_applied
+        assert not window._subtitle_default_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()

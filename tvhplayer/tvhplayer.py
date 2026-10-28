@@ -5339,6 +5339,12 @@ class TVHeadendClient(QMainWindow):
             if player is None or not player.is_playing():
                 return
             tracks = player.subtitle_tracks()
+            if not tracks:
+                # mpv/VLC may expose the first DVB track after playback starts.
+                # Keep polling even when "Off" currently appears selected.
+                if player.subtitle_track() != NO_TRACK:
+                    player.set_subtitle_track(NO_TRACK)
+                return
             if self._subtitle_preference == '':
                 chosen = NO_TRACK
             else:
