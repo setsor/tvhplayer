@@ -14,6 +14,9 @@ from unittest.mock import patch
 
 from tvhplayer.core import config as cfg
 
+# Preserve the real resolver before setUp patches it for legacy-migration tests.
+_REAL_LEGACY_MACOS_CONFIG_PATH = cfg.legacy_macos_config_path
+
 
 class MacOSMigrationTests(unittest.TestCase):
     def setUp(self):
@@ -104,7 +107,9 @@ class MacOSMigrationTests(unittest.TestCase):
             # setUp stubs default_config_path() to the normal user's path;
             # use its real implementation for this isolated-build test.
             with patch.object(cfg, 'default_config_path',
-                              side_effect=lambda: cfg.default_config_dir() / 'tvhplayer.conf'):
+                              side_effect=lambda: cfg.default_config_dir() / 'tvhplayer.conf'), \
+                    patch.object(cfg, 'legacy_macos_config_path',
+                                 side_effect=_REAL_LEGACY_MACOS_CONFIG_PATH):
                 store = cfg.ConfigStore()
         self.assertEqual(store.servers, [])
         self.assertFalse(self.new.exists())
