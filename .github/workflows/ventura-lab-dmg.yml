@@ -98,8 +98,8 @@ jobs:
           ]
           for item in binaries:
               data = subprocess.check_output(["otool", "-l", str(item)], text=True)
-              versions = re.findall(r"\\bminos\\s+(\\d+\\.\\d+)", data)
-              versions += re.findall(r"\\bversion\\s+(\\d+\\.\\d+)\\s*\\n\\s*sdk", data)
+              versions = re.findall(r"\bminos\s+(\d+\.\d+)", data)
+              versions += re.findall(r"\bversion\s+(\d+\.\d+)\s*\n\s*sdk", data)
               if not versions:
                   print("WARNING: No minimum OS command:", item)
                   continue
