@@ -4565,7 +4565,9 @@ class TVHeadendClient(QMainWindow):
         self._logo_pixmaps[reference] = QPixmap.fromImage(image)
         if (self.engine == ENGINE_MPV
                 and reference == self._channel_cover_reference):
-            self._channel_cover_pixmap = self._logo_pixmaps[reference]
+            self._channel_cover_pixmap = self._channel_cover_image(
+                reference, self._logo_pixmaps[reference]
+            )
             self._paint_channel_cover()
         # Logos arrive one by one, thousands for a large list; set them on the rows together.
         self._logos_arrived.add(reference)
@@ -5209,11 +5211,27 @@ class TVHeadendClient(QMainWindow):
         channel = self._playback_channel
         reference = self.channel_logo_reference(channel) if channel is not None else ''
         self._channel_cover_reference = reference
-        self._channel_cover_pixmap = self._logo_pixmaps.get(reference)
+        self._channel_cover_pixmap = self._channel_cover_image(
+            reference, self._logo_pixmaps.get(reference)
+        )
         self._paint_channel_cover()
         if reference and self._channel_cover_pixmap is None:
             backend = None if reference.startswith(PICON_PREFIX) else self._logo_backend()
             self._logo_for(reference, backend)
+
+    def _channel_cover_image(self, reference, fallback=None):
+        """Use original-size cached artwork; table thumbnails are only 40x24."""
+        if not reference:
+            return fallback
+        image = QPixmap()
+        if reference.startswith(PICON_PREFIX):
+            image.load(reference[len(PICON_PREFIX):])
+        else:
+            server = self.current_server() or {}
+            data = self.logo_loader.cached(server.get('url') or '', reference)
+            if data:
+                image.loadFromData(data)
+        return image if not image.isNull() else fallback
 
     def _paint_channel_cover(self):
         cover = getattr(self, 'channel_cover', None)
