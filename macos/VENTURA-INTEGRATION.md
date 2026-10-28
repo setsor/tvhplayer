@@ -31,11 +31,14 @@ export TVHPLAYER_BUNDLE_ID=io.github.setsor.tvhplayer.ventura.lab
 bash macos/build-macos.sh
 ```
 
-Run the resulting app only with isolated configuration and cache directories:
+Run the resulting app only with isolated configuration, cache, log and picon
+directories (the latter two prevent writes to the validated app's data):
 
 ```sh
 TVHPLAYER_CONFIG_DIR="$HOME/Library/Application Support/TVHplayer-MPV-LAB" \
 TVHPLAYER_CACHE_DIR="$HOME/Library/Caches/TVHplayer-MPV-LAB" \
+TVHPLAYER_LOG_DIR="$HOME/Library/Logs/TVHplayer-MPV-LAB" \
+TVHPLAYER_PICON_DIR="$HOME/Library/Application Support/TVHplayer-MPV-LAB/picons" \
 TVHPLAYER_ENGINE=mpv \
 macos/dist/TVHplayer-Ventura-MPV-LAB.app/Contents/MacOS/TVHplayer-Ventura-MPV-LAB
 ```

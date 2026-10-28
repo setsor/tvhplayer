@@ -210,3 +210,15 @@ def test_isolated_integration_settings_and_cache_are_separate(monkeypatch, tmp_p
     store.servers = [{'name': 'Test only', 'url': 'http://localhost:9981'}]
     store.save()
     assert (config_dir / 'tvhplayer.conf').is_file()
+
+
+def test_isolated_log_and_picon_directories(monkeypatch, tmp_path):
+    from tvhplayer.core.logs import log_dir
+    from tvhplayer.core.picons import default_picon_dir
+
+    logs = tmp_path / 'LogsLab'
+    picons = tmp_path / 'PiconsLab'
+    monkeypatch.setenv('TVHPLAYER_LOG_DIR', str(logs))
+    monkeypatch.setenv('TVHPLAYER_PICON_DIR', str(picons))
+    assert log_dir() == logs
+    assert default_picon_dir() == picons

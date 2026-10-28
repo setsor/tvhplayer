@@ -39,6 +39,9 @@ _AUTHORIZATION = re.compile(r'(?i)(\bauthorization\s*:\s*(?:basic|digest|bearer)
 
 
 def log_dir() -> Path:
+    isolated = os.environ.get('TVHPLAYER_LOG_DIR')
+    if isolated:
+        return Path(isolated).expanduser()
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Logs' / 'TVHplayer'
     if sys.platform == 'win32':

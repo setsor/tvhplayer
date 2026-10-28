@@ -41,6 +41,9 @@ _BRACKETS = re.compile(r'[\(\[\{][^\)\]\}]*[\)\]\}]')
 
 
 def default_picon_dir() -> Path:
+    isolated = os.environ.get('TVHPLAYER_PICON_DIR')
+    if isolated:
+        return Path(isolated).expanduser()
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Application Support' / 'TVHplayer' / 'picons'
     if sys.platform == 'win32':
