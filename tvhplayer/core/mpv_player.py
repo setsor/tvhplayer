@@ -102,6 +102,17 @@ class MpvPlayer(Player):
         self._waiting_for_picture = False
         self._mpv.command('stop')
 
+    def has_video(self) -> bool:
+        """Whether mpv actually decoded a video track for this stream.
+
+        Audio-only streams can emit PLAYBACK_RESTART; this is deliberately
+        separate from the playback-started signal.
+        """
+        try:
+            return bool(self._mpv.video_codec)
+        except (AttributeError, RuntimeError):
+            return False
+
     def is_playing(self) -> bool:
         try:
             return not self._mpv.idle_active
