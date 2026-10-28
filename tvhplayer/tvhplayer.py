@@ -3523,6 +3523,8 @@ class TVHeadendClient(QMainWindow):
         self._awaiting_playback = False
         self._playback_channel = None
         self._playback_server = None
+        self._channel_cover_reference = ''
+        self._channel_cover_pixmap = None
         self._subtitle_default_timer = QTimer(self)
         self._subtitle_default_timer.setInterval(400)
         self._subtitle_default_timer.timeout.connect(self._apply_subtitle_default)
@@ -3929,6 +3931,20 @@ class TVHeadendClient(QMainWindow):
         self.idle_splash.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.idle_splash.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         describe(self.idle_splash, "Nothing playing", "TVHplayer logo, shown when nothing is playing")
+
+        # A separate cover prevents an old MPV video frame from showing while
+        # the next stream opens. For audio-only channels it stays on screen.
+        self.channel_cover = None
+        if self.engine == ENGINE_MPV:
+            self.channel_cover = QLabel(self.player_container)
+            self.channel_cover.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.channel_cover.setStyleSheet(
+                "background-color: black; color: #dadada; "
+                "font-size: 22px; font-weight: 600;"
+            )
+            self.channel_cover.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            self.channel_cover.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.channel_cover.hide()
 
         self.playback_spinner = PlaybackSpinner(self.player_container, native=self.engine != ENGINE_MPV)
         describe(
@@ -4547,6 +4563,10 @@ class TVHeadendClient(QMainWindow):
 
     def _on_logo_loaded(self, reference, image):
         self._logo_pixmaps[reference] = QPixmap.fromImage(image)
+        if (self.engine == ENGINE_MPV
+                and reference == self._channel_cover_reference):
+            self._channel_cover_pixmap = self._logo_pixmaps[reference]
+            self._paint_channel_cover()
         # Logos arrive one by one, thousands for a large list; set them on the rows together.
         self._logos_arrived.add(reference)
         if not self._logo_timer.isActive():
@@ -5182,6 +5202,58 @@ class TVHeadendClient(QMainWindow):
         self._protect_video_surface(False)
         self.statusbar.showMessage("Playback stopped")
 
+    def _prepare_channel_cover(self):
+        """Find the current channel's logo without blocking on an image download."""
+        if self.engine != ENGINE_MPV or self.channel_cover is None:
+            return
+        channel = self._playback_channel
+        reference = self.channel_logo_reference(channel) if channel is not None else ''
+        self._channel_cover_reference = reference
+        self._channel_cover_pixmap = self._logo_pixmaps.get(reference)
+        self._paint_channel_cover()
+        if reference and self._channel_cover_pixmap is None:
+            backend = None if reference.startswith(PICON_PREFIX) else self._logo_backend()
+            self._logo_for(reference, backend)
+
+    def _paint_channel_cover(self):
+        cover = getattr(self, 'channel_cover', None)
+        if cover is None:
+            return
+        pixmap = self._channel_cover_pixmap
+        if pixmap is not None and not pixmap.isNull():
+            width = max(1, min(360, int(self.player_container.width() * 0.65)))
+            height = max(1, min(220, int(self.player_container.height() * 0.55)))
+            cover.setPixmap(pixmap.scaled(
+                width, height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
+        else:
+            channel = getattr(self, '_playback_channel', None)
+            cover.setText(channel.name if channel is not None else '')
+
+    def _set_channel_cover(self, visible):
+        cover = getattr(self, 'channel_cover', None)
+        if cover is None:
+            return
+        if visible:
+            cover.setGeometry(self.player_container.rect())
+            channel = getattr(self, '_playback_channel', None)
+            cover.setAccessibleName(f"Channel: {channel.name}" if channel is not None else '')
+            cover.show()
+            cover.raise_()
+            spinner = getattr(self, 'playback_spinner', None)
+            if spinner is not None and spinner.isVisible():
+                spinner.raise_()
+        else:
+            cover.hide()
+            cover.setAccessibleName('')
+
+    def _on_video_frame_presented(self):
+        """Only a newly rendered video frame removes the MPV channel cover."""
+        if self.engine == ENGINE_MPV and self._playback_active and not self._awaiting_playback:
+            self._set_channel_cover(False)
+
     def _set_idle_splash(self, visible):
         """Show the logo overlay only when VLC is not drawing video."""
         if not hasattr(self, 'idle_splash'):
@@ -5219,6 +5291,10 @@ class TVHeadendClient(QMainWindow):
         if hasattr(self, '_splash_idle_timer'):
             self._splash_idle_timer.stop()
         self._set_idle_splash(True)
+        if self.engine == ENGINE_MPV:
+            self.video_frame.begin_stream()
+            self._prepare_channel_cover()
+            self._set_channel_cover(True)
         spinner = getattr(self, 'playback_spinner', None)
         if spinner is not None:
             spinner.set_caption(STARTING)
@@ -5293,6 +5369,8 @@ class TVHeadendClient(QMainWindow):
             self._splash_idle_timer.stop()
         waiting = bool(getattr(self, '_awaiting_playback', False))
         self._set_idle_splash((not playing) or waiting)
+        if not playing and not waiting:
+            self._set_channel_cover(False)
         if waiting:
             self._set_playback_spinner(True)
         if hasattr(self, 'video_frame') and self.engine != ENGINE_MPV:
@@ -5409,6 +5487,10 @@ class TVHeadendClient(QMainWindow):
         self._awaiting_playback = False
         self._set_playback_spinner(False)
         self._protect_video_surface(True)
+        if self.engine == ENGINE_MPV:
+            # PLAYBACK_RESTART can mean audio-only playback. Leave its logo
+            # displayed until the renderer actually presents a new video frame.
+            self.video_frame.accept_new_picture()
         self._mark_playing_channel()
         for name, delay in (('hw_check_timer', 3000), ('hw_check_late_timer', 30000)):
             timer = getattr(self, name, None)
@@ -5544,6 +5626,10 @@ class TVHeadendClient(QMainWindow):
         self._splash_idle_timer.setSingleShot(True)
         self._splash_idle_timer.timeout.connect(self._show_splash_if_idle)
         self._player_callback.connect(lambda fn: fn())
+        if self.engine == ENGINE_MPV:
+            self.video_frame.video_frame_presented.connect(
+                self._on_video_frame_presented, Qt.ConnectionType.QueuedConnection
+            )
         try:
             self.player.set_handlers(
                 self._on_playback_started,
@@ -6005,6 +6091,12 @@ class TVHeadendClient(QMainWindow):
             idle_splash = getattr(self, 'idle_splash', None)
             if idle_splash is not None:
                 idle_splash.setGeometry(player_container.rect())
+            cover = getattr(self, 'channel_cover', None)
+            if cover is not None:
+                cover.setGeometry(player_container.rect())
+                self._paint_channel_cover()
+                if cover.isVisible():
+                    cover.raise_()
             spinner = getattr(self, 'playback_spinner', None)
             if spinner is not None:
                 spinner.setGeometry(player_container.rect())
