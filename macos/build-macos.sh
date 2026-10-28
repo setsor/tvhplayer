@@ -104,6 +104,11 @@ fi
   "$ROOT/tvhplayer/tvhplayer.py"
 
 BUNDLE="$MACOS_DIR/dist/$APP_NAME.app"
+# Context-menu EPG icon must be present in the frozen application.
+if [[ ! -s "$BUNDLE/Contents/Frameworks/icons/epg.svg" ]]; then
+  echo 'ERROR: Incomplete bundle: icons/epg.svg is missing.' >&2
+  exit 1
+fi
 if [[ ! -x "$BUNDLE/Contents/MacOS/$APP_NAME" || ! -f "$BUNDLE/Contents/Frameworks/libmpv.2.dylib" ||
       ! -x "$BUNDLE/Contents/Frameworks/ffmpeg" || ! -x "$BUNDLE/Contents/Frameworks/ffprobe" ]]; then
   echo 'ERROR: Incomplete bundle: the program, libmpv, ffmpeg or ffprobe is missing.' >&2
