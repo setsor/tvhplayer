@@ -35,6 +35,8 @@ def _window_stub():
         _sync_play_button=Mock(),
         _set_idle_splash=Mock(),
         _set_channel_cover=Mock(),
+        channel_cover=SimpleNamespace(isHidden=lambda: False),
+        _playback_channel=SimpleNamespace(name='Test TV'),
     )
 
 
