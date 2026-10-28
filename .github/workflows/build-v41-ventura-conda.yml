@@ -30,6 +30,8 @@ jobs:
             meson
             ninja
             pkg-config
+            expat
+            libiconv
 
       - name: Rebuild corrected libmpv and audit conda Mach-O libraries
         shell: bash
