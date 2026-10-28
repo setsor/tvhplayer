@@ -57,6 +57,13 @@ def default_config_path():
     return default_config_dir() / 'tvhplayer.conf'
 
 
+def legacy_macos_config_path():
+    """Settings from earlier macOS builds; never modify this legacy file."""
+    if sys.platform != 'darwin':
+        return None
+    return Path.home() / '.tvhplayer.conf'
+
+
 def default_config():
     return {
         'volume': 50,
@@ -191,7 +198,8 @@ def _guide_choices(data):
 
 class ConfigStore:
     def __init__(self, path=None):
-        self.path = Path(path) if path else default_config_path()
+        self._uses_default_path = path is None
+        self.path = Path(path) if path is not None else default_config_path()
         self.data = default_config()
         self.load()
 
@@ -202,6 +210,22 @@ class ConfigStore:
                     self.data = _normalize(json.load(handle))
             else:
                 self.data = default_config()
+                legacy = legacy_macos_config_path() if self._uses_default_path else None
+                if legacy is not None and legacy.is_file():
+                    try:
+                        with legacy.open('r', encoding='utf-8') as handle:
+                            contents = json.load(handle)
+                        if isinstance(contents, dict):
+                            self.data = _normalize(contents)
+                            # Keep the original for the known-working older app.
+                            try:
+                                self.save()
+                            except OSError as exc:
+                                log.warning('Legacy macOS settings loaded but not saved: %s', exc)
+                            else:
+                                log.info('Imported legacy macOS TVHplayer settings')
+                    except (OSError, ValueError, UnicodeError) as exc:
+                        log.warning('Could not import legacy macOS settings: %s', exc)
         except OSError as exc:
             log.warning('Could not load config from %s: %s', self.path, exc)
             self.data = default_config()

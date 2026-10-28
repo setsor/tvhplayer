@@ -7317,7 +7317,6 @@ class TVHeadendClient(QMainWindow):
             self._playback_server = self._channels_server
             self._remember_channel(channel)
             stream_url = self.get_backend().stream_url(channel)
-            print(f"Debug: Stream URL: {stream_url}")
             self._watch_stream_log()
             self._stream = {'path': stream_path(stream_url), 'name': channel.name, 'started': False,
                             'scrambled': '', 'failed_at': None}
