@@ -199,11 +199,20 @@ class MpvPlayer(Player):
         print(f'Dropped frames: {mpv.frame_drop_count} (decoder: {mpv.decoder_frame_drop_count})')
 
     def close(self):
+        # No playback notifications may be queued into the closing Qt window.
+        self._on_playing = self._on_stopped = self._on_error = None
+        player = self._mpv
+        if player is not None:
+            try:
+                player.command('stop')
+            except (RuntimeError, OSError):
+                pass
         surface, self._surface = self._surface, None
-        # The render context must go before the mpv handle, with its GL context current.
+        # Keep the Python libmpv callback closure alive until the GL renderer
+        # has been freed, before terminating the underlying mpv handle.
         if surface is not None:
-            surface.release()
-        player, self._mpv = self._mpv, None
+            surface.shutdown()
+        self._mpv = None
         if player is not None:
             player.terminate()
 
