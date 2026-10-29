@@ -11,6 +11,9 @@ on:
       - 'tests/**'
       - '.github/workflows/ventura-lab-dmg.yml'
   workflow_dispatch:
+  pull_request:
+    branches:
+      - build/ventura-conda-mpv-lab
 
 permissions:
   contents: read
