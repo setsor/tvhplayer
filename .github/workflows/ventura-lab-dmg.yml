@@ -45,17 +45,20 @@ jobs:
             libiconv
           init-shell: bash
 
+      - name: Checkout exact MPV 0.40.0 source commit
+        uses: actions/checkout@v4
+        with:
+          repository: mpv-player/mpv
+          ref: e48ac7ce08462f5e33af6ef9deeac6fa87eef01e
+          path: _vendor/mpv-0.40.0
+          persist-credentials: false
+
       - name: Rebuild pinned MPV 0.40 with Cocoa utils and CoreFoundation
         env:
           MACOSX_DEPLOYMENT_TARGET: '13.0'
         run: |
           set -euo pipefail
-          SRC_TAR="$RUNNER_TEMP/mpv-0.40.0.tar.gz"
-          curl --fail --location --retry 3 --retry-delay 2 -o "$SRC_TAR" \
-            'https://github.com/mpv-player/mpv/archive/v0.40.0/mpv-0.40.0.tar.gz'
-          echo "10a0f4654f62140a6dd4d380dcf0bbdbdcf6e697556863dc499c296182f081a3  $SRC_TAR" | shasum -a 256 -c -
-          tar -xzf "$SRC_TAR" -C "$RUNNER_TEMP"
-          SRC="$RUNNER_TEMP/mpv-0.40.0"
+          SRC="$GITHUB_WORKSPACE/_vendor/mpv-0.40.0"
           test -s "$SRC/osdep/utils-mac.c"
           grep -q "'osdep/utils-mac.c'" "$SRC/meson.build"
           export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
