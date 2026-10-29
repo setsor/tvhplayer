@@ -7,3 +7,5 @@ The workflow must run regression tests, rebuild pinned MPV 0.40 from e48ac7ce084
 Build attempt 2: enable Swift bridge/header generation required by MPV 0.40 Cocoa clipboard.
 
 Build attempt 3: remove the unused Swift-dependent native clipboard bridge, preserve Cocoa/CoreFoundation in libmpv.
+
+Build attempt 4: supply Swift-free Cocoa hook stubs for embedded Qt libmpv; compiled library must pass ctypes dlopen.
