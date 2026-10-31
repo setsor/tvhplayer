@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import os
 import shutil
 import sys
+import threading
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QSplitter, QFrame,
@@ -8417,6 +8418,34 @@ class TVHeadendClient(QMainWindow):
         """Play the channel of a double-clicked row."""
         self.play_channel_by_data(self.channel_from_row(index.row()))
 
+    def _diagnose_stalled_mpv_start(self, serial, url):
+        """Probe the native command queue and HTTP payload without exposing auth."""
+        if getattr(self, '_closing', False) or not getattr(self, '_awaiting_playback', False):
+            return
+        player = getattr(self, 'player', None)
+        if player is None or getattr(player, '_stream_serial', None) != serial:
+            return
+        player.report_core_probe(serial)
+        if getattr(player, '_saw_start_file', False):
+            return
+
+        def inspect():
+            try:
+                try:
+                    from .core.playback_probe import probe_http_stream
+                except ImportError:
+                    from core.playback_probe import probe_http_stream
+                result = probe_http_stream(url)
+                print(f'Debug: TVHeadend HTTP playback probe: status={result.status} '
+                      f'content-type={result.media_type} payload={result.payload_type} '
+                      f'sample-bytes={result.sample_bytes} (URL/ticket redacted)')
+            except Exception as exc:
+                # requests exceptions can include credential-bearing URLs: never log str(exc).
+                print(f'Debug: TVHeadend HTTP playback probe failed: {type(exc).__name__} '
+                      '(URL/ticket redacted)')
+
+        threading.Thread(target=inspect, name='TVHplayerHttpPlaybackProbe', daemon=True).start()
+
     def play_channel_by_data(self, channel_data):
         """Play channel using channel data"""
         try:
@@ -8457,6 +8486,14 @@ class TVHeadendClient(QMainWindow):
                 )
             else:
                 self.player.play(stream_url)
+                if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
+                    # Distinguish a broken mpv command loop from a non-TS server reply.
+                    serial = getattr(self.player, '_stream_serial', None)
+                    if serial is not None:
+                        QTimer.singleShot(
+                            6500, lambda serial=serial, url=stream_url:
+                            self._diagnose_stalled_mpv_start(serial, url)
+                        )
                 self.statusbar.showMessage(f"Starting: {channel.name}")
         except Exception as e:
             print(f"Debug: Error in play_channel: {str(e)}")

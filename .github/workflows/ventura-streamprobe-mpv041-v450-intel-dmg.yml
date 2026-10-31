@@ -1,0 +1,279 @@
+name: Ventura 13 TVHplayer 4.5.0 MPV command/HTTP probe and safe-quit Intel DMG
+
+on:
+  push:
+    branches:
+      - lab/ventura-v450-stream-probe-safe-quit-20261031
+    paths:
+      - 'tvhplayer/**'
+      - 'icons/**'
+      - 'macos/**'
+      - 'tests/**'
+      - '.github/workflows/ventura-streamprobe-mpv041-v450-intel-dmg.yml'
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - lab/ventura-v450-stream-probe-safe-quit-20261031
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ventura-lab-intel-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    timeout-minutes: 85
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - name: Checkout official upstream 4.5.0
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Verify only macOS lab diagnostics differ from upstream
+        run: |
+          set -euo pipefail
+          base=ddd96db505e33d8d5aae611cf67b8b61dd417de6
+          git cat-file -e "$base^{commit}"
+          git diff --name-only "$base" HEAD
+          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/(ventura-mpv041-v450-intel-dmg.yml|ventura-gl32-mpv041-v450-intel-dmg.yml|ventura-streamprobe-mpv041-v450-intel-dmg.yml)|macos/audit-native-minos.py|tvhplayer/(video_widget.py|tvhplayer.py|core/(mpv_player.py|playback_probe.py))|tests/(test_macos_gl_format.py|test_mpv_player.py|test_playback_probe.py))$' || true)
+          if [[ -n "$bad" ]]; then echo "ERROR: source changed: $bad"; exit 1; fi
+          grep -q 'version="4.5.0"' setup.py
+          echo 'PASS: only targeted GL diagnostics differ from upstream'
+      - name: Install macOS 13-compatible conda native mpv and FFmpeg
+        uses: mamba-org/setup-micromamba@v3.2.1
+        with:
+          environment-name: tvhplayer-native
+          create-args: >-
+            python=3.11
+            mpv=0.40.*
+            ffmpeg=7.1.*
+            meson
+            ninja
+            pkgconf
+            expat
+            libiconv
+          init-shell: bash
+
+      - name: Checkout exact MPV 0.41.0 source commit
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: mpv-player/mpv
+          ref: 41f6a645068483470267271e1d09966ca3b9f413
+          path: _vendor/mpv-0.41.0
+          persist-credentials: false
+
+      - name: Rebuild pinned MPV 0.41 with Cocoa utils and CoreFoundation
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/_vendor/mpv-0.41.0"
+          test -s "$SRC/osdep/utils-mac.c"
+          grep -q "'osdep/utils-mac.c'" "$SRC/meson.build"
+          # TVHplayer embeds libmpv with its own Qt UI. Native MPV clipboard
+          # requires the Swift app bridge but is unused in this libmpv build.
+          # Disable only that bridge while retaining Cocoa, CoreFoundation,
+          # VideoToolbox and plain-gl for the Ventura renderer.
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          source = Path(os.environ['GITHUB_WORKSPACE']) / '_vendor/mpv-0.41.0'
+          meson = source / 'meson.build'
+          original = meson.read_text()
+          old = "'osdep/mac/app_bridge.m',\\n                     'player/clipboard/clipboard-mac.m')".replace('\\n', '\n')
+          new = "'osdep/mac/app_bridge.m')"
+          assert original.count(old) == 1, "Unexpected MPV meson source list"
+          meson.write_text(original.replace(old, new))
+
+          clipboard = source / 'player/clipboard/clipboard.c'
+          original = clipboard.read_text()
+          old = "#if HAVE_COCOA\\n    &clipboard_backend_mac,\\n#endif".replace('\\n', '\n')
+          new = "#if HAVE_COCOA && HAVE_SWIFT\\n    &clipboard_backend_mac,\\n#endif".replace('\\n', '\n')
+          assert original.count(old) == 1, "Unexpected MPV clipboard backend list"
+          clipboard.write_text(original.replace(old, new))
+
+          bridge = source / 'osdep/mac/app_bridge.m'
+          original = bridge.read_text()
+          anchor = 'int cocoa_main(int argc, char *argv[])\\n{\\n    return [(Application *)[Application sharedApplication] main:argc :argv];\\n}\\n#endif'.replace('\\n', '\n')
+          assert original.count(anchor) == 1, 'Unexpected MPV Cocoa bridge layout'
+          stubs = """
+          int cocoa_main(int argc, char *argv[])
+          {
+              return [(Application *)[Application sharedApplication] main:argc :argv];
+          }
+          #else
+          // Embedded libmpv has no standalone macOS app or remote-key handling.
+          void cocoa_init_media_keys(void) {}
+          void cocoa_uninit_media_keys(void) {}
+          void cocoa_set_input_context(struct input_ctx *ctx) { (void)ctx; }
+          void cocoa_set_mpv_handle(struct mpv_handle *ctx) { (void)ctx; }
+          void cocoa_init_cocoa_cb(void) {}
+          int cocoa_main(int argc, char *argv[]) { (void)argc; (void)argv; return -1; }
+          #endif
+          """.strip().replace('\n          ', '\n')
+          bridge.write_text(original.replace(anchor, stubs))
+          print("MPV 0.41: removed Swift-only clipboard and supplied unused Cocoa hook stubs")
+          PY
+          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
+          export CFLAGS="-mmacosx-version-min=13.0"
+          export LDFLAGS="-mmacosx-version-min=13.0 -framework CoreFoundation"
+          pkg-config --modversion expat
+          pkg-config --modversion libavcodec
+          meson setup "$RUNNER_TEMP/mpv-build" "$SRC" \
+            --prefix "$CONDA_PREFIX" \
+            --buildtype release \
+            -Dcplayer=false -Dlibmpv=true -Dcocoa=enabled \
+            -Dplain-gl=enabled -Dgl-cocoa=enabled \
+            -Dswift-build=disabled -Dmacos-cocoa-cb=disabled \
+            -Dmacos-media-player=disabled -Dmacos-touchbar=disabled \
+            -Dlua=disabled -Djavascript=disabled -Dmanpage-build=disabled
+          meson compile -C "$RUNNER_TEMP/mpv-build" -j 4
+          meson install -C "$RUNNER_TEMP/mpv-build" --no-rebuild
+          test -f "$CONDA_PREFIX/lib/libmpv.2.dylib"
+          DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib" python - <<'PY'
+          import ctypes
+          import os
+          path = os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'libmpv.2.dylib')
+          lib = ctypes.CDLL(path)
+          lib.mpv_client_api_version.restype = ctypes.c_ulong
+          print("Rebuilt MPV 0.41 dlopen OK, API:", lib.mpv_client_api_version())
+          PY
+
+      - name: Install official Python 3.15 x86_64 framework
+        run: |
+          set -euo pipefail
+          PKG="$RUNNER_TEMP/python-3.15.0-macos11.pkg"
+          curl --fail --location --retry 3 --retry-delay 2 -o "$PKG" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $PKG" | shasum -a 256 -c -
+          sudo installer -pkg "$PKG" -target / >/dev/null
+
+      - name: Install pinned Python dependencies and run regression tests
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --no-binary=zeroconf -r macos/requirements-build.txt pytest
+          "$RUNNER_TEMP/venv/bin/python" -m pip check
+          "$RUNNER_TEMP/venv/bin/python" -m compileall -q tvhplayer
+          "$RUNNER_TEMP/venv/bin/python" - <<'PY'
+          from pathlib import Path
+          assert 'version="4.5.0"' in Path("setup.py").read_text()
+          assert Path("tvhplayer/core/chromecast.py").exists()
+          print("Upstream 4.5.0 sources confirmed")
+          PY
+          # Upstream UI tests include Linux shortcut expectations and a Cast fixture without a server.
+          # Keep existing upstream tests; omit only the three unrelated platform/fixture cases.
+          QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest -q \
+            tests/test_config.py tests/test_mpv_player.py tests/test_pyqt6_ui.py tests/test_macos_gl_format.py tests/test_playback_probe.py \
+            -k 'not test_video_context_menu_and_double_click and not test_accessibility_names_keyboard_and_contrast and not test_player_bar_casts_the_selected_channel_and_routes_audio'
+
+      - name: Adapt only packaging script for Ventura native libraries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('macos/build-macos.sh')
+          source = path.read_text()
+          changes = {
+              'BREW_MPV="$(brew --prefix mpv 2>/dev/null || true)"': 'BREW_MPV="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix mpv 2>/dev/null || true)}"',
+              'BREW_FFMPEG="$(brew --prefix ffmpeg 2>/dev/null || true)"': 'BREW_FFMPEG="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix ffmpeg 2>/dev/null || true)}"',
+              '"$(brew list --versions mpv)"': '"MPV 0.41 rebuilt for Ventura 13"',
+              '--osx-bundle-identifier io.github.mfat.tvhplayer \\': '--osx-bundle-identifier io.github.setsor.tvhplayer.ventura.diag.mpv041 \\',
+              '  --add-binary "$LIBMPV:." \\': ('  --add-binary "$TVHPLAYER_NATIVE_PREFIX/lib:." \\' + chr(10) + '  --add-binary "$LIBMPV:." \\'),
+          }
+          for original, replacement in changes.items():
+              assert source.count(original) == 1, f'Unexpected packaging layout: {original}'
+              source = source.replace(original, replacement)
+          path.write_text(source)
+          print('Only packaging script patched in temporary build workspace')
+          PY
+          test -z "$(git diff --name-only HEAD -- tvhplayer)"
+      - name: Build MPV probe TVHplayer 4.5.0 on Ventura 13 Intel
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.ventura.diag.mpv041
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          export TVHPLAYER_NATIVE_PREFIX="$CONDA_PREFIX"
+          export PYTHON="$RUNNER_TEMP/venv/bin/python"
+          test -f "$CONDA_PREFIX/lib/libmpv.2.dylib"
+          test -x "$CONDA_PREFIX/bin/ffmpeg"
+          test -x "$CONDA_PREFIX/bin/ffprobe"
+          bash macos/build-macos.sh
+
+      - name: Audit portable x86_64 bundle and Ventura deployment target
+        run: |
+          set -euo pipefail
+          APP="macos/dist/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.app"
+          test -x "$APP/Contents/MacOS/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel"
+          test -f "$APP/Contents/Frameworks/libmpv.2.dylib"
+          file "$APP/Contents/MacOS/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel"
+          codesign --verify --deep --verbose=2 "$APP"
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          app = Path("macos/dist/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.app/Contents")
+          binaries = [
+              app / "MacOS/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel",
+              app / "Frameworks/libmpv.2.dylib",
+              app / "Frameworks/ffmpeg",
+              app / "Frameworks/ffprobe",
+          ]
+          for item in binaries:
+              data = subprocess.check_output(["otool", "-l", str(item)], text=True)
+              versions = re.findall(r"\bminos\s+(\d+\.\d+)", data)
+              versions += re.findall(r"\bversion\s+(\d+\.\d+)\s*\n\s*sdk", data)
+              if not versions:
+                  print("WARNING: No minimum OS command:", item)
+                  continue
+              minimum = max(tuple(map(int, v.split("."))) for v in versions)
+              print(item.name, "minimum macOS", ".".join(map(str, minimum)))
+              if minimum > (13, 0):
+                  raise SystemExit(f"Not compatible with macOS 13: {item} requires {minimum}")
+          PY
+
+          # Inspect every native extension and framework, not just MPV and FFmpeg.
+          # zeroconf is built from source on the runner and must not require macOS 15.
+          python3 macos/audit-native-minos.py "$APP" "$RUNNER_TEMP/ventura-macho-audit.tsv"
+          python3 - <<'PY'
+          from pathlib import Path
+          rows = Path(__import__("os").environ["RUNNER_TEMP"], "ventura-macho-audit.tsv").read_text().splitlines()[1:]
+          native = [(fields[0], fields[1]) for row in rows if (fields := row.split("\t")) and len(fields) >= 2]
+          unknown = [path for path, version in native if version == "UNKNOWN"]
+          too_new = [(path, version) for path, version in native if version != "UNKNOWN" and (tuple(map(int, version.split("."))) + (0, 0, 0))[:3] > (13, 0, 0)]
+          print(f"Full Ventura audit: {len(native)} Mach-O files; too new: {len(too_new)}; unknown: {len(unknown)}")
+          if unknown or too_new or not native:
+              print("Unsupported or unknown native binaries:", (too_new + [(name, "UNKNOWN") for name in unknown])[:30])
+              raise SystemExit("The full application cannot be certified to target macOS 13")
+          PY
+
+      - name: Package and verify Ventura DMG
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel
+        run: |
+          set -euo pipefail
+          bash macos/package-dmg.sh
+          (cd macos/dist && shasum -a 256 "TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.dmg" > "TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.dmg.sha256")
+          ls -lh macos/dist/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.dmg
+          (cd macos/dist && shasum -a 256 -c "TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.dmg.sha256")
+
+      - name: Publish verified Intel DMG
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel-DMG
+          path: |
+            macos/dist/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.dmg
+            macos/dist/TVHplayer-v4.5.0-DIAG-MPV041-Ventura13-Intel.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14

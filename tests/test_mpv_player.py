@@ -274,6 +274,31 @@ def test_render_context_gets_the_wayland_display(engine):
     assert 'wl_display' not in player.create_render_context(lambda name: 0).params
 
 
+def test_close_watchdog_is_armed_then_cancelled_on_clean_native_shutdown(engine, monkeypatch):
+    from tvhplayer.core import mpv_player as impl
+    player, backend, _seen = engine
+    calls = []
+
+    class Timer:
+        daemon = False
+
+        def __init__(self, timeout, callback):
+            assert timeout == 5.0
+            assert callback is impl._native_shutdown_stalled
+
+        def start(self):
+            calls.append('armed')
+
+        def cancel(self):
+            calls.append('cancelled')
+
+    monkeypatch.setattr(impl, '_macos_bundle_diagnostics', lambda: True)
+    monkeypatch.setattr(impl.threading, 'Timer', Timer)
+    player.close()
+    assert calls == ['armed', 'cancelled']
+    assert backend.terminated
+
+
 def test_close_frees_the_widget_render_context_before_mpv(engine):
     player, mpv, _seen = engine
     order = []
