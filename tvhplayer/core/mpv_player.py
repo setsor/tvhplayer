@@ -7,9 +7,7 @@ the OpenGL context and asks this engine for a render context once it has one.
 from __future__ import annotations
 
 import locale
-import os
 import sys
-import threading
 from pathlib import Path
 from time import monotonic
 
@@ -53,19 +51,6 @@ LIVE_SLACK_SECONDS = 3.0
 LIVE_MARGIN_SECONDS = 1.0
 
 
-def _macos_bundle_diagnostics():
-    """Limit experimental software decoding and native telemetry to this macOS app."""
-    return sys.platform == 'darwin' and bool(getattr(sys, 'frozen', False))
-
-
-def _native_shutdown_stalled():
-    """Called only after the UI saved configuration and stopped external jobs."""
-    try:
-        os.write(2, b'ERROR: libmpv native termination exceeded 5 s; forcing process exit after UI shutdown\n')
-    finally:
-        os._exit(70)
-
-
 class MpvPlayer(Player):
     """libmpv drawing into the window's OpenGL video widget."""
 
@@ -83,8 +68,6 @@ class MpvPlayer(Player):
         self._disk_limit = 0
         self._stream_serial = 0
         self._buffer_recorder = None
-        self._saw_start_file = False
-        self._command_probe = None
         # Set by play(); the first picture of that stream reports playback started.
         self._waiting_for_picture = False
         # The proxy goes to mpv per stream, so a local or LAN server is reached directly.
@@ -92,9 +75,12 @@ class MpvPlayer(Player):
         # QApplication sets the numeric locale from the desktop; libmpv refuses anything but C.
         locale.setlocale(locale.LC_NUMERIC, 'C')
         options = dict(MPV_OPTIONS)
-        if _macos_bundle_diagnostics():
+        # Ventura 13 Intel test package: the Qt OpenGL / VideoToolbox
+        # decoding path has not yet been validated. Keep the successful
+        # software-decoding configuration for this bundled macOS build only.
+        if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
             options['hwdec'] = 'no'
-            print('Debug: macOS diagnostic profile: software decoding enabled (hwdec=no)')
+            print("Debug: Ventura bundle uses software decoding (hwdec=no)")
         self._mpv = mpv.MPV(log_handler=_log, loglevel='warn', **options)
         # Set after creation: an unknown option at creation leaves a running mpv behind.
         for name, value in LUA_SCRIPT_OPTIONS.items():
@@ -128,19 +114,12 @@ class MpvPlayer(Player):
     def _on_event(self, event):
         mpv = self._mpv_module
         kind = event.event_id.value
-        if kind == getattr(mpv.MpvEventID, 'START_FILE', None):
-            self._saw_start_file = True
-            print('Debug: mpv start-file received')
-        elif kind == getattr(mpv.MpvEventID, 'FILE_LOADED', None):
-            print('Debug: mpv file-loaded received')
-        elif kind == mpv.MpvEventID.PLAYBACK_RESTART:
-            print('Debug: mpv playback-restart received')
+        if kind == mpv.MpvEventID.PLAYBACK_RESTART:
             if self._waiting_for_picture:
                 self._waiting_for_picture = False
                 self._emit(self._on_playing)
         elif kind == mpv.MpvEventID.END_FILE:
             reason = event.data.reason
-            print(f'Debug: mpv end-file reason={reason} error={getattr(event.data, "error", None)}')
             if reason == mpv.MpvEventEndFile.ERROR:
                 self._waiting_for_picture = False
                 self._emit(self._on_error)
@@ -150,8 +129,6 @@ class MpvPlayer(Player):
     def play(self, url: str):
         self._stop_buffer_recording()
         self._stream_serial += 1
-        self._saw_start_file = False
-        self._command_probe = None
         self._configure_timeshift_store()
         self._waiting_for_picture = True
         self._mpv['http-proxy'] = stream_proxy(url)
@@ -160,31 +137,7 @@ class MpvPlayer(Player):
         self._last_buffered = None
         self._live_clock = None
         self._timeshift_active = False
-        print('Debug: mpv loadfile requested (stream URL and ticket redacted)')
         self._mpv.loadfile(url)
-        print('Debug: mpv loadfile command returned')
-        if _macos_bundle_diagnostics():
-            try:
-                # Nonblocking native dispatch: reply proves the mpv core can process commands.
-                self._command_probe = self._mpv.command_async('get_property', 'idle-active')
-            except (OSError, RuntimeError, ValueError) as exc:
-                print(f'Debug: mpv core command probe submission failed: {type(exc).__name__}')
-
-    def report_core_probe(self, serial):
-        """Read only Python thread/Future state; never block the Qt thread on libmpv."""
-        if self._stream_serial != serial:
-            return
-        thread = getattr(self._mpv, '_event_thread', None) if self._mpv is not None else None
-        future = self._command_probe
-        ack = future.done() if future is not None else None
-        print(f'Debug: mpv liveness check: serial={serial} start-file={self._saw_start_file} '
-              f'command-reply-ready={ack} event-thread-alive={thread.is_alive() if thread else None}')
-        if future is not None and future.done():
-            try:
-                value = future.result(timeout=0)
-                print(f'Debug: mpv core command probe completed: result-type={type(value).__name__}')
-            except Exception as exc:
-                print(f'Debug: mpv core command probe failed: {type(exc).__name__}')
 
     def stop(self):
         self._stop_buffer_recording()
@@ -456,26 +409,12 @@ class MpvPlayer(Player):
             except (OSError, RuntimeError):
                 pass
         surface, self._surface = self._surface, None
-        # libmpv's terminate_destroy can deadlock on Ventura even with no active media.
-        # Start a last-resort watchdog only for the frozen macOS diagnostic package.
-        # UI closeEvent has already saved config and stopped recording/background jobs.
-        watchdog = None
-        if _macos_bundle_diagnostics() and player is not None:
-            watchdog = threading.Timer(5.0, _native_shutdown_stalled)
-            watchdog.daemon = True
-            watchdog.start()
-        try:
-            # Release native OpenGL callback while Qt still owns the context.
-            if surface is not None:
-                surface.release()
-            self._mpv = None
-            if player is not None:
-                print('Debug: Beginning libmpv native termination')
-                player.terminate()
-                print('Debug: libmpv native termination completed')
-        finally:
-            if watchdog is not None:
-                watchdog.cancel()
+        # Release the GL context (and its live ctypes callback) before the mpv handle.
+        if surface is not None:
+            surface.release()
+        self._mpv = None
+        if player is not None:
+            player.terminate()
 
 
 def _track_id(value):
