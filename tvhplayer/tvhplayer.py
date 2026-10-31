@@ -8611,6 +8611,14 @@ def main():
             scheme = accent = window_color = None
         LAUNCH_ENVIRON.update(os.environ)
         cursor_debug.prepare()
+        if sys.platform == 'darwin':
+            try:
+                from .video_widget import configure_macos_opengl
+            except ImportError:
+                from video_widget import configure_macos_opengl
+            requested = configure_macos_opengl()
+            print(f"Debug: Requested OpenGL {requested.majorVersion()}.{requested.minorVersion()} "
+                  f"profile={requested.profile().name} before QApplication")
         app = QApplication(sys.argv)
         print(f"Debug: Qt platform: {app.platformName()}")
         cursor_debug.install(app)

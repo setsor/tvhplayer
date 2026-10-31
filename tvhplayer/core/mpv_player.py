@@ -106,12 +106,18 @@ class MpvPlayer(Player):
     def _on_event(self, event):
         mpv = self._mpv_module
         kind = event.event_id.value
-        if kind == mpv.MpvEventID.PLAYBACK_RESTART:
+        if kind == getattr(mpv.MpvEventID, 'START_FILE', None):
+            print('Debug: mpv start-file received')
+        elif kind == getattr(mpv.MpvEventID, 'FILE_LOADED', None):
+            print('Debug: mpv file-loaded received')
+        elif kind == mpv.MpvEventID.PLAYBACK_RESTART:
+            print('Debug: mpv playback-restart received')
             if self._waiting_for_picture:
                 self._waiting_for_picture = False
                 self._emit(self._on_playing)
         elif kind == mpv.MpvEventID.END_FILE:
             reason = event.data.reason
+            print(f'Debug: mpv end-file reason={reason} error={getattr(event.data, "error", None)}')
             if reason == mpv.MpvEventEndFile.ERROR:
                 self._waiting_for_picture = False
                 self._emit(self._on_error)
@@ -129,6 +135,7 @@ class MpvPlayer(Player):
         self._last_buffered = None
         self._live_clock = None
         self._timeshift_active = False
+        print('Debug: mpv loadfile requested (stream URL and ticket redacted)')
         self._mpv.loadfile(url)
 
     def stop(self):
