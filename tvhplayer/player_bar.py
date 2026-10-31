@@ -310,6 +310,17 @@ class PlayerBar(QWidget):
         )
         self.record_more_btn.setToolTip("Start another recording")
         group_layout.addWidget(self.record_more_btn)
+        # Both states occupy exactly the same space in the controls bar.
+        # Size to whichever has the wider contents (usually "Stop recording"),
+        # rather than hard-coding pixels or changing the accessible labels.
+        record_width = max(
+            inner.sizeHint().width(),
+            self.record_btn.sizeHint().width(),
+            group_layout.sizeHint().width(),
+            self.recording_group.sizeHint().width(),
+        )
+        self.record_btn.setFixedWidth(record_width)
+        self.recording_group.setFixedWidth(record_width)
         self.recording_group.hide()
         layout.addWidget(self.recording_group)
 
