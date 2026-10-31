@@ -238,6 +238,11 @@ jobs:
           test -f "$APP/Contents/Frameworks/libmpv.2.dylib"
           file "$APP/Contents/MacOS/TVHplayer"
           codesign --verify --deep --verbose=2 "$APP"
+          # The application name in Finder, Dock and the macOS menu is TVHplayer.
+          # Version, macOS target and architecture belong to the download name.
+          test "$(plutil -extract CFBundleName raw -o - "$APP/Contents/Info.plist")" = TVHplayer
+          test "$(plutil -extract CFBundleExecutable raw -o - "$APP/Contents/Info.plist")" = TVHplayer
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")" = io.github.setsor.tvhplayer
           /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 - <<'PY'
           from pathlib import Path
           import re
