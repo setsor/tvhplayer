@@ -3077,12 +3077,12 @@ class ChannelListState(QWidget):
 
 
 class ChannelFetch(QObject):
-    """Fetch a server's channels and what is shown beside them, off the UI thread.
+    """Fetch channel metadata without waiting for the slower EPG lookup.
 
     It uses its own backend connection, so it never shares one with the window
     while it runs. After loaded, ``backend`` holds that connection, already in
     sync with the server; the window takes it over or closes it. Exactly one of
-    loaded or failed is emitted.
+    loaded or failed is emitted. The independent NowNextFetch then fills the guide.
     """
 
     loaded = pyqtSignal(dict)
@@ -3103,12 +3103,16 @@ class ChannelFetch(QObject):
 
     def _run(self):
         backend = None
+        started = time.monotonic()
         try:
             backend = self._open_backend(self.server)
             channels = backend.get_channels()
-            # Everything after the channels is optional. A server that refuses
-            # one (the service grid needs admin rights) leaves that part empty.
-            result = {'channels': channels, 'tags': [], 'services': [], 'now_next': {}}
+            # EPG is fetched separately so slow events/load responses cannot
+            # delay the first usable channel list.
+            result = {
+                'channels': channels, 'tags': [], 'services': [],
+                'now_next': None if self._now_next and channels else {},
+            }
             try:
                 result['tags'] = [tag for tag in backend.list_channel_tags() if tag.enabled]
             except Exception as e:
@@ -3118,13 +3122,8 @@ class ChannelFetch(QObject):
                     result['services'] = backend.list_channel_services()
                 except Exception as e:
                     print(f"Debug: Could not load channel services: {e}")
-            if self._now_next and channels:
-                try:
-                    result['now_next'] = backend.get_now_next(channels)
-                except Exception as e:
-                    # None keeps what was shown before.
-                    result['now_next'] = None
-                    print(f"Debug: Could not load now and next: {e}")
+            print(f"Debug: Channel metadata ready: {len(channels)} channels in "
+                  f"{time.monotonic() - started:.2f}s (EPG separate)")
         except Exception as e:
             print(f"Debug: Could not fetch channels: {e}")
             if backend is not None:
@@ -3162,12 +3161,15 @@ class NowNextFetch(QObject):
     def _run(self):
         result = None
         backend = None
+        started = time.monotonic()
         try:
             backend = self._open_backend(self.server)
             # Refresh directly from the current EPG grid. For HTSP this avoids
             # enableAsyncMetadata and a full channel sync every two minutes.
             live = getattr(backend, 'get_now_next_live', None)
             result = live(self._channels) if live is not None else backend.get_now_next(self._channels)
+            print(f"Debug: Now/Next ready: {len(result)}/{len(self._channels)} channels in "
+                  f"{time.monotonic() - started:.2f}s")
         except Exception as e:
             print(f"Debug: Could not refresh now and next: {e}")
         finally:
@@ -5385,6 +5387,10 @@ class TVHeadendClient(QMainWindow):
         else:
             self._show_channel_state("This server has no channels yet.")
         self.statusbar.showMessage("Channels loaded successfully")
+        if fetch._now_next and self._channels:
+            # No wait for EPG before channels, logos and playback become usable.
+            # This worker opens a lightweight independent connection.
+            self._start_now_next_fetch()
         self._guide_channels_changed()
         self._channel_list_settled()
         if self._show_playing_on_load:
