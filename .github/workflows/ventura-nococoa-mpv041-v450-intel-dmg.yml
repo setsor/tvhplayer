@@ -283,7 +283,22 @@ jobs:
           TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-NOCOCOA-MPV041-Ventura13-Intel
         run: |
           set -euo pipefail
-          bash macos/package-dmg.sh
+          # hdiutil can return EBUSY while macOS scans a freshly signed bundle.
+          # Each retry uses a new staging directory and unmounts its temporary image.
+          packaged=0
+          for attempt in 1 2 3 4; do
+            if bash macos/package-dmg.sh; then
+              packaged=1
+              break
+            fi
+            echo "hdiutil/DMG staging attempt $attempt failed; checking mounts and retrying" >&2
+            hdiutil info | tail -n 15 || true
+            sleep 8
+          done
+          if [[ "$packaged" != 1 ]]; then
+            echo "ERROR: all 4 DMG packaging attempts failed" >&2
+            exit 1
+          fi
           (cd macos/dist && shasum -a 256 "TVHplayer-v4.5.0-NOCOCOA-MPV041-Ventura13-Intel.dmg" > "TVHplayer-v4.5.0-NOCOCOA-MPV041-Ventura13-Intel.dmg.sha256")
           ls -lh macos/dist/TVHplayer-v4.5.0-NOCOCOA-MPV041-Ventura13-Intel.dmg
           (cd macos/dist && shasum -a 256 -c "TVHplayer-v4.5.0-NOCOCOA-MPV041-Ventura13-Intel.dmg.sha256")
