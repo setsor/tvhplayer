@@ -768,6 +768,7 @@ class DvrOperation(QObject):
                  backend_factory=create_backend, parent=None):
         super().__init__(parent)
         self.server = dict(server)
+        self.server_key = server_key(self.server)
         self.mode = mode
         self.entry = entry
         self.channel = channel
@@ -4970,6 +4971,22 @@ class TVHeadendClient(QMainWindow):
     def channel_recordings_changed(self, entries):
         """The tasks pane read the server's recordings; mark channels being recorded."""
         self._dvr_entries = list(entries or [])
+        # An acknowledged stop is not necessarily finalized immediately.
+        # Only clear the REC indicator when a subsequent *background* DVR
+        # refresh no longer shows the stopped entries as recording.
+        awaiting = getattr(self, '_dvr_stop_awaiting_confirmation', None)
+        if awaiting is not None and awaiting['server_key'] == server_key(self.current_server()):
+            still_running = {
+                entry.uuid for entry in self._dvr_entries
+                if entry.category() == 'recording'
+            }
+            if not still_running.intersection(awaiting['uuids']):
+                self._dvr_stop_awaiting_confirmation = None
+                should_record = bool(still_running) or self.local_recording_running()
+                if should_record and not self.is_recording:
+                    self.start_recording_indicator()
+                elif not should_record and self.is_recording:
+                    self.stop_recording_indicator()
         guide = getattr(self, '_guide', None)
         if guide is not None:
             guide.recordings_changed(self._dvr_entries)
@@ -7333,6 +7350,7 @@ class TVHeadendClient(QMainWindow):
         if worker is not getattr(self, '_dvr_operation', None):
             return
         self._dvr_operation = None
+        worker.deleteLater()
         if getattr(self, '_closing', False):
             return
         targets = result.get('targets') or []
@@ -7345,6 +7363,11 @@ class TVHeadendClient(QMainWindow):
                 "refresh Tasks before retrying"
             )
         elif targets:
+            if mode in ('stop_channel', 'stop_entry'):
+                self._dvr_stop_awaiting_confirmation = {
+                    'uuids': {entry.uuid for entry in targets},
+                    'server_key': worker.server_key,
+                }
             if mode == 'cancel_entry':
                 self.statusbar.showMessage(
                     f"Cancelled {targets[0].title or 'scheduled recording'}."
