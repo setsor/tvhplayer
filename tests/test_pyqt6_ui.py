@@ -3197,6 +3197,11 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
         window.show()
         app.processEvents()
         bar = window.controls_bar
+        # The two alternative Record controls must not resize the player bar.
+        assert bar.record_btn.width() == bar.recording_group.width()
+        assert bar.record_btn.height() == bar.recording_group.height() == 36
+        record_pill_width = bar.record_btn.width()
+        assert bar.recording_group.sizeHint().width() <= record_pill_width
         assert window.play_btn.accessibleName() == "Play"
 
         played = []
@@ -3227,6 +3232,8 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
 
         # Recording on the server: the red pill stops it straight away.
         window.channel_recordings_changed([recording])
+        app.processEvents()
+        assert bar.recording_group.width() == bar.record_btn.width() == record_pill_width
         assert not window.record_btn.isVisible()
         assert window.stop_record_btn.isVisible()
         assert bar.record_server_action.isEnabled() is False
@@ -3262,6 +3269,8 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
 
         # Only this computer: Stop ends the local recording.
         window.channel_recordings_changed([])
+        app.processEvents()
+        assert bar.record_btn.width() == bar.recording_group.width() == record_pill_width
         window.stop_record_btn.click()
         assert calls[-1] == 'local'
 
