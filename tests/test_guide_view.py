@@ -145,7 +145,7 @@ def test_guide_window_reads_spans_moves_by_keyboard_and_records(monkeypatch):
 
         _key(grid, Qt.Key.Key_Right)
         assert grid.current_event().title == 'Midday'
-        assert window.description_label.text() == 'A long chat.'
+        assert window.description_text.toPlainText() == 'A long chat.'
         assert window.series_btn.isEnabled()
         _key(grid, Qt.Key.Key_Down)
         assert grid.current_channel().name == 'Bravo'
@@ -233,5 +233,40 @@ def test_guide_window_reports_a_failed_read_until_reload(monkeypatch):
         assert window.title_label.text() == 'No programme information'
     finally:
         window.shutdown()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_guide_description_scrolls_and_survives_periodic_refresh(monkeypatch):
+    """The selected programme must not lose its description or scroll position."""
+    app = _app()
+    import tvhplayer.guide_view as guide_view
+    from tvhplayer.core.models import Channel, EpgEvent
+
+    now = int(time.time())
+    channel = Channel(uuid='bbc', name='BBC Earth', number=515)
+    details = 'Exploring life in Alaska and its winter wildlife. ' * 70
+    event = EpgEvent(
+        start=now - 120, stop=now + 3600, title='Sub zero grade',
+        channel_uuid='bbc', event_id=21, description=details,
+    )
+    backend = _Backend([event])
+    monkeypatch.setattr(guide_view, 'create_backend', lambda server: backend)
+    window = guide_view.GuideWindow(_Host([channel], [], backend))
+    try:
+        window.show()
+        window.show_channel(channel)
+        assert _wait(app, lambda: window.description_text.toPlainText() == details)
+        assert window.description_text.isReadOnly()
+        scroll = window.description_text.verticalScrollBar()
+        assert scroll.maximum() > 0
+        scroll.setValue(scroll.maximum())
+        bottom = scroll.value()
+        window._on_tick()  # 30-second refresh must not jump back to the top
+        assert window.description_text.toPlainText() == details
+        assert scroll.value() == bottom
+    finally:
+        window.shutdown()
+        window.close()
         window.deleteLater()
         app.processEvents()
