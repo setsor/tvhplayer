@@ -2069,6 +2069,13 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.action_btn.accessibleName() == 'Cancel'
         assert panel.action_btn.text() == 'Cancel'
         panel.run_action()
+        assert window._dvr_operation is not None
+        deadline = time.monotonic() + 5
+        while window._dvr_operation is not None:
+            assert time.monotonic() < deadline, "cancel operation did not finish"
+            app.processEvents()
+            time.sleep(0.01)
+        _wait_for_tasks(app, panel)
         assert backend.cancelled == ['soon']
         assert window.is_recording is True
         assert any('Old' in text for text in _task_texts(panel))
@@ -3075,10 +3082,13 @@ def test_channel_list_columns_can_be_resized(monkeypatch, tmp_path):
         assert window.channel_options['widths'][ui.COLUMN_KEYS[last]] == last_width
         # A wider pane and back again: the extra follows the pane and does not pile up.
         widths = [header.sectionSize(c) for c in shown]
-        window.splitter.moveSplitter(window.splitter.sizes()[0] + 80, 1)
+        original_left = window.splitter.sizes()[0]
+        window.splitter.moveSplitter(original_left + 80, 1)
         app.processEvents()
         assert sum(header.sectionSize(c) for c in shown) == table.viewport().width()
-        window.splitter.moveSplitter(window.splitter.sizes()[0] - 80, 1)
+        # The right pane may reach its minimum width before moving 80 px.
+        # Restore the actual original position, not an assumed delta.
+        window.splitter.moveSplitter(original_left, 1)
         app.processEvents()
         assert [header.sectionSize(c) for c in shown] == widths
 
