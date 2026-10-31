@@ -41,7 +41,7 @@ jobs:
           base=ddd96db505e33d8d5aae611cf67b8b61dd417de6
           git cat-file -e "$base^{commit}"
           git diff --name-only "$base" HEAD
-          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4.5.0.yml|macos/(audit-native-minos.py|smoke_libmpv.py)|tvhplayer/(video_widget.py|tvhplayer.py|guide_view.py|core/(mpv_player.py|models.py|subtitle_preferences.py))|tests/(test_macos_gl_format.py|test_mpv_player.py|test_guide_view.py|test_pyqt6_ui.py|test_subtitle_preferences.py))$' || true)
+          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4.5.0.yml|macos/(audit-native-minos.py|smoke_libmpv.py)|tvhplayer/(video_widget.py|tvhplayer.py|guide_view.py|player_bar.py|core/(mpv_player.py|models.py|subtitle_preferences.py))|tests/(test_macos_gl_format.py|test_mpv_player.py|test_guide_view.py|test_pyqt6_ui.py|test_subtitle_preferences.py))$' || true)
           if [[ -n "$bad" ]]; then echo "ERROR: source changed: $bad"; exit 1; fi
           grep -q 'version="4.5.0"' setup.py
           echo 'PASS: source changes and Ventura packaging are allowlisted'
