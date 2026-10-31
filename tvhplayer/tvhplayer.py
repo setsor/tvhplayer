@@ -6834,7 +6834,11 @@ class TVHeadendClient(QMainWindow):
         print(f"Debug: Loaded {len(self.servers)} servers into dialog")
         def apply_servers(servers):
             previous = self.server_combo.currentIndex()
-            previous_key = server_connection_key(self.current_server())
+            previous_server = self.current_server()
+            previous_key = server_connection_key(previous_server)
+            previous_subtitles = normalize_subtitle_language(
+                (previous_server or {}).get('subtitle_language')
+            )
             self.servers = ensure_builtin_server(
                 servers,
                 self.config['builtin_http_port'],
@@ -6859,6 +6863,15 @@ class TVHeadendClient(QMainWindow):
             if server_connection_key(self.current_server()) != previous_key:
                 self.close_backend()
                 self.fetch_channels()
+            elif (self._playback_channel is not None and not self.cast_manager.is_connected
+                  and normalize_subtitle_language(
+                      (self.current_server() or {}).get('subtitle_language')
+                  ) != previous_subtitles
+                  and self._subtitle_live_server() is not None):
+                # Apply a newly saved default to a channel already playing, too.
+                self._reset_subtitle_default(for_live_channel=True)
+                self.player.set_subtitle_track(NO_TRACK)
+                self._start_subtitle_default()
         dialog.applied.connect(apply_servers)
         dialog.exec()
     
