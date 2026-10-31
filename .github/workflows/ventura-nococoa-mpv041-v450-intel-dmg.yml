@@ -1,9 +1,9 @@
-name: Ventura 13 TVHplayer 4.5.0 EPG UI + fast first-load no-Cocoa Intel DMG
+name: Ventura 13 TVHplayer 4.5.0 EPG + subtitle defaults no-Cocoa Intel DMG
 
 on:
   push:
     branches:
-      - lab/ventura-v450-epg-ui-firstload-20261031
+      - lab/ventura-v450-epg-subtitles-20261031
     paths:
       - 'tvhplayer/**'
       - 'icons/**'
@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
   pull_request:
     branches:
-      - lab/ventura-v450-epg-ui-firstload-20261031
+      - lab/ventura-v450-epg-subtitles-20261031
 
 permissions:
   contents: read
@@ -41,7 +41,7 @@ jobs:
           base=ddd96db505e33d8d5aae611cf67b8b61dd417de6
           git cat-file -e "$base^{commit}"
           git diff --name-only "$base" HEAD
-          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/(ventura-mpv041-v450-intel-dmg.yml|ventura-gl32-mpv041-v450-intel-dmg.yml|ventura-streamprobe-mpv041-v450-intel-dmg.yml|ventura-nococoa-mpv041-v450-intel-dmg.yml)|macos/(audit-native-minos.py|smoke_libmpv.py)|tvhplayer/(video_widget.py|tvhplayer.py|guide_view.py|core/(mpv_player.py|playback_probe.py))|tests/(test_macos_gl_format.py|test_mpv_player.py|test_playback_probe.py|test_guide_view.py|test_pyqt6_ui.py))$' || true)
+          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/(ventura-mpv041-v450-intel-dmg.yml|ventura-gl32-mpv041-v450-intel-dmg.yml|ventura-streamprobe-mpv041-v450-intel-dmg.yml|ventura-nococoa-mpv041-v450-intel-dmg.yml)|macos/(audit-native-minos.py|smoke_libmpv.py)|tvhplayer/(video_widget.py|tvhplayer.py|guide_view.py|core/(mpv_player.py|playback_probe.py|models.py|subtitle_preferences.py))|tests/(test_macos_gl_format.py|test_mpv_player.py|test_playback_probe.py|test_guide_view.py|test_pyqt6_ui.py|test_subtitle_preferences.py))$' || true)
           if [[ -n "$bad" ]]; then echo "ERROR: source changed: $bad"; exit 1; fi
           grep -q 'version="4.5.0"' setup.py
           echo 'PASS: no-Cocoa MPV build and explicitly allowed diagnostics only'
@@ -192,7 +192,7 @@ jobs:
           # Upstream UI tests include Linux shortcut expectations and a Cast fixture without a server.
           # Keep existing upstream tests; omit only the three unrelated platform/fixture cases.
           QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest -q \
-            tests/test_config.py tests/test_mpv_player.py tests/test_pyqt6_ui.py tests/test_guide_view.py tests/test_macos_gl_format.py tests/test_playback_probe.py \
+            tests/test_config.py tests/test_mpv_player.py tests/test_pyqt6_ui.py tests/test_guide_view.py tests/test_macos_gl_format.py tests/test_playback_probe.py tests/test_subtitle_preferences.py \
             -k 'not test_video_context_menu_and_double_click and not test_accessibility_names_keyboard_and_contrast and not test_player_bar_casts_the_selected_channel_and_routes_audio'
 
       - name: Adapt only packaging script for Ventura native libraries
@@ -206,7 +206,7 @@ jobs:
               'BREW_MPV="$(brew --prefix mpv 2>/dev/null || true)"': 'BREW_MPV="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix mpv 2>/dev/null || true)}"',
               'BREW_FFMPEG="$(brew --prefix ffmpeg 2>/dev/null || true)"': 'BREW_FFMPEG="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix ffmpeg 2>/dev/null || true)}"',
               '"$(brew list --versions mpv)"': '"MPV 0.41 rebuilt for Ventura 13"',
-              '--osx-bundle-identifier io.github.mfat.tvhplayer \\': '--osx-bundle-identifier io.github.setsor.tvhplayer.ventura.nococoa.epg.mpv041 \\',
+              '--osx-bundle-identifier io.github.mfat.tvhplayer \\': '--osx-bundle-identifier io.github.setsor.tvhplayer.ventura.nococoa.epg.subs.mpv041 \\',
               '  --add-binary "$LIBMPV:." \\': ('  --add-binary "$TVHPLAYER_NATIVE_PREFIX/lib:." \\' + chr(10) + '  --add-binary "$LIBMPV:." \\'),
           }
           for original, replacement in changes.items():
@@ -218,8 +218,8 @@ jobs:
           test -z "$(git diff --name-only HEAD -- tvhplayer)"
       - name: Build no-Cocoa TVHplayer 4.5.0 on Ventura 13 Intel
         env:
-          TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel
-          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.ventura.nococoa.epg.mpv041
+          TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer.ventura.nococoa.epg.subs.mpv041
           MACOSX_DEPLOYMENT_TARGET: '13.0'
         run: |
           set -euo pipefail
@@ -233,19 +233,19 @@ jobs:
       - name: Audit portable x86_64 bundle and Ventura deployment target
         run: |
           set -euo pipefail
-          APP="macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.app"
-          test -x "$APP/Contents/MacOS/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel"
+          APP="macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.app"
+          test -x "$APP/Contents/MacOS/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel"
           test -f "$APP/Contents/Frameworks/libmpv.2.dylib"
-          file "$APP/Contents/MacOS/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel"
+          file "$APP/Contents/MacOS/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel"
           codesign --verify --deep --verbose=2 "$APP"
           /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 - <<'PY'
           from pathlib import Path
           import re
           import subprocess
 
-          app = Path("macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.app/Contents")
+          app = Path("macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.app/Contents")
           binaries = [
-              app / "MacOS/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel",
+              app / "MacOS/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel",
               app / "Frameworks/libmpv.2.dylib",
               app / "Frameworks/ffmpeg",
               app / "Frameworks/ffprobe",
@@ -280,7 +280,7 @@ jobs:
 
       - name: Package and verify Ventura DMG
         env:
-          TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel
+          TVHPLAYER_APP_NAME: TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel
         run: |
           set -euo pipefail
           # hdiutil can return EBUSY while macOS scans a freshly signed bundle.
@@ -299,16 +299,16 @@ jobs:
             echo "ERROR: all 4 DMG packaging attempts failed" >&2
             exit 1
           fi
-          (cd macos/dist && shasum -a 256 "TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.dmg" > "TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.dmg.sha256")
-          ls -lh macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.dmg
-          (cd macos/dist && shasum -a 256 -c "TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.dmg.sha256")
+          (cd macos/dist && shasum -a 256 "TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.dmg" > "TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.dmg.sha256")
+          ls -lh macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.dmg
+          (cd macos/dist && shasum -a 256 -c "TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.dmg.sha256")
 
       - name: Publish verified Intel DMG
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel-DMG
+          name: TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel-DMG
           path: |
-            macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.dmg
-            macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-MPV041-Ventura13-Intel.dmg.sha256
+            macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.dmg
+            macos/dist/TVHplayer-v4.5.0-NOCOCOA-EPG-SUBS-MPV041-Ventura13-Intel.dmg.sha256
           if-no-files-found: error
           retention-days: 14
