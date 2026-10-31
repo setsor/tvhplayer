@@ -668,6 +668,8 @@ def test_channel_list_shows_loading_empty_and_error_states(monkeypatch, tmp_path
 
         # Each fetch takes its answer when it starts, so the order is fixed.
         window._open_channel_backend = lambda server: Backend(answers.pop(0))
+        # This test supplies only channel-list outcomes, not an EPG backend.
+        window._start_now_next_fetch = lambda: None
         window.servers = [{'name': 'Home', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
         window.server_combo.blockSignals(True)
         window.server_combo.addItem('Home')
@@ -755,6 +757,8 @@ def test_channel_fetch_hands_its_connection_to_the_window(monkeypatch, tmp_path)
                 self.closed = True
 
         window._open_channel_backend = lambda server: Backend()
+        # Connection ownership is tested independently of background EPG.
+        window._start_now_next_fetch = lambda: None
         window.servers = [{'name': 'Home', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
         window.server_combo.blockSignals(True)
         window.server_combo.addItem('Home')
@@ -785,6 +789,66 @@ def test_channel_fetch_hands_its_connection_to_the_window(monkeypatch, tmp_path)
         assert window.get_backend() is opened[2]
         assert not opened[2].closed
     finally:
+        window.close()
+        app.processEvents()
+
+
+def test_initial_channel_list_is_visible_while_epg_is_still_loading(monkeypatch, tmp_path):
+    """Do not serialize channel rendering behind an expensive Now/Next read."""
+    import threading
+
+    from tvhplayer.core.channel_info import NowNext
+    from tvhplayer.core.models import EpgEvent
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    channel = ui.Channel(uuid='news', name='News', number=1)
+    now = int(time.time())
+    news = EpgEvent(
+        start=now - 60, stop=now + 3600, title='Headlines',
+        channel_uuid='news', event_id=12,
+    )
+    reading = threading.Event()
+    release = threading.Event()
+
+    class Backend:
+        def get_channels(self):
+            return [channel]
+
+        def list_channel_tags(self):
+            return []
+
+        def get_now_next_live(self, channels):
+            assert channels == [channel]
+            reading.set()
+            if not release.wait(5):
+                raise TimeoutError('The EPG gate was not released')
+            return {'news': NowNext(news, None)}
+
+        def close(self):
+            pass
+
+    try:
+        window._open_channel_backend = lambda server: Backend()
+        window.servers = [{'name': 'Home', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
+        window.server_combo.blockSignals(True)
+        window.server_combo.addItem('Home')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        monkeypatch.undo()
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        assert reading.wait(5)
+        assert window.channel_stack.currentWidget() is window.channel_list
+        row = _channel_row(window.channel_list, 'News')
+        assert row >= 0
+        assert _cell(window.channel_list, row, ui.COL_NOW).text() == ''
+        assert window._now_next_fetch is not None
+
+        release.set()
+        _wait_for_now_next(app, window)
+        assert _cell(window.channel_list, row, ui.COL_NOW).text() == 'Headlines'
+    finally:
+        release.set()
         window.close()
         app.processEvents()
 
@@ -2671,6 +2735,7 @@ def test_channel_list_columns_and_options_are_user_settings(monkeypatch, tmp_pat
         header = table.horizontalHeader()
         window.fetch_channels()
         _wait_for_channels(app, window)
+        _wait_for_now_next(app, window)
         assert header.textElideMode() == ui.Qt.TextElideMode.ElideRight
 
         # Defaults: name, now, and status show; disabled channels are left out.
@@ -2865,6 +2930,7 @@ def test_now_next_is_fetched_again_when_a_programme_ends(monkeypatch, tmp_path):
     try:
         window.fetch_channels()
         _wait_for_channels(app, window)
+        _wait_for_now_next(app, window)
         assert backend.now_next_calls == 1
         window._tick_now_next()
         assert backend.now_next_calls == 1
