@@ -1,0 +1,1454 @@
+"""Themes: TVHplayer's own look, or a Qt style, light or dark as the desktop is.
+
+The TVHplayer theme is a style over Fusion that draws the app's own look from
+a light or a dark set of colors, with a palette made from the same colors.
+The Organic theme is the same style drawn in Jottr's Organic look: rounder,
+with pill buttons and fields, on a warm window color. Qt keeps style sheets for small, local changes and does not support them over
+a style of the app's own, so the look is drawn, not written as a style sheet.
+Any other theme is a Qt style, which paints the same colors through a palette
+of every role, as Jottr's Classic look does, rather than the desktop's. Every
+theme is light or dark as the desktop is set, following it while the app
+runs, unless set to always light or always dark. An Accent color, and for the
+TVHplayer and Organic themes a Window color, as in Jottr, are laid over the colors. All can
+be changed while the app runs. Under high contrast the system look stays in charge.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import time
+from pathlib import Path
+
+from PyQt6 import sip
+from PyQt6.QtCore import QPointF, QRect, QRectF, QSize, QStandardPaths, Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPainterPath, QPalette, QPen
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QAbstractSpinBox,
+    QApplication,
+    QComboBox,
+    QFrame,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QProgressBar,
+    QProxyStyle,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleFactory,
+    QStyleOption,
+    QStyleOptionButton,
+    QStyleOptionComboBox,
+    QStyleOptionFrame,
+    QStyleOptionHeader,
+    QStyleOptionMenuItem,
+    QStyleOptionProgressBar,
+    QStyleOptionSlider,
+    QStyleOptionSpinBox,
+    QStyleOptionToolButton,
+    QStyleOptionViewItem,
+    QTableView,
+    QToolButton,
+    QToolTip,
+    QTreeView,
+    QWidget,
+)
+
+try:
+    from . import system_color_scheme as desktop
+    from .core.config import SCHEME_DARK, SCHEME_LIGHT, SCHEME_SYSTEM, THEME_ORGANIC, THEME_TVHPLAYER
+except ImportError:
+    import system_color_scheme as desktop
+    from core.config import SCHEME_DARK, SCHEME_LIGHT, SCHEME_SYSTEM, THEME_ORGANIC, THEME_TVHPLAYER
+
+LIGHT = {
+    'ink': '#232629', 'muted': '#5d6166', 'placeholder': '#8a8d90', 'link': '#1d79b0',
+    'window': '#eff0f1', 'base': '#fcfcfc', 'alt': '#f6f7f7', 'read_only': '#f3f4f5', 'popover': '#fcfcfc',
+    'nav': '#e6e8ea', 'strip': '#f6f7f7', 'strip_ink': '#3b3f43',
+    'accent': '#3daee9', 'primary': '#2c8fc9', 'primary_edge': '#2478aa', 'primary_hover': '#267fb4',
+    'primary_off': '#9fcbe5', 'on_accent': '#ffffff',
+    'hover': '#f2f8fc', 'pressed': '#e3f2fb',
+    'edge': 'rgba(35,38,41,64)', 'edge_soft': 'rgba(35,38,41,36)', 'menu_edge': 'rgba(35,38,41,51)',
+    'rule': 'rgba(35,38,41,31)', 'hairline': 'rgba(35,38,41,26)', 'tint': 'rgba(35,38,41,18)',
+    # Solid, unlike the see-through edges: drawn around a list, a see-through
+    # one would darken where it crosses the list's own background.
+    'list_edge': '#bcbdbf',
+    'scroll': 'rgba(35,38,41,70)', 'scroll_hover': 'rgba(35,38,41,110)', 'track': 'rgba(35,38,41,31)',
+    'disabled': 'rgba(35,38,41,110)', 'disabled_soft': 'rgba(35,38,41,90)',
+    'selected': 'rgba(61,174,233,90)', 'selected_ink': '#124a6a',
+    'tooltip': '#232629', 'tooltip_ink': '#ffffff',
+    'arrow': '#5d6166', 'arrow_off': '#b8babc',
+}
+
+DARK = {
+    'ink': '#fcfcfc', 'muted': '#a1a9b1', 'placeholder': '#7f868c', 'link': '#3daee9',
+    'window': '#202326', 'base': '#292c30', 'alt': '#2e3236', 'read_only': '#25282b', 'popover': '#292c30',
+    'nav': '#1b1e20', 'strip': '#25282b', 'strip_ink': '#d0d3d6',
+    'accent': '#3daee9', 'primary': '#2c8fc9', 'primary_edge': '#3daee9', 'primary_hover': '#349fd6',
+    'primary_off': '#2b4a5c', 'on_accent': '#ffffff',
+    'hover': '#2d3a44', 'pressed': '#2a4a5e',
+    'edge': 'rgba(252,252,252,51)', 'edge_soft': 'rgba(252,252,252,31)', 'menu_edge': 'rgba(252,252,252,40)',
+    'rule': 'rgba(252,252,252,26)', 'hairline': 'rgba(252,252,252,20)', 'tint': 'rgba(252,252,252,20)',
+    'list_edge': '#4b4f53',
+    'scroll': 'rgba(252,252,252,70)', 'scroll_hover': 'rgba(252,252,252,120)', 'track': 'rgba(252,252,252,31)',
+    'disabled': 'rgba(252,252,252,100)', 'disabled_soft': 'rgba(252,252,252,80)',
+    'selected': 'rgba(61,174,233,105)', 'selected_ink': '#d4eefc',
+    'tooltip': '#31363b', 'tooltip_ink': '#fcfcfc',
+    'arrow': '#a1a9b1', 'arrow_off': '#5c6166',
+}
+
+# Accent colors, as in Jottr: (label, main, soft, bright, deep), with an optional
+# {'light': {...}, 'dark': {...}} of exact act, hover, soft, ink and on_act colors.
+# Light schemes use main, soft and deep; dark ones the bright step.
+ACCENT_DEFAULT = 'default'
+ACCENTS = {
+    'terracotta': ('Terracotta', '#c23b2b', '#fdd9d2', '#f2735d', '#651a12'),
+    'clay': ('Clay', '#a4552d', '#e9d3c2', '#d6916a', '#5c2c14', {
+        'light': {'act': '#a4552d', 'hover': '#884423', 'soft': '#e9d3c2', 'ink': '#5c2c14', 'on_act': '#fffaf3'},
+        'dark': {'act': '#d6916a', 'hover': '#e3a986', 'ink': '#f1cbb3', 'on_act': '#2e2b25'},
+    }),
+    'marigold': ('Marigold', '#b0650f', '#f1dcb8', '#eba24a', '#5e3406', {
+        'light': {'act': '#b0650f', 'hover': '#93530a', 'soft': '#f1dcb8', 'ink': '#5e3406', 'on_act': '#fffaf3'},
+        'dark': {'act': '#eba24a', 'hover': '#f2b76b', 'ink': '#f8d8a8', 'on_act': '#2e2b25'},
+    }),
+    'sage': ('Sage', '#7a8a5e', '#e1eecc', '#aebf92', '#3d472b'),
+    'ink': ('Ink', '#2e2b25', '#eee7db', '#f9f4ed', '#2e2b25'),
+    'ocean': ('Ocean', '#3f6f9e', '#d6e4f2', '#7fa7d0', '#1f3a56'),
+    # GNOME's (libadwaita's) blue accent, the same in light and dark. Ink is the text
+    # of a selected row: near-black or near-white, as for the other accents.
+    'blue': ('Blue', '#3584e4', '#d0e3fa', '#3584e4', '#15396b', {
+        'light': {'act': '#3584e4', 'hover': '#1c71d8', 'soft': '#d0e3fa', 'ink': '#15396b', 'on_act': '#ffffff'},
+        'dark': {'act': '#3584e4', 'hover': '#62a0ea', 'ink': '#d3e5fb', 'on_act': '#ffffff'},
+    }),
+    'teal': ('Teal', '#2f8578', '#cdeae4', '#6fbfb1', '#174840'),
+    'plum': ('Plum', '#8a4f7d', '#f0dcea', '#c68fb9', '#4a2442'),
+    'rose': ('Rose', '#c0506a', '#fad7df', '#e88ea2', '#6b2334'),
+}
+# What Default means in the TVHplayer look. Organic's Default is its own graphite.
+TVHPLAYER_ACCENT = 'blue'
+# Accents taken out for looking too much like another; a saved one becomes that one.
+RETIRED_ACCENTS = {'orange': 'terracotta', 'ochre': 'marigold'}
+
+# Window colors, Jottr's Organic grounds, for the TVHplayer theme only:
+# label, then light and dark as (window, base, alt, nav, ink, muted, placeholder, edge).
+WINDOW_DEFAULT = 'default'
+WINDOW_COLORS = {
+    'paper': ('Paper',
+              ('#f4f2ee', '#ffffff', '#f7f5f2', '#ebe8e3', '#1d1c1a', '#5d5a55', '#9a968f', '#dcd8d1'),
+              ('#2e2e32', '#1d1d20', '#28282c', '#28282c', '#ffffff', '#a3a3a8', '#77777c', '#45454a')),
+    'cream': ('Cream',
+              ('#f5ead8', '#f9f4ed', '#eee7db', '#e6dccb', '#201e1d', '#645c50', '#a19786', '#d3c9ba'),
+              ('#312e2a', '#1f1d1a', '#2b2825', '#2b2825', '#ffffff', '#aaa398', '#7d776e', '#48433e')),
+    'stone': ('Stone',
+              ('#e9e5df', '#f6f4f1', '#eeebe6', '#e0dbd4', '#1f1d1b', '#5f5a54', '#9c968f', '#cbc4bb'),
+              ('#302f2d', '#1e1d1c', '#2a2928', '#2a2928', '#ffffff', '#a8a5a0', '#7a7874', '#474643')),
+    'mist': ('Mist',
+             ('#e4eadb', '#f4f7ef', '#eaefe2', '#dbe3cf', '#1c211a', '#56604d', '#939c88', '#c4cfb4'),
+             ('#2b302a', '#1b1e19', '#262a24', '#262a24', '#ffffff', '#a3ab9a', '#767e6e', '#424940')),
+    'fog': ('Fog',
+            ('#e6e8ea', '#f5f6f7', '#eceef0', '#dcdfe3', '#1b1e21', '#565c63', '#939aa1', '#c6cbd1'),
+            ('#2c2f33', '#1c1e21', '#27292d', '#27292d', '#ffffff', '#a2a7ae', '#767b82', '#43464c')),
+    'steel': ('Steel',
+              ('#d3dce5', '#edf2f6', '#e0e7ee', '#c7d1dc', '#151a20', '#475463', '#83909e', '#afbdcb'),
+              ('#283039', '#181d23', '#232a32', '#232a32', '#ffffff', '#9eaab7', '#717d8a', '#3f4a56')),
+    'blush': ('Blush',
+              ('#f3e1dc', '#faf2ef', '#f1e6e2', '#e9d6d0', '#221c1b', '#67534f', '#a8918b', '#d8c0b9'),
+              ('#322b2a', '#201b1a', '#2c2625', '#2c2625', '#ffffff', '#b0a09c', '#83736f', '#4a413f')),
+}
+
+# The Organic look's own accent for each Window color, light and dark, from Jottr:
+# (act, act_hover, act_soft, on_act, popover). Organic's Default window color is Paper.
+ORGANIC_DEFAULT_WINDOW = 'paper'
+ORGANIC_ACT = {
+    'paper': (('#34322f', '#22211f', '#e0dcd5', '#f4f2ee', '#ffffff'),
+              ('#e6e6e8', '#ffffff', 'rgba(255,255,255,41)', '#222226', '#36363a')),
+    'cream': (('#3d3a36', '#2a2825', '#dcd1bf', '#f5ead8', '#f9f4ed'),
+              ('#ece6dc', '#ffffff', 'rgba(255,255,255,41)', '#25221f', '#3a3632')),
+    'stone': (('#3b3835', '#282624', '#d4cec6', '#e9e5df', '#f6f4f1'),
+              ('#e8e6e2', '#ffffff', 'rgba(255,255,255,41)', '#242321', '#393836')),
+    'mist': (('#354030', '#242c20', '#cdd8bf', '#e4eadb', '#f4f7ef'),
+             ('#e2eadb', '#ffffff', 'rgba(255,255,255,41)', '#20241e', '#343a32')),
+    'fog': (('#353a40', '#23272c', '#cfd3d8', '#e6e8ea', '#f5f6f7'),
+            ('#e4e8ec', '#ffffff', 'rgba(255,255,255,41)', '#212428', '#35383d')),
+    'steel': (('#2b3644', '#1b242f', '#b9c6d3', '#d3dce5', '#edf2f6'),
+              ('#dce5ee', '#ffffff', 'rgba(255,255,255,41)', '#1c232b', '#313a44')),
+    'blush': (('#40322f', '#2c221f', '#dfc8c1', '#f3e1dc', '#faf2ef'),
+              ('#f0e1dd', '#ffffff', 'rgba(255,255,255,41)', '#261f1e', '#3b3332')),
+}
+
+# Labels the settings pages and dialogs name: point size, weight, color, color when disabled.
+LABELS = {
+    'pageTitle': (15, QFont.Weight.DemiBold, None, None),
+    'pageIntro': (None, None, 'muted', None),
+    'groupTitle': (None, QFont.Weight.DemiBold, None, None),
+    'rowTitle': (10.5, None, None, None),
+    'rowDesc': (9, None, 'muted', 'disabled_soft'),
+    'statusText': (9.5, None, 'strip_ink', None),
+    'footerNote': (9.5, None, 'muted', None),
+}
+# Frames the settings pages and dialogs name, drawn by ThemeStyle.
+NAMED_FRAMES = ('groupCard', 'rowSeparator', 'statusStrip', 'dialogFooter', 'settingsNav')
+
+# Arrows on dropdowns and number boxes, as points in a 10 by 10 box.
+DOWN = ((2, 3.5), (5, 6.5), (8, 3.5))
+UP = ((2, 6.5), (5, 3.5), (8, 6.5))
+
+# The colors in use, and whether the TVHplayer theme is on.
+colors = LIGHT
+_active = False
+# Kept by apply(): the desktop's scheme, whether it is watched, the style,
+# the app's font before the theme's, and the theme's font.
+_scheme = None
+_mode = SCHEME_SYSTEM
+_watching = False
+_style = None
+_default_font = None
+_theme_font = None
+# Whether the theme in use is drawn in the Organic look.
+_organic = False
+# The Accent color and Window color chosen in Settings.
+_accent = ACCENT_DEFAULT
+_window = WINDOW_DEFAULT
+
+PE = QStyle.PrimitiveElement
+CE = QStyle.ControlElement
+CC = QStyle.ComplexControl
+SC = QStyle.SubControl
+SE = QStyle.SubElement
+PM = QStyle.PixelMetric
+CT = QStyle.ContentsType
+State = QStyle.StateFlag
+
+
+def is_active():
+    """Whether the app's own theme, TVHplayer or Organic, is in use."""
+    return _active
+
+
+def is_organic():
+    return _active and _organic
+
+
+def _palette(c):
+    pal = QPalette()
+    roles = {
+        QPalette.ColorRole.Window: c['window'],
+        QPalette.ColorRole.WindowText: c['ink'],
+        QPalette.ColorRole.Base: c['base'],
+        QPalette.ColorRole.AlternateBase: c['alt'],
+        QPalette.ColorRole.Text: c['ink'],
+        QPalette.ColorRole.Button: c['base'],
+        QPalette.ColorRole.ButtonText: c['ink'],
+        QPalette.ColorRole.Highlight: c['accent'],
+        QPalette.ColorRole.HighlightedText: c['on_accent'],
+        QPalette.ColorRole.ToolTipBase: c['tooltip'],
+        QPalette.ColorRole.ToolTipText: c['tooltip_ink'],
+        QPalette.ColorRole.PlaceholderText: c['placeholder'],
+        QPalette.ColorRole.Link: c['link'],
+        QPalette.ColorRole.Mid: c['list_edge'],
+    }
+    for role, color in roles.items():
+        pal.setColor(role, QColor(color))
+    disabled = _qcolor(c['disabled'])
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText):
+        pal.setColor(QPalette.ColorGroup.Disabled, role, disabled)
+    return pal
+
+
+def _qcolor(value):
+    """QColor from "#rrggbb" or "rgba(r,g,b,a)" with a from 0 to 255."""
+    if value.startswith('rgba('):
+        r, g, b, a = (int(part) for part in value[5:-1].split(','))
+        return QColor(r, g, b, a)
+    return QColor(value)
+
+
+def color(name):
+    """A color of the TVHplayer theme in use, for widgets that paint themselves."""
+    return _qcolor(colors[name])
+
+
+def _rgba(value, alpha):
+    c = QColor(value)
+    return f'rgba({c.red()},{c.green()},{c.blue()},{alpha})'
+
+
+def _blend(value, under, amount):
+    """``value`` laid over ``under`` at ``amount`` from 0 to 1, as "#rrggbb"."""
+    a, b = QColor(value), QColor(under)
+    mix = lambda x, y: round(x * amount + y * (1 - amount))
+    return QColor(mix(a.red(), b.red()), mix(a.green(), b.green()), mix(a.blue(), b.blue())).name()
+
+
+def normalize_accent(key):
+    key = str(key or '').strip().casefold()
+    key = RETIRED_ACCENTS.get(key, key)
+    return key if key in ACCENTS else ACCENT_DEFAULT
+
+
+def normalize_window_color(key):
+    key = str(key or '').strip().casefold()
+    return key if key in WINDOW_COLORS else WINDOW_DEFAULT
+
+
+def compose(dark, accent=ACCENT_DEFAULT, window=WINDOW_DEFAULT, organic=False):
+    """The light or dark colors with an Accent color and a Window color laid over them.
+
+    The TVHplayer look's Default accent is GNOME's blue (``TVHPLAYER_ACCENT``).
+    ``organic`` gives the Organic look's colors: Paper by default, its own
+    graphite accent, see-through edges and hover fills, and selections
+    filled with the accent.
+    """
+    accent, window = normalize_accent(accent), normalize_window_color(window)
+    if accent == ACCENT_DEFAULT and not organic:
+        accent = TVHPLAYER_ACCENT
+    if organic and window == WINDOW_DEFAULT:
+        window = ORGANIC_DEFAULT_WINDOW
+    c = dict(DARK if dark else LIGHT)
+    if window != WINDOW_DEFAULT:
+        win, base, alt, nav, ink, muted, placeholder, edge = WINDOW_COLORS[window][2 if dark else 1]
+        c.update({
+            'window': win, 'base': base, 'alt': alt, 'read_only': alt, 'nav': nav,
+            'strip': alt, 'strip_ink': muted, 'ink': ink, 'muted': muted,
+            'placeholder': placeholder, 'list_edge': edge, 'arrow': muted,
+        })
+    if accent != ACCENT_DEFAULT:
+        _label, main, soft, bright, deep, *extra = ACCENTS[accent]
+        exact = (extra[0] if extra else {}).get('dark' if dark else 'light', {})
+        if dark:
+            act = exact.get('act', bright)
+            hover = exact.get('hover') or QColor(act).lighter(110).name()
+            c.update({
+                'accent': act, 'primary': act, 'primary_edge': act, 'primary_hover': hover,
+                'primary_off': _blend(act, c['base'], 0.3), 'on_accent': exact.get('on_act', '#1d1c1a'),
+                'link': act, 'selected': _rgba(act, 105), 'selected_ink': exact.get('ink', soft),
+            })
+        else:
+            act = exact.get('act', main)
+            hover = exact.get('hover') or QColor(act).darker(115).name()
+            c.update({
+                'accent': act, 'primary': act, 'primary_edge': hover, 'primary_hover': hover,
+                'primary_off': exact.get('soft', soft), 'on_accent': exact.get('on_act', '#ffffff'),
+                'link': hover, 'selected': _rgba(act, 90), 'selected_ink': exact.get('ink', deep),
+            })
+    if organic:
+        act, act_hover, act_soft, on_act, popover = ORGANIC_ACT[window][1 if dark else 0]
+        line = _rgba(c['ink'], 38 if dark else 41)
+        tint = _rgba(c['ink'], 20 if dark else 18)
+        c.update({
+            'popover': popover, 'tooltip': popover, 'tooltip_ink': c['ink'],
+            'edge': line, 'edge_soft': line, 'menu_edge': line,
+            'hover': tint, 'tint': tint,
+            'scroll': _rgba(c['ink'], 77), 'scroll_hover': _rgba(c['ink'], 128),
+        })
+        if accent == ACCENT_DEFAULT:
+            c.update({
+                'accent': act, 'primary': act, 'primary_edge': act, 'primary_hover': act_hover,
+                'primary_off': act_soft, 'on_accent': on_act, 'pressed': act_soft,
+            })
+        else:
+            c['pressed'] = _rgba(c['accent'], 61) if dark else ACCENTS[accent][2]
+        c['selected'] = c['accent']
+        c['selected_ink'] = c['on_accent']
+    elif accent != ACCENT_DEFAULT or window != WINDOW_DEFAULT:
+        # Hover and pressed fills are the accent faintly over the fields' color.
+        c['hover'] = _blend(c['accent'], c['base'], 0.11 if dark else 0.05)
+        c['pressed'] = _blend(c['accent'], c['base'], 0.24 if dark else 0.13)
+    return c
+
+
+def accent_choices():
+    """(key, label) of each Accent color, Default first, for Settings."""
+    return [(ACCENT_DEFAULT, 'Default')] + [(key, spec[0]) for key, spec in ACCENTS.items()]
+
+
+def window_color_choices():
+    """(key, label) of each Window color, Default first, for Settings."""
+    return [(WINDOW_DEFAULT, 'Default')] + [(key, spec[0]) for key, spec in WINDOW_COLORS.items()]
+
+
+def is_dark():
+    return _scheme == desktop.ColorScheme.Dark
+
+
+def accent_swatch(key):
+    """The color that stands for an Accent color in Settings, in the scheme in use."""
+    return QColor(compose(is_dark(), key, organic=is_organic())['accent'])
+
+
+def window_swatch(key):
+    """The color that stands for a Window color in Settings, in the scheme in use."""
+    return QColor(compose(is_dark(), window=key, organic=is_organic())['window'])
+
+
+def _load_fonts():
+    """Use bundled Noto Sans if it ships in fonts/, otherwise the system copy or the default."""
+    global _theme_font
+    if _theme_font is not None:
+        return _theme_font
+    fonts = Path(__file__).resolve().parent / 'fonts'
+    if fonts.is_dir():
+        for file in fonts.glob('*.ttf'):
+            QFontDatabase.addApplicationFont(str(file))
+    if 'Noto Sans' in QFontDatabase.families():
+        _theme_font = QFont('Noto Sans', 10)
+    return _theme_font
+
+
+def polish_main_window(window):
+    """With the TVHplayer theme, flatten the raised side panes and hide the splitter handle;
+    without it, put them back. Call after the UI is built and after each theme change."""
+    for name in ('left_pane', 'right_pane', 'tasks_pane'):
+        pane = getattr(window, name, None)
+        if pane is not None:
+            if pane.property('tvhplayer_frame') is None:
+                pane.setProperty('tvhplayer_frame', pane.frameStyle())
+            pane.setFrameStyle(QFrame.Shape.NoFrame if _active else pane.property('tvhplayer_frame'))
+            pane.setObjectName(name)
+    splitter = getattr(window, 'splitter', None)
+    if splitter is not None:
+        # A small grip, on a handle wide enough to grab; -1 is the style's own width.
+        splitter.setHandleWidth(6 if _active else -1)
+
+
+def _row_ends(view, index):
+    """Whether ``index`` is in the first and the last visible column of its row."""
+    if isinstance(view, QTableView):
+        header = view.horizontalHeader()
+    elif isinstance(view, QTreeView):
+        header = view.header()
+    else:
+        return True, True
+    shown = [header.logicalIndex(v) for v in range(header.count()) if not header.isSectionHidden(header.logicalIndex(v))]
+    if not shown:
+        return True, True
+    return index.column() == shown[0], index.column() == shown[-1]
+
+
+# Drawing ---------------------------------------------------------------------
+
+def _box(painter, rect, radius, fill=None, edge=None, width=1):
+    """A rounded box; the edge is drawn inside ``rect``."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    r = QRectF(rect)
+    if edge is not None:
+        r = r.adjusted(width / 2, width / 2, -width / 2, -width / 2)
+        radius = max(0.0, radius - width / 2)
+        painter.setPen(QPen(edge, width))
+    else:
+        painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(fill if fill is not None else Qt.BrushStyle.NoBrush)
+    painter.drawRoundedRect(r, radius, radius)
+    painter.restore()
+
+
+def _radius(rect, classic, cap):
+    """A corner radius: the TVHplayer look's ``classic``, or in Organic round ends up to ``cap``."""
+    return min(QRectF(rect).height() / 2, cap) if _organic else classic
+
+
+def _field(painter, rect, fill, focused):
+    """Text fields, dropdowns and number boxes: a thin edge, a thicker accent one with focus."""
+    radius = _radius(rect, 4, 14)
+    if focused:
+        _box(painter, rect, radius, fill, color('accent'), 2)
+    else:
+        _box(painter, rect, radius, fill, color('edge'))
+
+
+def _chevron(painter, rect, points, ink, size):
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    scale = size / 10
+    center = QRectF(rect).center()
+    path = QPainterPath()
+    for i, (x, y) in enumerate(points):
+        point = QPointF(center.x() + (x - 5) * scale, center.y() + (y - 5) * scale)
+        path.moveTo(point) if i == 0 else path.lineTo(point)
+    pen = QPen(ink, 1.6 * scale)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawPath(path)
+    painter.restore()
+
+
+def _see_through_corners(popup):
+    """Let a menu's or dropdown list's rounded corners show what is behind them.
+
+    A popup is a window of its own, and an opaque one fills its corners with
+    the window color. On Windows Qt makes a window see-through only when it
+    is also frameless, else the corners are black; its shadow is square, so
+    it goes too. Set before the popup is first shown: a window made opaque
+    keeps square corners until the next start.
+    """
+    popup.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+    if sys.platform == 'win32':
+        flags = Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        if (popup.windowFlags() & flags) != flags:
+            popup.setWindowFlags(popup.windowFlags() | flags)
+
+
+# Organic's check mark, dash and dot, in a 24 by 24 box, as in Jottr.
+CHECK = ((5.5, 12.5), (10, 17), (18.5, 7.5))
+DASH = ((7, 12), (17, 12))
+
+
+def _indicator(option, painter, radio):
+    """Organic's check boxes and radio buttons: a ring in the ink, filled with the accent once on."""
+    state = option.state
+    enabled = bool(state & State.State_Enabled)
+    on = bool(state & (State.State_On | State.State_NoChange))
+    side = min(option.rect.width(), option.rect.height())
+    box = QRectF(0, 0, side, side)
+    box.moveCenter(QRectF(option.rect).center())
+    radius = side / 2 if radio else side / 3
+    if on:
+        fill = color('primary_off' if not enabled else
+                     'primary_hover' if state & State.State_MouseOver else 'accent')
+        _box(painter, box, radius, fill)
+    else:
+        amount = 0.2 if not enabled else 0.7 if state & State.State_MouseOver else 0.45
+        edge = QColor(_blend(color('ink').name(), color('base').name(), amount))
+        _box(painter, box, radius, color('base'), edge, 2)
+    if not on:
+        return
+    ink = color('on_accent' if enabled else 'muted')
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    scale = side / 24
+    if radio:
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(ink)
+        painter.drawEllipse(box.center(), 5.5 * scale, 5.5 * scale)
+    else:
+        path = QPainterPath()
+        points = DASH if state & State.State_NoChange else CHECK
+        for i, (x, y) in enumerate(points):
+            point = QPointF(box.left() + x * scale, box.top() + y * scale)
+            path.moveTo(point) if i == 0 else path.lineTo(point)
+        pen = QPen(ink, 3.25 * scale)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+    painter.restore()
+
+
+def _line(painter, x, y, width, height, name):
+    painter.fillRect(QRect(x, y, width, height), color(name))
+
+
+def _list_header_rule(painter, rect, view):
+    """Carry the rule under a list's header through the frame's padding to its edge.
+
+    The header sits inside the padding, so its own rule stops short of the frame.
+    """
+    if isinstance(view, QTableView):
+        header = view.horizontalHeader()
+    elif isinstance(view, QTreeView):
+        header = view.header()
+    else:
+        return
+    if header is None or header.isHidden():
+        return
+    _line(painter, rect.left() + 1, header.geometry().bottom(), rect.width() - 2, 1, 'edge')
+
+
+def _header_edge_draggable(option, widget):
+    """Whether the user can drag the right edge of this header section.
+
+    The last section's edge sits against the list's own edge, so it gets no mark.
+    """
+    if not isinstance(widget, QHeaderView):
+        return False
+    if option.position in (QStyleOptionHeader.SectionPosition.End,
+                           QStyleOptionHeader.SectionPosition.OnlyOneSection):
+        return False
+    return widget.sectionResizeMode(option.section) == QHeaderView.ResizeMode.Interactive
+
+
+def _in_combo_popup(widget):
+    parent = widget.parentWidget() if widget is not None else None
+    return parent is not None and parent.inherits('QComboBoxPrivateContainer')
+
+
+def _frame_kind(widget):
+    """Which of the theme's frames ``widget`` gets, or None for the base style's."""
+    if widget is None:
+        return None
+    name = widget.objectName()
+    if name in NAMED_FRAMES:
+        return name
+    if isinstance(widget, QAbstractItemView) and not isinstance(widget, QHeaderView):
+        return 'popup' if _in_combo_popup(widget) else 'list'
+    if isinstance(widget, QScrollArea) or widget.inherits('QComboBoxPrivateContainer'):
+        return 'none'
+    return None
+
+
+# What each frame leaves around its contents: left, top, right, bottom. A list's
+# padding keeps its square header and rows inside the rounded edge.
+FRAME_INSETS = {
+    'list': (5, 5, 5, 5),
+    'popup': (5, 5, 5, 5),
+    'settingsNav': (10, 14, 11, 14),
+    'groupCard': (1, 1, 1, 1),
+    'statusStrip': (0, 1, 0, 0),
+    'dialogFooter': (0, 1, 0, 0),
+    'rowSeparator': (0, 0, 0, 0),
+    'none': (0, 0, 0, 0),
+}
+# Organic's rounder lists and dropdown lists need more room at their corners.
+ORGANIC_INSETS = {'list': (7, 7, 7, 7), 'popup': (6, 6, 6, 6)}
+
+
+def _draw_frame(kind, painter, rect):
+    if kind == 'list':
+        _box(painter, rect, 14 if _organic else 6, color('base'), color('list_edge'))
+    elif kind == 'popup':
+        _box(painter, rect, 14 if _organic else 4, color('popover'), color('edge'))
+    elif kind == 'settingsNav':
+        # Edges are see-through: drawn over what is behind the frame, not over its fill.
+        painter.fillRect(rect.adjusted(0, 0, -1, 0), color('nav'))
+        _line(painter, rect.right(), rect.top(), 1, rect.height(), 'rule')
+    elif kind == 'groupCard':
+        _box(painter, rect, 14 if _organic else 8, color('base'), color('edge_soft'))
+    elif kind == 'statusStrip':
+        r = QRectF(rect.adjusted(0, 1, 0, 0))
+        path = QPainterPath()
+        path.addRoundedRect(r, 7, 7)
+        top = QPainterPath()
+        top.addRect(QRectF(r.x(), r.y(), r.width(), r.height() / 2))
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillPath(path.united(top), color('strip'))
+        painter.restore()
+        _line(painter, rect.left(), rect.top(), rect.width(), 1, 'hairline')
+    elif kind == 'dialogFooter':
+        painter.fillRect(rect.adjusted(0, 1, 0, 0), color('window'))
+        _line(painter, rect.left(), rect.top(), rect.width(), 1, 'rule')
+    elif kind == 'rowSeparator':
+        painter.fillRect(rect, color('hairline'))
+
+
+def _option_classes():
+    import PyQt6.QtWidgets as widgets
+
+    found = {}
+    for name in dir(widgets):
+        if name.startswith('QStyleOption') and not name.endswith('V2'):
+            cls = getattr(widgets, name)
+            kind = getattr(getattr(cls, 'StyleOptionType', None), 'Type', None)
+            if kind is not None:
+                found.setdefault(kind.value, cls)
+    return found
+
+
+OPTION_CLASSES = _option_classes()
+
+
+def _typed(option):
+    """``option`` as the class its type says.
+
+    Qt makes options on the stack, and PyQt can hand on the Python object of
+    an earlier option that lived at the same address, of another class.
+    """
+    cls = OPTION_CLASSES.get(option.type)
+    if cls is None or type(option) is cls:
+        return option
+    # sip casts only up or down the class tree, so through the common base.
+    return sip.cast(sip.cast(option, QStyleOption), cls)
+
+
+def _primary(widget):
+    return isinstance(widget, QPushButton) and bool(widget.property('primary'))
+
+
+# What the look sets on widgets themselves ------------------------------------
+
+def _keep(widget):
+    """Remember the widget's own palette and font once, for _undress()."""
+    if widget.property('theme_palette') is None:
+        widget.setProperty('theme_palette', QPalette(widget.palette()))
+        widget.setProperty('theme_font', QFont(widget.font()))
+
+
+LIVE = (QPalette.ColorGroup.Active, QPalette.ColorGroup.Inactive)
+ALL = LIVE + (QPalette.ColorGroup.Disabled,)
+
+
+def _set_ink(palette, role, name, groups=LIVE):
+    for group in groups:
+        palette.setColor(group, role, color(name))
+
+
+def _dress(widget):
+    """Give ``widget`` the colors and fonts the look needs that a style cannot draw.
+
+    Done again after a light or dark change, as the colors are set on the
+    widget; _undress() gives the widget back what it had.
+    """
+    name = widget.objectName()
+    palette = font = None
+    if isinstance(widget, QLabel) and name in LABELS:
+        size, weight, ink, ink_off = LABELS[name]
+        _keep(widget)
+        if size or weight:
+            font = QFont(QApplication.font())
+            if size:
+                font.setPointSizeF(size)
+            if weight:
+                font.setWeight(weight)
+        if ink:
+            palette = QPalette(widget.property('theme_palette'))
+            _set_ink(palette, QPalette.ColorRole.WindowText, ink)
+            if ink_off:
+                _set_ink(palette, QPalette.ColorRole.WindowText, ink_off, (QPalette.ColorGroup.Disabled,))
+    elif isinstance(widget, QHeaderView):
+        _keep(widget)
+        # On the header, not in its painting: Qt fits and shortens the titles with the header's font.
+        font = QFont(widget.property('theme_font'))
+        font.setWeight(QFont.Weight.DemiBold)
+    elif isinstance(widget, QAbstractItemView):
+        _keep(widget)
+        palette = QPalette(widget.property('theme_palette'))
+        # ThemeStyle draws the selected row as a light tint, so its text is dark, not white;
+        # Organic fills it with the accent.
+        popup = _in_combo_popup(widget)
+        _set_ink(palette, QPalette.ColorRole.HighlightedText, 'ink' if popup and not _organic else 'selected_ink')
+        if popup:
+            _set_ink(palette, QPalette.ColorRole.Base, 'popover', ALL)
+        if name == 'settingsNav':
+            _set_ink(palette, QPalette.ColorRole.Base, 'nav', ALL)
+        if isinstance(widget, QTableView) and widget.property('theme_grid') is None:
+            # The theme draws no grid lines, which left a gap between cells.
+            widget.setProperty('theme_grid', widget.showGrid())
+            widget.setShowGrid(False)
+    elif isinstance(widget, QLineEdit) and widget.property('mono'):
+        _keep(widget)
+        font = QFont(widget.property('theme_font'))
+        font.setFamilies(['Noto Sans Mono', 'DejaVu Sans Mono', 'monospace'])
+        font.setStyleHint(QFont.StyleHint.Monospace)
+    elif isinstance(widget, QProgressBar) and not widget.isTextVisible():
+        # Qt keeps a bar at least a line of text tall; the theme's has no text.
+        if widget.property('theme_height') is None:
+            widget.setProperty('theme_height', widget.maximumHeight())
+        widget.setMaximumHeight(4)
+    elif isinstance(widget, QComboBox):
+        # Qt's own list delegate fills the whole row with the accent; a styled one lets
+        # ThemeStyle draw the row. The combo's own is put back for other styles.
+        delegate = widget.itemDelegate()
+        if not isinstance(delegate, QStyledItemDelegate):
+            widget.setProperty('theme_delegate', delegate)
+            widget.setItemDelegate(QStyledItemDelegate(widget))
+    if palette is not None:
+        widget.setPalette(palette)
+    if font is not None:
+        widget.setFont(font)
+    if isinstance(widget, QFrame) and _frame_kind(widget) is not None:
+        # The frame's width was taken before the widget had its name, or from another style.
+        widget.setFrameStyle(widget.frameStyle())
+
+
+def _undress(widget):
+    if widget.property('theme_palette') is not None:
+        widget.setPalette(widget.property('theme_palette'))
+        widget.setFont(widget.property('theme_font'))
+        widget.setProperty('theme_palette', None)
+        widget.setProperty('theme_font', None)
+    if widget.property('theme_height') is not None:
+        widget.setMaximumHeight(widget.property('theme_height'))
+        widget.setProperty('theme_height', None)
+    if widget.property('theme_grid') is not None:
+        widget.setShowGrid(widget.property('theme_grid'))
+        widget.setProperty('theme_grid', None)
+    native = widget.property('theme_delegate')
+    if native is not None:
+        ours = widget.itemDelegate()
+        # Qt picks the right delegate for the next style from this one.
+        widget.setItemDelegate(native)
+        widget.setProperty('theme_delegate', None)
+        if ours is not native:
+            ours.deleteLater()
+
+
+# The style ---------------------------------------------------------------------
+
+class ThemeStyle(QProxyStyle):
+    """With the TVHplayer theme on, Fusion drawn in the app's own look; otherwise the style as it is.
+
+    Each drawing call checks the theme, so that this style can stay under
+    another Qt style for the app's own rules (see NoDialogButtonIconsStyle).
+    """
+
+    def __init__(self, key):
+        super().__init__(key)
+        self._busy = {}
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setInterval(33)
+        self._busy_timer.timeout.connect(self._step_busy)
+
+    # Widgets ---------------------------------------------------------------
+
+    def polish(self, target):
+        result = super().polish(target)
+        # Qt gives tooltips the desktop's palette again on each theme change,
+        # which comes after the app has set its own at startup.
+        if isinstance(target, QLabel) and target.windowType() == Qt.WindowType.ToolTip:
+            target.setPalette(QApplication.palette())
+        if _active and isinstance(target, QWidget):
+            _dress(target)
+            if _organic and (isinstance(target, QMenu) or target.inherits('QComboBoxPrivateContainer')):
+                _see_through_corners(target)
+        return result
+
+    def unpolish(self, target):
+        # Not by _active: the theme is already off when the style it leaves unpolishes.
+        if isinstance(target, QWidget):
+            _undress(target)
+        return super().unpolish(target)
+
+    def _step_busy(self):
+        for key, bar in list(self._busy.items()):
+            if sip.isdeleted(bar) or not bar.isVisible() or bar.maximum() != bar.minimum():
+                del self._busy[key]
+            else:
+                bar.update()
+        if not self._busy:
+            self._busy_timer.stop()
+
+    # Sizes -------------------------------------------------------------------
+
+    def pixelMetric(self, metric, option=None, widget=None):
+        if _active:
+            if metric == PM.PM_ScrollBarExtent:
+                return 12 if _organic else 10
+            if metric == PM.PM_ScrollBarSliderMin:
+                return 30
+            if metric in (PM.PM_MenuHMargin, PM.PM_MenuVMargin):
+                return 6 if _organic else 4
+            if metric == PM.PM_MenuPanelWidth:
+                return 1
+            if metric == PM.PM_MenuBarHMargin:
+                return 6
+            if metric == PM.PM_MenuBarVMargin:
+                return 2
+            if metric == PM.PM_MenuBarItemSpacing:
+                return 6
+            if metric == PM.PM_MenuBarPanelWidth:
+                return 0
+            if metric == PM.PM_ToolTipLabelFrameWidth:
+                return 5
+        return super().pixelMetric(metric, option, widget)
+
+    def sizeFromContents(self, kind, option, size, widget=None):
+        option = _typed(option)
+        if not _active:
+            return super().sizeFromContents(kind, option, size, widget)
+        # Each adds the theme's padding and edge to what the widget needs for its text.
+        if kind == CT.CT_PushButton:
+            if _organic:
+                return QSize(size.width() + 40, size.height() + 14)
+            return QSize(size.width() + 30, size.height() + 10)
+        if kind == CT.CT_ToolButton:
+            return QSize(size.width() + 21, size.height() + 13)
+        if kind == CT.CT_LineEdit and isinstance(option, QStyleOptionFrame) and option.lineWidth > 0:
+            return QSize(size.width() + 18, size.height() + 10)
+        if kind == CT.CT_ComboBox and isinstance(option, QStyleOptionComboBox) and option.frame:
+            return QSize(size.width() + 44, size.height() + 10)
+        if kind == CT.CT_SpinBox and isinstance(widget, QSpinBox):
+            return QSize(size.width() + 76, size.height() + 9)
+        if kind == CT.CT_ProgressBar and isinstance(option, QStyleOptionProgressBar) and not option.textVisible:
+            return QSize(size.width(), 4)
+        if kind == CT.CT_HeaderSection and isinstance(option, QStyleOptionHeader):
+            base = super().sizeFromContents(kind, option, size, widget)
+            return QSize(base.width() + 16, base.height() + 13)
+        if kind == CT.CT_MenuBarItem:
+            return QSize(size.width() + 20, size.height() + 10)
+        if kind == CT.CT_MenuItem and isinstance(option, QStyleOptionMenuItem):
+            base = super().sizeFromContents(kind, option, size, widget)
+            if option.menuItemType == QStyleOptionMenuItem.MenuItemType.Separator:
+                return QSize(base.width(), 9)
+            return QSize(base.width() + (16 if _organic else 3),
+                         max(base.height(), option.fontMetrics.height() + (14 if _organic else 12)))
+        if kind == CT.CT_ItemViewItem and _in_combo_popup(widget):
+            base = super().sizeFromContents(kind, option, size, widget)
+            return QSize(base.width() + 18, option.fontMetrics.height() + (14 if _organic else 12))
+        return super().sizeFromContents(kind, option, size, widget)
+
+    def subElementRect(self, element, option, widget=None):
+        option = _typed(option)
+        if _active:
+            if element in (SE.SE_ShapedFrameContents, SE.SE_FrameContents):
+                kind = _frame_kind(widget)
+                if kind is not None:
+                    left, top, right, bottom = (ORGANIC_INSETS.get(kind) if _organic else None) or FRAME_INSETS[kind]
+                    return option.rect.adjusted(left, top, -right, -bottom)
+            elif (element == SE.SE_LineEditContents and isinstance(option, QStyleOptionFrame)
+                  and option.lineWidth > 0):
+                side = 12 if _organic else 9
+                return option.rect.adjusted(side, 5, -side, -5)
+            elif element == SE.SE_HeaderLabel and isinstance(option, QStyleOptionHeader):
+                return option.rect.adjusted(8, 6, -8, -7)
+            elif element == SE.SE_ItemViewItemText and _in_combo_popup(widget):
+                r = super().subElementRect(element, option, widget)
+                r.setLeft(r.left() + 12)
+                return r
+        return super().subElementRect(element, option, widget)
+
+    def subControlRect(self, control, option, sub, widget=None):
+        option = _typed(option)
+        if not _active:
+            return super().subControlRect(control, option, sub, widget)
+        r = option.rect
+        if control == CC.CC_ComboBox and isinstance(option, QStyleOptionComboBox) and option.frame:
+            side = 4 if _organic else 0
+            if sub == SC.SC_ComboBoxArrow:
+                return QRect(r.right() - 24 - side, r.top() + 1, 24, r.height() - 2)
+            if sub == SC.SC_ComboBoxEditField:
+                return QRect(r.left() + 9 + side, r.top() + 5, r.width() - 34 - 2 * side, r.height() - 10)
+            if sub == SC.SC_ComboBoxFrame:
+                return QRect(r)
+        elif control == CC.CC_SpinBox and isinstance(widget, QSpinBox):
+            half = r.height() // 2
+            side = 4 if _organic else 0
+            if sub == SC.SC_SpinBoxUp:
+                return QRect(r.right() - 21 - side, r.top() + 3, 20, half - 3)
+            if sub == SC.SC_SpinBoxDown:
+                return QRect(r.right() - 21 - side, r.top() + half, 20, r.height() - half - 3)
+            if sub == SC.SC_SpinBoxEditField:
+                return QRect(r.left() + 9 + side, r.top() + 5, r.width() - 32 - 2 * side, r.height() - 10)
+            if sub == SC.SC_SpinBoxFrame:
+                return QRect(r)
+        elif control == CC.CC_ScrollBar and isinstance(option, QStyleOptionSlider):
+            return self._scroll_rect(option, sub)
+        return super().subControlRect(control, option, sub, widget)
+
+    @staticmethod
+    def _scroll_rect(option, sub):
+        """A bar with no arrow buttons: a rounded handle in a 2px margin, 3px in Organic."""
+        margin = 3 if _organic else 2
+        groove = option.rect.adjusted(margin, margin, -margin, -margin)
+        if sub == SC.SC_ScrollBarGroove:
+            return groove
+        if sub not in (SC.SC_ScrollBarSlider, SC.SC_ScrollBarSubPage, SC.SC_ScrollBarAddPage):
+            return QRect()
+        horizontal = option.orientation == Qt.Orientation.Horizontal
+        length = groove.width() if horizontal else groove.height()
+        span = option.maximum - option.minimum
+        handle = length if span <= 0 else max(30, length * option.pageStep // (span + option.pageStep))
+        handle = min(handle, length)
+        start = QStyle.sliderPositionFromValue(option.minimum, option.maximum, option.sliderPosition,
+                                               length - handle, option.upsideDown)
+        if sub == SC.SC_ScrollBarSlider:
+            first, size = start, handle
+        elif sub == SC.SC_ScrollBarSubPage:
+            first, size = 0, start
+        else:
+            first, size = start + handle, length - start - handle
+        if horizontal:
+            return QRect(groove.left() + first, groove.top(), size, groove.height())
+        return QRect(groove.left(), groove.top() + first, groove.width(), size)
+
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        # Fusion opens a dropdown like a menu, over the dropdown; the theme opens a list below it.
+        if _active and hint == QStyle.StyleHint.SH_ComboBox_Popup:
+            return 0
+        return super().styleHint(hint, option, widget, returnData)
+
+    # Painting ------------------------------------------------------------------
+
+    def drawPrimitive(self, element, option, painter, widget=None):
+        option = _typed(option)
+        if _active and self._draw_primitive(element, option, painter, widget):
+            return
+        super().drawPrimitive(element, option, painter, widget)
+
+    def _draw_primitive(self, element, option, painter, widget):
+        """Draw ``element`` the theme's way; False leaves it to Fusion."""
+        state = option.state
+        if element == PE.PE_PanelButtonCommand:
+            self._button(option, painter, widget)
+        elif element == PE.PE_PanelButtonTool and isinstance(widget, QToolButton):
+            self._button(option, painter, widget)
+        elif element == PE.PE_FrameFocusRect:
+            # Buttons and fields show focus with their edge; lists show none.
+            return isinstance(widget, (QPushButton, QToolButton, QAbstractItemView, QComboBox))
+        elif element == PE.PE_PanelLineEdit:
+            if not isinstance(option, QStyleOptionFrame) or option.lineWidth <= 0:
+                return False
+            read_only = isinstance(widget, QLineEdit) and widget.isReadOnly()
+            _field(painter, option.rect, color('read_only' if read_only else 'base'), state & State.State_HasFocus)
+        elif element == PE.PE_PanelItemViewItem:
+            if not (state & State.State_Selected and isinstance(widget, QAbstractItemView)
+                    and isinstance(option, QStyleOptionViewItem)):
+                return False
+            self._selected_row(option, painter, widget)
+        elif element == PE.PE_PanelItemViewRow:
+            if not (state & State.State_Selected and isinstance(option, QStyleOptionViewItem)):
+                return False
+            # The selection is drawn on the cells, rounded at the row's ends.
+            self._unselected(element, option, painter, widget)
+        elif element == PE.PE_IndicatorBranch and state & State.State_Selected:
+            # Only the arrow, for the same reason.
+            self._unselected(element, option, painter, widget)
+        elif element == PE.PE_PanelScrollAreaCorner:
+            pass
+        elif element == PE.PE_PanelMenu:
+            if not isinstance(widget, QMenu):
+                return False
+            _box(painter, option.rect, 14 if _organic else 6, color('popover'))
+        elif element == PE.PE_FrameMenu:
+            if not isinstance(widget, QMenu):
+                return False
+            _box(painter, option.rect, 14 if _organic else 6, None, color('menu_edge'))
+        elif element == PE.PE_PanelMenuBar:
+            pass
+        elif element == PE.PE_PanelStatusBar:
+            painter.fillRect(option.rect, color('window'))
+            if not _organic:
+                _line(painter, option.rect.left(), option.rect.top(), option.rect.width(), 1, 'rule')
+        elif element in (PE.PE_IndicatorCheckBox, PE.PE_IndicatorRadioButton) and _organic:
+            _indicator(option, painter, element == PE.PE_IndicatorRadioButton)
+        elif element == PE.PE_FrameStatusBarItem:
+            pass
+        elif element == PE.PE_PanelTipLabel:
+            painter.fillRect(option.rect, color('tooltip'))
+        else:
+            return False
+        return True
+
+    def _unselected(self, element, option, painter, widget):
+        state = option.state
+        option.state = state & ~State.State_Selected
+        super().drawPrimitive(element, option, painter, widget)
+        option.state = state
+
+    @staticmethod
+    def _button(option, painter, widget):
+        state = option.state
+        enabled = bool(state & State.State_Enabled)
+        focused = bool(state & State.State_HasFocus) and enabled
+        if _primary(widget):
+            fill = color('primary_off' if not enabled else
+                         'primary_hover' if state & State.State_MouseOver else 'primary')
+            edge = color('primary_off' if not enabled else 'primary_edge')
+        elif _organic:
+            # Clear on the window, as in Jottr; only focus colors the edge.
+            fill = (color('pressed') if state & State.State_Sunken else
+                    color('hover') if enabled and state & State.State_MouseOver else None)
+            edge = color('accent' if focused else 'edge')
+        else:
+            fill = color('pressed' if state & State.State_Sunken else
+                         'hover' if enabled and state & State.State_MouseOver else 'base')
+            edge = color('accent' if focused or (enabled and state & State.State_MouseOver) else
+                         'edge' if enabled else 'edge_soft')
+        _box(painter, option.rect, _radius(option.rect, 4, 22), fill, edge, 2 if focused else 1)
+
+    @staticmethod
+    def _selected_row(option, painter, widget):
+        """A selected row is one fill, rounded at its two ends.
+
+        A table counts hidden columns, so with its first column hidden no
+        visible cell would start the row: the ends are the visible ones.
+        """
+        first, last = _row_ends(widget, option.index)
+        rect = QRectF(option.rect)
+        # Rows are dense: a small radius, not Organic's round ends.
+        radius = 6 if _organic else 4
+        # The rounded shape runs past the cell, further than its corners, on a side
+        # that joins another cell, then is cut off.
+        if not first:
+            rect.setLeft(rect.left() - radius - 4)
+        if not last:
+            rect.setRight(rect.right() + radius + 4)
+        painter.save()
+        painter.setClipRect(option.rect)
+        _box(painter, rect, radius, color('selected'))
+        painter.restore()
+
+    def drawControl(self, element, option, painter, widget=None):
+        option = _typed(option)
+        if _active and self._draw_control(element, option, painter, widget):
+            return
+        super().drawControl(element, option, painter, widget)
+
+    def _draw_control(self, element, option, painter, widget):
+        state = option.state
+        if element == CE.CE_ShapedFrame:
+            kind = _frame_kind(widget)
+            if kind is None:
+                return False
+            _draw_frame(kind, painter, option.rect)
+            if kind == 'list':
+                _list_header_rule(painter, option.rect, widget)
+        elif (element == CE.CE_PushButtonBevel and isinstance(option, QStyleOptionButton)
+              and option.features & QStyleOptionButton.ButtonFeature.Flat):
+            # The theme gives flat buttons their edge too.
+            features = option.features
+            option.features = features & ~QStyleOptionButton.ButtonFeature.Flat
+            super().drawControl(element, option, painter, widget)
+            option.features = features
+        elif element == CE.CE_PushButtonLabel and _primary(widget) and isinstance(option, QStyleOptionButton):
+            label = QStyleOptionButton(option)
+            label.palette = QPalette(option.palette)
+            for group in ALL:
+                label.palette.setColor(group, QPalette.ColorRole.ButtonText, color('on_accent'))
+            super().drawControl(element, label, painter, widget)
+        elif element == CE.CE_HeaderSection and isinstance(option, QStyleOptionHeader):
+            r = option.rect
+            if option.orientation == Qt.Orientation.Horizontal:
+                _line(painter, r.left(), r.bottom(), r.width(), 1, 'edge')
+                if _header_edge_draggable(option, widget):
+                    inset = r.height() // 4
+                    _line(painter, r.right(), r.top() + inset, 1, r.height() - 2 * inset, 'edge')
+        elif element == CE.CE_HeaderLabel and isinstance(option, QStyleOptionHeader):
+            label = QStyleOptionHeader(option)
+            label.palette = QPalette(option.palette)
+            for group in LIVE:
+                label.palette.setColor(group, QPalette.ColorRole.ButtonText, color('muted'))
+            super().drawControl(element, label, painter, widget)
+        elif element == CE.CE_HeaderEmptyArea:
+            if isinstance(widget, QHeaderView) and widget.orientation() == Qt.Orientation.Horizontal:
+                r = option.rect
+                _line(painter, r.left(), r.bottom(), r.width(), 1, 'edge')
+        elif element == CE.CE_ProgressBar and isinstance(option, QStyleOptionProgressBar):
+            if option.textVisible or not state & State.State_Horizontal:
+                return False
+            self._thin_progress(option, painter, widget)
+        elif element == CE.CE_Splitter:
+            self._splitter_grip(option, painter)
+        elif element in (CE.CE_MenuBarEmptyArea, CE.CE_MenuBarItem) and isinstance(option, QStyleOptionMenuItem):
+            self._menu_bar(element, option, painter, widget)
+        elif element == CE.CE_MenuItem:
+            if not (isinstance(widget, QMenu) and isinstance(option, QStyleOptionMenuItem)):
+                return False
+            self._menu_item(option, painter, widget)
+        elif element == CE.CE_MenuEmptyArea:
+            pass
+        else:
+            return False
+        return True
+
+    @staticmethod
+    def _splitter_grip(option, painter):
+        """A short bar across the middle of the handle, in the accent while hovered or dragged."""
+        r = option.rect
+        state = option.state
+        active = state & State.State_Enabled and state & (State.State_MouseOver | State.State_Sunken)
+        # A horizontal splitter puts its panes side by side: the bar stands upright.
+        if state & State.State_Horizontal:
+            length = min(32, r.height())
+            grip = QRect(r.center().x(), r.center().y() - length // 2, 2, length)
+        else:
+            length = min(32, r.width())
+            grip = QRect(r.center().x() - length // 2, r.center().y(), length, 2)
+        _box(painter, grip, 1, color('accent' if active else 'edge'))
+
+    def _thin_progress(self, option, painter, widget):
+        """The thin bar shown without a percentage: a track and an accent fill."""
+        r = option.rect
+        _box(painter, r, 2, color('track'))
+        if option.maximum == option.minimum:
+            # Busy: a piece of fill runs along the track.
+            if isinstance(widget, QProgressBar):
+                self._busy[id(widget)] = widget
+                if not self._busy_timer.isActive():
+                    self._busy_timer.start()
+            size = max(r.width() * 3 // 10, 8)
+            step = int(time.monotonic() * r.width() * 0.8) % (r.width() + size)
+            chunk = QRect(r.left() + step - size, r.top(), size, r.height())
+            painter.save()
+            painter.setClipRect(r)
+            _box(painter, chunk, 2, color('accent'))
+            painter.restore()
+            return
+        done = (option.progress - option.minimum) / (option.maximum - option.minimum)
+        width = round(r.width() * min(max(done, 0.0), 1.0))
+        if width > 0:
+            chunk = QRect(r.left(), r.top(), width, r.height())
+            if option.invertedAppearance:
+                chunk.moveRight(r.right())
+            _box(painter, chunk, 2, color('accent'))
+
+    def _menu_bar(self, element, option, painter, widget):
+        titlebar = widget is not None and bool(widget.property('titlebar'))
+        r = option.rect
+        if not titlebar:
+            painter.fillRect(r, color('window'))
+            if widget is not None and not _organic:
+                _line(painter, r.left(), widget.height() - 1, r.width(), 1, 'rule')
+        if element == CE.CE_MenuBarEmptyArea:
+            return
+        state = option.state
+        palette = option.palette
+        if _organic and state & State.State_Enabled and state & State.State_Sunken:
+            # The open menu's title matches its highlighted items.
+            _box(painter, r, _radius(r, 4, 11), color('selected'))
+            palette = QPalette(palette)
+            _set_ink(palette, QPalette.ColorRole.WindowText, 'selected_ink')
+        elif state & State.State_Enabled and state & (State.State_Selected | State.State_Sunken):
+            _box(painter, r, _radius(r, 4, 11), color('tint'))
+        flags = (Qt.AlignmentFlag.AlignCenter.value | Qt.TextFlag.TextShowMnemonic.value
+                 | Qt.TextFlag.TextDontClip.value | Qt.TextFlag.TextSingleLine.value)
+        if not self.styleHint(QStyle.StyleHint.SH_UnderlineShortcut, option, widget):
+            flags |= Qt.TextFlag.TextHideMnemonic.value
+        self.drawItemText(painter, r, flags, palette, bool(state & State.State_Enabled),
+                          option.text, QPalette.ColorRole.WindowText)
+
+    def _menu_item(self, option, painter, widget):
+        r = option.rect
+        if option.menuItemType == QStyleOptionMenuItem.MenuItemType.Separator:
+            _line(painter, r.left() + 8, r.top() + r.height() // 2, r.width() - 16, 1, 'hairline')
+            return
+        selected = option.state & State.State_Selected and option.state & State.State_Enabled
+        if selected:
+            _box(painter, r, 8 if _organic else 4, color('selected'))
+        # Fusion draws the check, icon, text, shortcut and arrow on the theme's own highlight.
+        state, palette = option.state, option.palette
+        option.state = state & ~State.State_Selected
+        if selected and _organic:
+            option.palette = QPalette(palette)
+            for role in (QPalette.ColorRole.Text, QPalette.ColorRole.WindowText,
+                         QPalette.ColorRole.ButtonText, QPalette.ColorRole.HighlightedText):
+                _set_ink(option.palette, role, 'selected_ink')
+        super().drawControl(CE.CE_MenuItem, option, painter, widget)
+        option.state, option.palette = state, palette
+
+    def drawComplexControl(self, control, option, painter, widget=None):
+        option = _typed(option)
+        if _active and self._draw_complex(control, option, painter, widget):
+            return
+        super().drawComplexControl(control, option, painter, widget)
+
+    def _draw_complex(self, control, option, painter, widget):
+        state = option.state
+        enabled = bool(state & State.State_Enabled)
+        if control == CC.CC_ComboBox:
+            if not (isinstance(option, QStyleOptionComboBox) and option.frame):
+                return False
+            _field(painter, option.rect, color('base'), state & State.State_HasFocus)
+            arrow = self.subControlRect(control, option, SC.SC_ComboBoxArrow, widget)
+            _chevron(painter, arrow, DOWN, color('arrow' if enabled else 'arrow_off'), 10)
+        elif control == CC.CC_SpinBox:
+            if not (isinstance(widget, QSpinBox) and isinstance(option, QStyleOptionSpinBox)):
+                return False
+            if option.frame:
+                _field(painter, option.rect, color('base'), state & State.State_HasFocus)
+            steps = QAbstractSpinBox.StepEnabledFlag
+            for sub, points, step in ((SC.SC_SpinBoxUp, UP, steps.StepUpEnabled),
+                                      (SC.SC_SpinBoxDown, DOWN, steps.StepDownEnabled)):
+                r = self.subControlRect(control, option, sub, widget)
+                live = enabled and bool(option.stepEnabled & step)
+                if live and option.activeSubControls & sub and state & State.State_MouseOver:
+                    _box(painter, r, 3, color('pressed'))
+                _chevron(painter, r, points, color('arrow' if live else 'arrow_off'), 8)
+        elif control == CC.CC_ScrollBar and isinstance(option, QStyleOptionSlider):
+            if option.maximum == option.minimum:
+                return True
+            handle = self.subControlRect(control, option, SC.SC_ScrollBarSlider, widget)
+            over = option.activeSubControls & SC.SC_ScrollBarSlider and state & (State.State_MouseOver | State.State_Sunken)
+            _box(painter, handle, 3, color('scroll_hover' if over else 'scroll'))
+        elif control == CC.CC_ToolButton and isinstance(option, QStyleOptionToolButton):
+            if not state & State.State_AutoRaise:
+                return False
+            # The theme gives every tool button its edge, raised or not.
+            self._button(option, painter, widget)
+            super().drawComplexControl(control, option, painter, widget)
+        else:
+            return False
+        return True
+
+
+def style_names():
+    """The Qt styles on this system, for the Theme setting."""
+    return list(QStyleFactory.keys())
+
+
+def style_key(theme):
+    """The Qt style a theme runs on: Fusion for TVHplayer and Organic, else the style of that name, or None."""
+    if theme in (THEME_TVHPLAYER, THEME_ORGANIC):
+        return 'Fusion'
+    for key in style_names():
+        if key.casefold() == str(theme).casefold():
+            return key
+    return None
+
+
+def _set_palette(app, palette):
+    """The app's palette, for tooltips too.
+
+    Qt gives tooltips a palette of their own, pale yellow with black text,
+    which the app's palette does not change: the TVHplayer theme's dark tip
+    had black text on it.
+    """
+    app.setPalette(palette)
+    QToolTip.setPalette(palette)
+
+
+def _apply_colors(app, dark):
+    global colors
+    colors = compose(dark, _accent, _window, _organic)
+    _set_palette(app, _palette(colors))
+    # Labels and lists hold some of the colors themselves.
+    for widget in app.allWidgets():
+        if widget.property('theme_palette') is not None:
+            _dress(widget)
+        widget.update()
+
+
+def _style_palette(c):
+    """The palette a Qt style paints from: every role, in every state, from the TVHplayer colors.
+
+    A style left with the desktop's palette paints it only in part: on GNOME
+    Breeze and Oxygen got light or dark fills with the wrong shades, and the
+    shade grid lines and borders are drawn in was white.
+    """
+    pal = _palette(c)
+    roles = {
+        QPalette.ColorRole.BrightText: c['accent'],
+        QPalette.ColorRole.LinkVisited: c['link'],
+        QPalette.ColorRole.Light: c['base'],
+        QPalette.ColorRole.Midlight: c['alt'],
+        QPalette.ColorRole.Mid: c['list_edge'],
+        QPalette.ColorRole.Dark: c['muted'],
+        QPalette.ColorRole.Shadow: c['list_edge'],
+    }
+    # Qt 6.6 and later.
+    if hasattr(QPalette.ColorRole, 'Accent'):
+        roles[QPalette.ColorRole.Accent] = c['accent']
+    for role, value in roles.items():
+        pal.setColor(role, _qcolor(value))
+    return pal
+
+
+def _follow_desktop(app, force=False):
+    """Light or dark as the desktop is, or as set; ``force`` applies it again after a change.
+
+    Qt is told the scheme too, which reaches the title bar Qt draws on GNOME.
+    The TVHplayer colors follow, drawn by the TVHplayer theme or given to a
+    Qt style as its palette.
+    """
+    global _scheme
+    if _mode == SCHEME_DARK:
+        scheme = desktop.ColorScheme.Dark
+    elif _mode == SCHEME_LIGHT:
+        scheme = desktop.ColorScheme.Light
+    else:
+        scheme = desktop.system_color_scheme(app)
+    # Unknown after the first answer is the app's own pin read back: no change.
+    if scheme == desktop.ColorScheme.Unknown and _scheme is not None:
+        scheme = _scheme
+    if scheme == _scheme and not force:
+        return
+    _scheme = scheme
+    hints = app.styleHints()
+    # Qt 6.8 and later; older Qt keeps its own idea, and only the TVHplayer colors follow.
+    if hasattr(hints, 'setColorScheme'):
+        desktop.note_pinned(scheme)
+        hints.setColorScheme(scheme)
+    # KDE's styles read their scheme only when made, so the style is made again.
+    if _kde_color_scheme(app, scheme) and not _active and _style is not None:
+        app.setStyle(_style())
+    _recolor(app)
+
+
+def _recolor(app):
+    """Give the app the colors of the scheme in use; a Qt style keeps the default Window color."""
+    global colors
+    dark = _scheme == desktop.ColorScheme.Dark
+    if _active:
+        _apply_colors(app, dark)
+    else:
+        colors = compose(dark, _accent)
+        _set_palette(app, _style_palette(colors))
+
+
+def set_accent(app, key):
+    """Use the Accent color ``key`` from now on, in every theme."""
+    global _accent
+    _accent = normalize_accent(key)
+    if _watching:
+        _recolor(app)
+
+
+def set_window_color(app, key):
+    """Use the Window color ``key`` from now on, in the TVHplayer theme."""
+    global _window
+    _window = normalize_window_color(key)
+    if _watching:
+        _recolor(app)
+
+
+def _kde_color_scheme(app, scheme):
+    """Give KDE's styles the light or dark Breeze color scheme; True if it changed.
+
+    Breeze and Oxygen paint the menu bar and other parts from a KDE color
+    scheme, not from Qt's palette, and outside KDE they find none and stay
+    light. KDE apps choose one with this property. On KDE, following the
+    desktop, the desktop's own scheme stays.
+    """
+    path = None
+    on_kde = 'KDE' in os.environ.get('XDG_CURRENT_DESKTOP', '').upper().split(':')
+    if not (on_kde and _mode == SCHEME_SYSTEM) and scheme != desktop.ColorScheme.Unknown:
+        name = 'BreezeDark' if scheme == desktop.ColorScheme.Dark else 'BreezeLight'
+        found = QStandardPaths.locate(QStandardPaths.StandardLocation.GenericDataLocation,
+                                      f'color-schemes/{name}.colors')
+        path = found or None
+    if app.property('KDE_COLOR_SCHEME_PATH') == path:
+        return False
+    app.setProperty('KDE_COLOR_SCHEME_PATH', path)
+    return True
+
+
+def set_color_scheme(app, mode):
+    """Light or dark as the desktop is (``system``), or always ``light`` or ``dark``, from now on."""
+    global _mode
+    _mode = mode if mode in (SCHEME_LIGHT, SCHEME_DARK) else SCHEME_SYSTEM
+    if not _watching:
+        return
+    hints = app.styleHints()
+    if _mode == SCHEME_SYSTEM and hasattr(hints, 'setColorScheme'):
+        # Unpinned, Qt reports the desktop's scheme again where the portal and GTK say nothing.
+        desktop.note_pinned(desktop.ColorScheme.Unknown)
+        hints.setColorScheme(desktop.ColorScheme.Unknown)
+    _follow_desktop(app, force=True)
+
+
+def apply(app, theme, style_class=ThemeStyle):
+    """Use ``theme``, TVHplayer, Organic or a Qt style's name, at startup or while the app runs.
+
+    Returns False when there is no such style. Qt sends every widget a
+    StyleChange, so widgets that set themselves up for a theme can follow;
+    the main window's panes need polish_main_window() again.
+    """
+    global _active, _organic, _style, _default_font, _watching
+    key = style_key(theme)
+    if key is None:
+        return False
+    if _default_font is None:
+        _default_font = app.font()
+    _active = theme in (THEME_TVHPLAYER, THEME_ORGANIC)
+    _organic = theme == THEME_ORGANIC
+    if _active:
+        app.setFont(_load_fonts() or _default_font)
+    else:
+        # The style's palette is set by _follow_desktop() below.
+        app.setFont(_default_font)
+    _style = lambda: style_class(key)
+    app.setStyle(_style())
+    app.setProperty('tvhplayer_theme', theme)
+    _follow_desktop(app, force=True)
+    if not _watching:
+        _watching = True
+        desktop.watch(app, lambda: _follow_desktop(app))
+    return True

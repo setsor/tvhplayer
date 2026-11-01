@@ -1,14 +1,16 @@
 #!/bin/sh
-# Build the built-in Tvheadend for the deb and rpm packages.
+# Build the built-in Tvheadend for the deb, rpm and AppImage packages.
 #
 #   build-tvheadend.sh fetch SOURCES            download the pinned archives (network)
-#   build-tvheadend.sh build SOURCES WORK [--bundle-dvbcsa]
+#   build-tvheadend.sh build SOURCES WORK [--bundle-dvbcsa] [--relocatable]
 #                                               verify, unpack, and compile (offline)
 #   build-tvheadend.sh install WORK DESTDIR     install into a package root
 #
 # The result lands in /usr/libexec/tvhplayer/tvheadend, with its data in
 # /usr/share/tvhplayer/tvheadend, away from a distro tvheadend package.
 # --bundle-dvbcsa links libdvbcsa statically, for distros that do not ship it.
+# --relocatable builds the web UI and data into the binary, which then runs
+# from any folder: the AppImage mounts at a different path on every start.
 set -eu
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -18,6 +20,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 TVH_ARCHIVE="tvheadend-$TVHEADEND_COMMIT.tar.gz"
 SCAN_ARCHIVE="dtv-scan-tables-$DTV_SCAN_TABLES_COMMIT.tar.gz"
 DVBCSA_ARCHIVE="libdvbcsa-$LIBDVBCSA_VERSION.tar.gz"
+HDHOMERUN_ARCHIVE="libhdhomerun_$LIBHDHOMERUN_VERSION.tgz"
 
 die() {
     echo "build-tvheadend.sh: $*" >&2
@@ -45,20 +48,24 @@ fetch_one() {
 cmd_fetch() {
     sources=$1
     mkdir -p "$sources"
-    fetch_one "https://github.com/tvheadend/tvheadend/archive/$TVHEADEND_COMMIT.tar.gz" \
+    fetch_one "$TVHEADEND_REPO/archive/$TVHEADEND_COMMIT.tar.gz" \
         "$sources/$TVH_ARCHIVE" "$TVHEADEND_SHA256"
     fetch_one "https://github.com/tvheadend/dtv-scan-tables/archive/$DTV_SCAN_TABLES_COMMIT.tar.gz" \
         "$sources/$SCAN_ARCHIVE" "$DTV_SCAN_TABLES_SHA256"
     fetch_one "https://download.videolan.org/pub/videolan/libdvbcsa/$LIBDVBCSA_VERSION/$DVBCSA_ARCHIVE" \
         "$sources/$DVBCSA_ARCHIVE" "$LIBDVBCSA_SHA256"
+    fetch_one "https://download.silicondust.com/hdhomerun/$HDHOMERUN_ARCHIVE" \
+        "$sources/$HDHOMERUN_ARCHIVE" "$LIBHDHOMERUN_SHA256"
 }
 
 cmd_build() {
     sources=$(cd "$1" && pwd)
     work=$2
     bundle_dvbcsa=$3
+    relocatable=$4
     verify "$sources/$TVH_ARCHIVE" "$TVHEADEND_SHA256"
     verify "$sources/$SCAN_ARCHIVE" "$DTV_SCAN_TABLES_SHA256"
+    verify "$sources/$HDHOMERUN_ARCHIVE" "$LIBHDHOMERUN_SHA256"
     rm -rf "$work"
     mkdir -p "$work/tvheadend"
     work=$(cd "$work" && pwd)
@@ -76,20 +83,14 @@ cmd_build() {
         verify "$sources/$DVBCSA_ARCHIVE" "$LIBDVBCSA_SHA256"
         mkdir -p "$work/libdvbcsa"
         tar -xzf "$sources/$DVBCSA_ARCHIVE" -C "$work/libdvbcsa" --strip-components=1
-        # libdvbcsa 1.1.0's GNU config helpers predate aarch64.
-        # Use modern distro-provided autoconf host/build triplet detection.
-        config_tools_found=no
-        for guess in /usr/share/automake-*/config.guess; do
-            [ -f "$guess" ] || continue
-            [ -f "$(dirname "$guess")/config.sub" ] || continue
-            cp "$guess" "$work/libdvbcsa/config.guess"
-            cp "$(dirname "$guess")/config.sub" "$work/libdvbcsa/config.sub"
-            config_tools_found=yes
-            break
-        done
-        [ "$config_tools_found" = yes ] || die "automake config.guess/config.sub not found for libdvbcsa"
         (
             cd "$work/libdvbcsa"
+            # Its config.guess (2009) predates aarch64; use the system's.
+            for f in config.guess config.sub; do
+                for d in /usr/share/misc /usr/lib/rpm/redhat; do
+                    [ -f "$d/$f" ] && { cp "$d/$f" "$f"; break; }
+                done
+            done
             ./configure --prefix="$work/dvbcsa" --disable-shared --enable-static --with-pic
             make -j"$jobs"
             make install
@@ -99,16 +100,29 @@ cmd_build() {
         export CFLAGS LDFLAGS
     fi
 
+    # HDHomeRun tuners: Tvheadend links the static library built here.
+    mkdir -p "$work/libhdhomerun-src"
+    tar -xzf "$sources/$HDHOMERUN_ARCHIVE" -C "$work/libhdhomerun-src" --strip-components=1
+    "$HERE/build-libhdhomerun.sh" "$work/libhdhomerun-src" "$work/hdhomerun"
+    CFLAGS="${CFLAGS:-} -I$work/hdhomerun/include"
+    LDFLAGS="${LDFLAGS:-} -L$work/hdhomerun/lib"
+    export CFLAGS LDFLAGS
+
     cd "$work/tvheadend"
     # configure defaults to "python", which Debian and Fedora do not provide.
     PYTHON=${PYTHON:-python3}
     export PYTHON
+    bundle_flag=--disable-bundle
+    [ "$relocatable" = yes ] && bundle_flag=--enable-bundle
     # shellcheck disable=SC2086 # the flags are a word list
     ./configure \
         --prefix=/usr \
         --bindir=/usr/libexec/tvhplayer \
         --datadir=/usr/share/tvhplayer \
+        "$bundle_flag" \
         $TVHEADEND_CONFIGURE_FLAGS
+    # configure quietly leaves a feature out when its library is missing.
+    grep -q '^CONFIG_HDHOMERUN_CLIENT = yes' .config.mk || die "Tvheadend was configured without HDHomeRun"
     # Distro build flags define _FORTIFY_SOURCE too; Tvheadend's own copy would fail under -Werror.
     make -j"$jobs" CFLAGS_NO_WERROR=yes
 }
@@ -125,7 +139,7 @@ cmd_install() {
         "$destdir/usr/libexec/tvhplayer/tv_meta_tvdb.py"
 }
 
-[ $# -ge 1 ] || die "usage: $0 fetch SOURCES | build SOURCES WORK [--bundle-dvbcsa] | install WORK DESTDIR"
+[ $# -ge 1 ] || die "usage: $0 fetch SOURCES | build SOURCES WORK [--bundle-dvbcsa] [--relocatable] | install WORK DESTDIR"
 command=$1
 shift
 case "$command" in
@@ -134,10 +148,20 @@ case "$command" in
         cmd_fetch "$1"
         ;;
     build)
-        [ $# -ge 2 ] || die "usage: $0 build SOURCES WORK [--bundle-dvbcsa]"
+        [ $# -ge 2 ] || die "usage: $0 build SOURCES WORK [--bundle-dvbcsa] [--relocatable]"
+        sources=$1
+        work=$2
+        shift 2
         bundle=no
-        [ "${3:-}" = --bundle-dvbcsa ] && bundle=yes
-        cmd_build "$1" "$2" "$bundle"
+        relocatable=no
+        for option in "$@"; do
+            case "$option" in
+                --bundle-dvbcsa) bundle=yes ;;
+                --relocatable) relocatable=yes ;;
+                *) die "unknown build option: $option" ;;
+            esac
+        done
+        cmd_build "$sources" "$work" "$bundle" "$relocatable"
         ;;
     install)
         [ $# -eq 2 ] || die "usage: $0 install WORK DESTDIR"

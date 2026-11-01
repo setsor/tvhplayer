@@ -1,4 +1,4 @@
-"""Per-server subtitle language selection, independent of Qt and VLC."""
+"""Per-server subtitle language selection, independent of Qt and libmpv."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def normalize_subtitle_language(value):
 
 
 def subtitle_track_language(label):
-    """Identify one supported language from a VLC subtitle-track description.
+    """Identify one supported language from an MPV subtitle-track description.
 
     Unlike a configured language, a track label can contain text such as
     'DVB Subtitles (rum)'. Ambiguous and unlabelled tracks are not remembered.
@@ -64,9 +64,9 @@ def subtitle_track_language(label):
 
 
 def preferred_subtitle_track(tracks, language):
-    """Match an actual VLC track by language token; do not guess a track ID.
+    """Match an actual MPV track by language token; do not guess a track ID.
 
-    VLC can expose 'Romanian', 'DVB Subtitle [rum]', 'Subtitle (ron)' etc.
+    MPV can expose 'Romanian', 'DVB Subtitle [rum]', 'Subtitle (ron)' etc.
     Match only whole tokens to avoid 'ro' matching 'program' or 'fr' 'frames'.
     """
     language = normalize_subtitle_language(language)

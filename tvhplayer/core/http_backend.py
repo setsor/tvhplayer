@@ -5,23 +5,25 @@ from __future__ import annotations
 import json
 import logging
 from typing import List, Optional
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 
 from .backend import TvhBackend, channel_sort_key
 from .dvr import (
-    GRID_LIMIT,
     HttpRecordingFile,
     autorec_http_conf,
     check_choice,
     dvr_update_http_node,
     entry_uuid,
     file_move_args,
+    grid_rows,
     parse_autorec_entry,
     parse_dvr_config,
     parse_dvr_entry,
     parse_timerec_entry,
     response_id,
+    ticket_url,
     timerec_http_conf,
     MOVE_CATEGORIES,
     PREVREC_ACTIONS,
@@ -63,7 +65,7 @@ from .models import (
     TimerecSpec,
 )
 from .proxy import configure_session
-from .urls import append_profile, http_auth, http_base_url, insert_basic_auth, resolve_reference
+from .urls import append_profile, http_auth, http_base_url, insert_basic_auth, origin_url, resolve_reference
 
 log = logging.getLogger(__name__)
 
@@ -104,11 +106,7 @@ class HttpBackend(TvhBackend):
             raise TvhError(f'Invalid JSON from {path}') from exc
 
     def _grid(self, path, params=None):
-        query = {'limit': GRID_LIMIT}
-        if params:
-            query.update(params)
-        data = self._request('GET', path, params=query)
-        return data.get('entries') or []
+        return grid_rows(lambda query: self._request('GET', path, params=query), params)
 
     def get_channels(self) -> List[Channel]:
         entries = self._grid('api/channel/grid')
@@ -129,6 +127,17 @@ class HttpBackend(TvhBackend):
         if not events:
             raise TvhError(f'EPG event {event_id} was not found')
         return events[0]
+
+    def load_events(self, event_ids: List[int]) -> List[EpgEvent]:
+        ids = [int(event_id) for event_id in event_ids or []]
+        if not ids:
+            return []
+        data = self._request('POST', 'api/epg/events/load', data={'eventId': json.dumps(ids)})
+        return parse_events(_rows(data))
+
+    def list_channel_services(self) -> List[dict]:
+        params = {'list': 'uuid,channel,dvb_servicetype,encrypted,provider', 'hidemode': 'none'}
+        return [row for row in self._grid('api/mpegts/service/grid', params) if isinstance(row, dict)]
 
     def list_related_events(self, event_id: int) -> List[EpgEvent]:
         return self._epg_list('api/epg/events/related', event_id)
@@ -322,9 +331,37 @@ class HttpBackend(TvhBackend):
         return parse_activity(data if isinstance(data, dict) else {})
 
     def stream_url(self, channel: Channel, profile: Optional[str] = None) -> str:
-        url = f'{self._base}/stream/channel/{channel.uuid}'
-        url = insert_basic_auth(url, self.server.username, self.server.password)
+        url = self._ticket_stream_url(channel)
+        if not url:
+            url = f'{self._base}/stream/channel/{channel.uuid}'
+            url = insert_basic_auth(url, self.server.username, self.server.password)
         return append_profile(url, profile)
+
+    def _ticket_stream_url(self, channel: Channel) -> str:
+        """Stream URL carrying a ticket from ``/playlist/ticket``, or '' without one.
+
+        A ticket replaces the login, so digest-only servers work in the player. Only
+        the path and ticket are kept: the playlist also adds ``profile=pass``,
+        which would override the user's default profile.
+        """
+        try:
+            response = self._session.get(
+                f'{self._base}/playlist/ticket/channel/{channel.uuid}',
+                auth=self._auth,
+                timeout=self._timeout,
+            )
+        except requests.RequestException as exc:
+            log.debug('Ticket playlist for %s failed: %s', channel.uuid, exc)
+            return ''
+        if response.status_code != 200:
+            log.debug('Ticket playlist for %s: HTTP %s', channel.uuid, response.status_code)
+            return ''
+        for line in response.text.splitlines():
+            parts = urlsplit(line.strip())
+            ticket = parse_qs(parts.query).get('ticket')
+            if parts.path and ticket:
+                return ticket_url(origin_url(self._base), parts.path, ticket[0])
+        return ''
 
     def image_url(self, reference: str) -> str:
         reference = (reference or '').strip()

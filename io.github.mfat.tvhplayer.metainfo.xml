@@ -7,35 +7,165 @@
   <project_license>GPL-3.0+</project_license>
   <description>
     <p>
-      TVHplayer is a desktop client for Tvheadend, allowing you to watch and record TV channels from your Tvheadend server.
+      TVHplayer is a desktop app for watching and recording live TV. It comes with its own built-in Tvheadend server, and also connects to any Tvheadend server you already run.
     </p>
     <p>Features include:</p>
     <ul>
-      <li>Watch live TV</li>
-      <li>Record TV shows directly on the server</li>
-      <li>Record streams locally to your computer</li>
-      <li>View EPG (Electronic Program Guide) data</li>
-      <li>Monitor server status and signal quality</li>
-      <li>Support for multiple TVHeadend servers</li>
-      <li>Cross-platform: runs on GNU/Linux, Windows and MacOS</li>
+      <li>Watch live TV and radio from an IPTV playlist, a tuner or HDHomerun</li>
+      <li>Built-in Tvheadend server that starts and stops with the app</li>
+      <li>Scan for channels with USB, PCIe, SAT&gt;IP and HDHomeRun tuners</li>
+      <li>Import IPTV channels from M3U playlists, with TV guide data from XMLTV</li>
+      <li>TV guide showing every channel on a timeline, with watch and record from the guide</li>
+      <li>Record on the server or on local computer, and convert recordings for video editing</li>
+      <li>Customizable channel list with logos, now and next, groups and favourites</li>
+      <li>Cast live channels to Chromecast and Cast-enabled televisions</li>
+      <li>Light and dark themes, keyboard shortcuts and screen reader support</li>
+      <li>Support for multiple Tvheadend servers over HTSP or HTTP</li>
     </ul>
-    <p>For more information, and instructions for setting up your own server please visit Tvheadend official website.</p>
   </description>
   <launchable type="desktop-id">io.github.mfat.tvhplayer.desktop</launchable>
   <screenshots>
     <screenshot type="default">
-      <caption>TVHplayer main interface</caption>
-      <image>https://raw.githubusercontent.com/mfat/tvhplayer/0a6a8ae6b722e72ce661aa1694e56ac41c943f3c/Screenshots/Screenshot_3.png</image>
-    </screenshot>
-    <screenshot>
-      <caption>TVHplayer user interface</caption>
-      <image>https://raw.githubusercontent.com/mfat/tvhplayer/0a6a8ae6b722e72ce661aa1694e56ac41c943f3c/Screenshots/Screenshot_2.png</image>
+      <caption>Channel list and player with the built-in server</caption>
+      <image>https://raw.githubusercontent.com/mfat/tvhplayer/f4f04fa1d39b3f92493d779bfe15f2cc2f4d5087/Screenshots/main.png</image>
     </screenshot>
   </screenshots>
   <url type="homepage">https://github.com/mfat/tvhplayer</url>
   <url type="bugtracker">https://github.com/mfat/tvhplayer/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="4.5.0" date="2026-10-30">
+      <description>
+        <ul>
+          <li>Let Set Up Channels choose which server receives the channels.</li>
+          <li>Replace the channel setup form with choice cards.</li>
+          <li>Fix the channel setup dialog layout.</li>
+          <li>Fix the volume slider.</li>
+          <li>Rename Go to Playing Channel to Jump to Now Playing.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.4.1" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Record local footage from the timeshift position</li>
+          <li>Fix pause and resume without a seekable buffer</li>
+          <li>Keep batched live read-ahead from moving the timeshift bar</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.4.0" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Add pause, skip, a seek bar and an opt-in disk timeshift buffer</li>
+          <li>Add previous and next channel controls with Ctrl+PgUp/PgDown</li>
+          <li>Add a Start channels faster setting that shortens mpv's stream probe</li>
+          <li>Replace the blinking REC label with a Recording pill that opens Tasks</li>
+          <li>Show the player bar's recording state for the active channel only</li>
+          <li>Mark the playing channel with a play icon instead of an accent bar, and hide Status by default</li>
+          <li>Put Play first in the player bar and add channel buttons to the tab order</li>
+          <li>Switch to Material Symbols Outlined icons with an outlined play button</li>
+          <li>Make the status bar taller and pad its contents</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.3.0" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Add an Organic look in Settings &gt; Appearance, beside TVHplayer and the Qt styles</li>
+          <li>Add Accent color and Window color settings, with GNOME blue as the default accent</li>
+          <li>Add channel list row sizes and row styles; row dividers are off by default</li>
+          <li>Let channel list columns be resized and remember their widths</li>
+          <li>Hide the channel number column by default</li>
+          <li>Switch the stream profile from the playback menus; playback restarts on the new profile</li>
+          <li>Check for updates and offer a Download button for new releases</li>
+          <li>Show the Cast button in blue while casting</li>
+          <li>Show the volume level on the mute button and use sharper fullscreen and SVG icons</li>
+          <li>Put play, volume and recording shortcuts in the Playback menu</li>
+          <li>Let Tab leave the channel list and other tables</li>
+          <li>Keep player bar controls from taking focus on click</li>
+          <li>Fix the ambiguous Ctrl+- shortcut for shorter channel rows</li>
+          <li>Use macOS keys for quit, fullscreen and help, and in key names in text</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.2.2" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Add File → Manage Servers to add, edit and test servers in one place</li>
+          <li>Check saved remote servers in the background and update their status dots automatically</li>
+          <li>Add an Apply button to the connection dialog</li>
+          <li>Verify the HTTP playback endpoint when testing HTSP servers</li>
+          <li>Normalize server addresses to http:// and keep the right default port for port-less addresses</li>
+          <li>Don't discard the config when a saved server address can't be parsed</li>
+          <li>Add a Live resize setting; panes resize only on release by default before Qt 6.11</li>
+          <li>Update the built-in log viewer live and keep log viewers in front of Server Management</li>
+          <li>Rename File → Playlists to Manage Playlists</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.2.1" date="2026-10-29">
+      <description>
+        <ul>
+          <li>Add provider-aware IPTV imports</li>
+          <li>Let IPTV source settings update credentials without duplicating playlists</li>
+          <li>Fix MPV render shutdown race</li>
+          <li>Fetch fresh Now/Next via lightweight mode=now grid instead of full channel sync</li>
+          <li>Match live EPG grid results by channel UUID, not stale HTSP event IDs</li>
+          <li>Only show No EPG after a successful programme query</li>
+          <li>Do not label locally expired EPG programmes as missing</li>
+          <li>Stop publishing SHA sidecars and the Fedora source RPM</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.2.0" date="2026-10-28">
+      <description>
+        <ul>
+          <li>Play with libmpv only on every platform; VLC is gone</li>
+          <li>Cast live channels to Chromecast from the player bar</li>
+          <li>Ship Chromecast with every packaged build</li>
+          <li>Show channel logos when the TVHeadend server has none</li>
+          <li>Show which Chromecast is playing under the player logo</li>
+          <li>Flatpak title-bar button order follows Plasma without reading the host's kwinrc</li>
+          <li>Use the TVHplayer app bundle name on macOS</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.1" date="2026-10-27">
+      <description>
+        <ul>
+          <li>New AppImage for Linux: one file that runs on Ubuntu 24.04, Debian 13, Fedora 40 and newer</li>
+          <li>New Windows installer, and Windows plays with mpv without VLC or anything else to install</li>
+          <li>macOS builds for Apple Silicon and Intel play with mpv, without VLC or Homebrew</li>
+          <li>Recording to this computer works on Windows and macOS, with no console window on Windows and MP4 files that play after stopping</li>
+          <li>The app starts with mpv on Ubuntu 24.04, where Auto deinterlacing stopped it</li>
+          <li>Without VLC, the app plays with mpv on Linux X11 desktops too</li>
+          <li>The window shows the TVHplayer icon on Windows and macOS, and the app icons are sharp at every size</li>
+          <li>The Flatpak builds on ARM and no longer asks for access to the notification service</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.0.1" date="2026-10-27">
+      <description>
+        <p>The Flatpak starts with the mpv engine again, and runs on the current KDE 6.11 runtime.</p>
+      </description>
+    </release>
+    <release version="4.0" date="2026-10-27">
+      <description>
+        <p>A major release with its own built-in Tvheadend server.</p>
+        <ul>
+          <li>Built-in Tvheadend server that starts and stops with the app</li>
+          <li>Set up channels from USB, PCIe, SAT&gt;IP and HDHomeRun tuners</li>
+          <li>Import IPTV playlists with their TV guide, and choose which channels to add</li>
+          <li>New TV guide window with watch and record from the guide</li>
+          <li>Record to this computer without a save dialog, and convert recordings for editing</li>
+          <li>Native Wayland playback with the mpv engine</li>
+          <li>Themes with a dark mode, and a new About window</li>
+          <li>Channel lists with tens of thousands of channels stay responsive</li>
+          <li>The app says why a channel will not start or stops</li>
+        </ul>
+      </description>
+    </release>
     <release version="3.5.5" date="2025-03-08">
       <description>
         <p>Initial Flatpak release</p>

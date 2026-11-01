@@ -5,13 +5,16 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import shlex
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from typing import List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .processes import no_window_flags
 from .proxy import child_env
 
 log = logging.getLogger(__name__)
@@ -19,6 +22,37 @@ log = logging.getLogger(__name__)
 STALL_LIMIT = 5
 # Keep the tail. A live stream can warn for hours; the pipe only has to stay drained.
 _STDERR_LIMIT = 64 * 1024
+
+
+# File extension -> (label, description, ffmpeg output options). The extension picks the format.
+RECORDING_FORMATS = {
+    'ts': (
+        'MPEG-TS (.ts)',
+        'The stream exactly as the server sends it. Plays everywhere, even if the recording is cut off.',
+        ['-c', 'copy', '-f', 'mpegts'],
+    ),
+    'mp4': (
+        'MP4 (.mp4)',
+        'Video copied, audio converted to AAC. Plays on phones and TVs; a recording cut off by a crash cannot be played.',
+        ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-f', 'mp4'],
+    ),
+    'mkv': (
+        'Matroska (.mkv)',
+        'The stream as the server sends it, in a file that is quick to seek in.',
+        ['-c', 'copy', '-f', 'matroska'],
+    ),
+}
+DEFAULT_FORMAT = 'ts'
+
+
+def recording_format(file_path):
+    ext = os.path.splitext(str(file_path))[1].lower().lstrip('.')
+    return ext if ext in RECORDING_FORMATS else DEFAULT_FORMAT
+
+
+def parse_ffmpeg_options(text):
+    """Split the user's extra ffmpeg output options; raises ValueError when they do not parse."""
+    return shlex.split(text or '')
 
 
 @dataclass
@@ -33,8 +67,11 @@ class RecorderStatus:
     stderr: str = ''
 
 
-def build_ffmpeg_command(stream_url, file_path, username='', password=''):
-    """Return the ffmpeg argv used for a local recording."""
+def build_ffmpeg_command(stream_url, file_path, username='', password='', extra_options=()):
+    """Return the ffmpeg argv used for a local recording.
+
+    ``extra_options`` come after the format's own output options, so they win.
+    """
     cmd = [
         'ffmpeg',
         '-hide_banner',
@@ -43,7 +80,7 @@ def build_ffmpeg_command(stream_url, file_path, username='', password=''):
         '-y',
     ]
     parsed = urlparse(stream_url)
-    if (username or password) and not parsed.username:
+    if (username or password) and not parsed.username and 'ticket' not in parse_qs(parsed.query):
         token = base64.b64encode(f'{username}:{password}'.encode('utf-8')).decode('ascii')
         cmd.extend(['-headers', f'Authorization: Basic {token}\r\n'])
     cmd.extend([
@@ -51,18 +88,23 @@ def build_ffmpeg_command(stream_url, file_path, username='', password=''):
         '-analyzeduration', '10M',
         '-probesize', '10M',
     ])
-    if str(file_path).lower().endswith('.mp4'):
-        cmd.extend([
-            '-c:v', 'copy',
-            '-c:a', 'aac',
-            '-b:a', '192k',
-            '-movflags', '+faststart',
-            '-f', 'mp4',
-        ])
-    else:
-        cmd.extend(['-c', 'copy', '-f', 'mpegts'])
+    cmd.extend(RECORDING_FORMATS[recording_format(file_path)][2])
+    cmd.extend(extra_options)
     cmd.append(str(file_path))
     return cmd
+
+
+def free_path(path, taken=()) -> str:
+    """``path``, or ``name_2.ext``, ``name_3.ext``... when it exists or is in ``taken``.
+
+    ffmpeg runs with ``-y``, so a new recording must never reuse a file name.
+    """
+    stem, ext = os.path.splitext(str(path))
+    candidate, number = str(path), 1
+    while os.path.lexists(candidate) or candidate in taken:
+        number += 1
+        candidate = f'{stem}_{number}{ext}'
+    return candidate
 
 
 def redact_command(cmd: List[str]) -> str:
@@ -89,6 +131,10 @@ def redact_command(cmd: List[str]) -> str:
 
 
 class LocalRecorder:
+    # Windows has no SIGTERM: terminate() kills ffmpeg before it writes the end
+    # of the file, which an MP4 needs. There ffmpeg is asked to quit with 'q'.
+    stops_with_q = sys.platform == 'win32'
+
     def __init__(self, ffmpeg_executable='ffmpeg'):
         self.ffmpeg_executable = ffmpeg_executable
         self.process = None
@@ -104,9 +150,9 @@ class LocalRecorder:
     def is_running(self):
         return self.process is not None and self.process.poll() is None
 
-    def start(self, stream_url, file_path, username='', password=''):
+    def start(self, stream_url, file_path, username='', password='', extra_options=()):
         self.stop()
-        cmd = build_ffmpeg_command(stream_url, file_path, username, password)
+        cmd = build_ffmpeg_command(stream_url, file_path, username, password, extra_options)
         if cmd[0] != self.ffmpeg_executable:
             cmd[0] = self.ffmpeg_executable
         log.info('Starting local recording: %s', redact_command(cmd))
@@ -114,10 +160,11 @@ class LocalRecorder:
         # and a full pipe blocks ffmpeg so SIGTERM never reaches the trailer.
         self.process = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if self.stops_with_q else subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             env=child_env(stream_url),
+            creationflags=no_window_flags(),
         )
         self.file_path = str(file_path)
         self.started_at = time.time()
@@ -164,6 +211,14 @@ class LocalRecorder:
         self._stderr_thread = None
         if process is None:
             return
+        if process.poll() is None and self.stops_with_q and process.stdin is not None:
+            try:
+                process.stdin.write(b'q')
+                process.stdin.flush()
+                process.stdin.close()
+                process.wait(timeout=timeout)
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
         if process.poll() is None:
             process.terminate()
             try:

@@ -48,9 +48,10 @@ The user imports a playlist and it works. The dialogs use no Tvheadend or stream
 
 The playlist's name comes from the file name or the web address's host. A source whose address is already imported to that server is refreshed instead of added twice.
 
-**File → Playlists…** lists the imported playlists with **Refresh** and **Remove**:
+**File → Playlists…** lists the imported playlists with **Refresh**, **Settings**, and **Remove**.
+Settings can replace provider headers or an Xtream Codes password, then refresh the existing source without creating a duplicate:
 - **Remove** asks "Remove the channels from <name>?" and then deletes the network. Its muxes, services, channels, and bouquet go with it, which a test confirmed. The app then deletes the leftover `*** <name>` network tag, which Tvheadend leaves behind, and the group tags the playlist created once no other channel carries them. The source remembers those tag names for this.
-- Playlists imported to the built-in server refresh by themselves when TVHplayer starts. Since the built-in server runs only while the app runs, Tvheadend's own timers are not used.
+- A playlist is read again only when the user refreshes it. The server keeps the channels, and the channel list comes from the server. Refreshing every playlist at each start downloaded a 100 MB playlist and retested its 32768 streams every time.
 
 Plain-language errors:
 
@@ -105,6 +106,7 @@ pipe://FFMPEG -nostdin -hide_banner -loglevel error
 - The service name and provider are set inside the stream, as the kodinerds-iptv playlist does.
 - The reconnect options are added for `http(s)` inputs only. They exist in FFmpeg 4.3 and later; the Flatpak builds 4.4.5.
 - Tvheadend stored a 759-character command intact in a test.
+- On the built-in server, FFMPEG is the app's stand-in, `$XDG_DATA_HOME/tvhplayer/bin/ffmpeg` (`core/ffmpeg_starter.py`, run by the app's Python). Before it sends anything, ffmpeg reads a piece of video from every variant of an HLS master, one after another. Al Jazeera Mubasher's five variants took 17–46 s to its first byte, and the server gives a stream 30 s (`max_timeout`), so the channel failed although VLC played it. The stand-in reads the master, puts the highest-bandwidth variant, the one ffmpeg would have played, in place of the input, and runs ffmpeg: 3–5 s for the same channel. It keeps the master when that variant's sound or picture is a separate rendition, when the list sets cookies, and on any error. Each start the app writes the stand-in again and points the built-in server's existing ffmpeg commands at it, or back at ffmpeg when it cannot be written, as in a frozen build. Other servers keep `/usr/bin/ffmpeg`.
 
 ## What is written to the server
 
@@ -114,13 +116,30 @@ One **IPTV Network** (`iptv_network`, not the automatic one) per playlist source
 | :--- | :--- | :--- |
 | `networkname` | source name | Shown in Tvheadend's UI. |
 | `service_sid` | 1 | Creates the service without scanning. |
-| `scan_create`, `skipinitscan`, `idlescan` | off, on, off | No tuning until someone watches. |
-| `max_streams` | connection limit | Provider limit. |
-| `max_timeout` | 15 | The web UI default; the API default is 0. |
+| `scan_create`, `skipinitscan`, `idlescan` | off, on, off | No idle scans. Tvheadend still scans each new mux once (`mpegts_mux_post_create` queues a mux whose scan result is NONE). |
+| `max_streams` | 6, or the account's limit when lower | For an Xtream Codes playlist (`get.php?username=…&password=…`), `player_api.php` reports `user_info.max_connections`; it is asked on every import and refresh and kept in the source when the server does not answer. Such a server drops the account's oldest stream when it opens one more, so six scans at once on a one-connection account cut each other off and working channels were hidden. At the limit Tvheadend lets a viewer bump a scan (`iptv_input_is_free`), and the bumped scan goes back into the queue (`mpegts_network_scan_mux_cancel` with reinsert). |
+| `max_timeout` | 30 | Seconds a source may stay silent. Some streams take about 20 s to send their first data; at the web UI default of 15, Tvheadend gives up and retries them forever. The API default is 0. |
 | `bouquet` | on | Channels are created and kept in sync by a bouquet. |
 | `epgauto_default` | on | New channels auto-map guide data by `tvg-id`. |
 
 The network's bouquet is enabled with *Map to channels* and the options *Map zero-numbered channels*, *Map radio channels*, and *Map encrypted services*. Without zero-numbered mapping, entries with no channel number are skipped. A test confirmed renames, renumbers, and removals carry through to channels.
+
+### Channels that do not work are hidden
+
+Free playlists carry many dead entries: on iptv-org's Persian list, 147 of 202 streams failed Tvheadend's scan. The app uses that scan as the test of whether a channel works. Settings → *Hide channels that do not work* (on by default, `hide_dead_channels` in the config) turns this off.
+
+- Every channel is shown as soon as it is imported; the check runs afterwards. Disabling a service makes the bouquet delete its channel; enabling it maps the channel again (`bouquet_notify_service_enabled`).
+- The import then polls the muxes and applies each verdict as it lands: scan result *OK* or *OK (partial)* keeps the service enabled, *FAIL* disables it. The dialog shows "Checking channels… n of total" and can be closed; the check goes on and the status bar reports the result.
+- A refresh tests only the muxes whose stream changed: the input address and headers, not the channel name the ffmpeg command also carries. It sets their `scan_state` to PEND, as the web interface's Force Scan does. A mux being rescanned follows its last verdict until the new one arrives, so a channel already known to be dead is hidden as soon as the refresh starts. A dead entry keeps its mux, so it comes back once *Check Channels Now* (`api/mpegts/network/scan`) finds it working.
+- Stopping the import during the check leaves unchecked channels shown.
+- With hiding off, imports and refreshes test nothing and leave visibility alone, and switching it off shows every hidden channel again. Settings → *Check Channels Now* tests every imported playlist and hides failures either way.
+- The guide is loaded before the check.
+- Scans share the network's connection limit (six streams), and a dead stream takes up to `max_timeout` to fail, so a large playlist takes a while to check.
+
+- A refresh switches the playlist's network back on if it was switched off. Tvheadend never scans the muxes of a disabled network, and their channels do not play.
+- A refresh adopts muxes in the network that the saved map lost, one per entry with the same stream address, and deletes the rest. Before `hidemode=none`, every refresh of a disabled network imported the whole playlist again.
+
+The app lists muxes and services with `hidemode=none`. The default leaves out every mux of a disabled network, and services that are unverified or on a disabled mux.
 
 One **mux** per included entry:
 
@@ -165,7 +184,7 @@ It ignores `#KODIPROP`, catch-up attributes, and `tvg-shift`.
 
 - **Encoding:** UTF-8, with an optional BOM, falling back to Latin-1.
 - **Line endings:** CRLF accepted.
-- **Downloads:** go through `proxy.configure_session`, follow redirects, and stop at 50 MB.
+- **Downloads:** go through `proxy.configure_session`, follow redirects, and stop at 256 MB. Films and series episodes on Xtream Codes servers (`/movie/` and `/series/` addresses) are not channels: as a channel a film always starts from the beginning and loops when it ends, and each would be a mux the server scans. They are skipped before their `#EXTINF` is read, and the import message says how many were left out.
 - **Errors:** a file that does not start with `#EXTM3U`, or that has no entries, is reported as *"This file is not an M3U playlist."*
 
 ## Guide data
@@ -209,7 +228,7 @@ Each phase is one commit with its tests.
 1. Parser, planner, and command builder.
 2. Admin client and sync, with the integration test.
 3. Import dialog, for the built-in server and other servers.
-4. Playlists dialog: refresh, remove, and refresh on start. One playlist is updated by one job at a time.
+4. Playlists dialog: refresh and remove. One playlist is updated by one job at a time.
 5. Guide data from `x-tvg-url`.
 
 ## Out of scope

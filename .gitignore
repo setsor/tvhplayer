@@ -19,10 +19,16 @@ __pycache__/
 /macos/.venv*/
 /macos/build/
 /macos/dist/
-/macos/vlc-plugins-staging/
 /macos/*.log
 /macos/TVHplayer-*.spec
 
 # Built-in Tvheadend sources and build output for the deb and rpm packages
 /packaging/tvheadend/sources/
 /packaging/tvheadend/work/
+
+# AppImage build work
+/build/appimage/
+
+# Windows build work
+/windows/build/
+/windows/dist/

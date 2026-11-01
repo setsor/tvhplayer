@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 
 from PyQt6.QtCore import QObject, QProcess, QProcessEnvironment, QTimer, pyqtSignal
@@ -20,8 +21,11 @@ try:
         launch_command,
         pick_port_pair,
         serverinfo_ok,
+        set_padding,
+        set_recordings_dir,
         startup_result,
         stop_leftover_servers,
+        use_ffmpeg_starter,
     )
     from .core.logs import SERVER_LOGGER
     from .core.proxy import child_env
@@ -38,8 +42,11 @@ except ImportError:
         launch_command,
         pick_port_pair,
         serverinfo_ok,
+        set_padding,
+        set_recordings_dir,
         startup_result,
         stop_leftover_servers,
+        use_ffmpeg_starter,
     )
     from core.logs import SERVER_LOGGER
     from core.proxy import child_env
@@ -55,6 +62,9 @@ class BuiltinSupervisor(QObject):
     status_changed = pyqtSignal(str)
     ready = pyqtSignal(int, int)
     failed = pyqtSignal(str)
+    log_output = pyqtSignal(str)
+    # From the readiness check's thread: attempt, answered, defaults that failed.
+    _checked = pyqtSignal(int, bool, object)
 
     def __init__(self, binary, config_dir, http_port=0, htsp_port=0, parent=None):
         super().__init__(parent)
@@ -64,6 +74,10 @@ class BuiltinSupervisor(QObject):
         self.htsp_port = int(htsp_port or 0)
         self.username = ''
         self.password = ''
+        # The app's recordings folder, given to the server on every start; '' leaves its own.
+        self.recordings_dir = ''
+        # Minutes early and late for recordings, given on every start; None leaves the server's own.
+        self.padding = None
         self.startup_timeout = STARTUP_TIMEOUT_SECONDS
         self._deadline = 0.0
         self._status = 'stopped'
@@ -73,6 +87,7 @@ class BuiltinSupervisor(QObject):
         self._partial_line = ''
         self._stop_requested = False
         self._handling_exit = False
+        self._shut_down = False
         self.process = QProcess(self)
         self.process.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.process.readyReadStandardOutput.connect(self._on_output)
@@ -80,6 +95,9 @@ class BuiltinSupervisor(QObject):
         self._poll = QTimer(self)
         self._poll.setInterval(200)
         self._poll.timeout.connect(self._poll_ready)
+        self._check_attempt = 0
+        self._checking = False
+        self._checked.connect(self._on_checked)
 
     @property
     def status(self) -> str:
@@ -92,7 +110,7 @@ class BuiltinSupervisor(QObject):
         return ''.join(self._log)
 
     def start(self) -> None:
-        if self._status in ('starting', 'running'):
+        if self._shut_down or self._status in ('starting', 'running'):
             return
         if self.binary is None:
             self._set_status('failed')
@@ -119,6 +137,7 @@ class BuiltinSupervisor(QObject):
     def stop(self) -> None:
         self._stop_requested = True
         self._poll.stop()
+        self._check_attempt += 1
         if self._child_alive():
             self._handling_exit = True
             self.process.terminate()
@@ -128,14 +147,21 @@ class BuiltinSupervisor(QObject):
             self._handling_exit = False
         self._set_status('stopped')
 
+    def shut_down(self) -> None:
+        """Stop for good. Work still finishing as the app quits cannot start it again."""
+        self._shut_down = True
+        self.stop()
+
     def _start_attempt(self) -> None:
         self._attempts += 1
+        self._check_attempt += 1
+        self._checking = False
         self._lines = LineBuffer()
         self.config_dir.mkdir(parents=True, exist_ok=True)
         program, args = launch_command(command_args(self.binary, self.config_dir, self.http_port, self.htsp_port))
         self._set_status('starting')
         self._deadline = time.monotonic() + self.startup_timeout
-        # VLC's http_proxy is hidden from this process. Tvheadend's own fetches keep it.
+        # Process http_proxy is hidden for the player; Tvheadend's own fetches keep it.
         environment = QProcessEnvironment()
         for key, value in child_env(None).items():
             environment.insert(key, value)
@@ -150,6 +176,7 @@ class BuiltinSupervisor(QObject):
         self._log.append(data)
         if len(self._log) > 400:
             self._log = self._log[-400:]
+        self.log_output.emit(data)
         self._partial_line += data
         *lines, self._partial_line = self._partial_line.split('\n')
         for line in lines:
@@ -175,11 +202,47 @@ class BuiltinSupervisor(QObject):
             return
         if not (self._lines.watch.http_started and self._lines.watch.htsp_started):
             return
-        if not serverinfo_ok(self.http_port, username=self.username, password=self.password):
+        if self._checking:
             return
-        result = startup_result(True, self._lines.watch, True)
+        # A server still starting can take the whole timeout to answer; the
+        # window must not wait for it.
+        self._checking = True
+        threading.Thread(
+            target=self._check_ready,
+            args=(self._check_attempt, self.http_port, self.username, self.password,
+                  self.recordings_dir, self.padding),
+            name='builtin-ready',
+            daemon=True,
+        ).start()
+
+    def _check_ready(self, attempt, http_port, username, password, recordings_dir, padding) -> None:
+        failed = []
+        answered = serverinfo_ok(http_port, username=username, password=password)
+        if answered:
+            failed = apply_builtin_defaults(http_port, username, password, recordings_dir, padding)
+        try:
+            self._checked.emit(attempt, answered, failed)
+        except RuntimeError:
+            # The app closed while the server was being asked.
+            return
+        if answered and not self._stop_requested:
+            # After the window has the server: a big playlist takes a while.
+            changed = use_ffmpeg_starter(http_port, username, password)
+            # A server stopped meanwhile, as when the app quits right after
+            # starting, does not answer; the next start does the work.
+            if changed < 0 and not self._stop_requested:
+                log.warning('Could not update the ffmpeg command of playlist channels')
+            elif changed:
+                log.info('Updated the ffmpeg command of %d playlist channels', changed)
+
+    def _on_checked(self, attempt, answered, failed) -> None:
+        if attempt != self._check_attempt:
+            return
+        self._checking = False
+        if self._status != 'starting' or not answered:
+            return
+        result = startup_result(self._child_alive(), self._lines.watch, True)
         if result == 'ready':
-            failed = apply_builtin_defaults(self.http_port, self.username, self.password)
             if failed:
                 log.warning('Could not apply built-in server defaults: %s', ', '.join(failed))
             self._poll.stop()
@@ -226,6 +289,20 @@ class BuiltinSupervisor(QObject):
             return
         if self._status == 'running':
             self._fail('Built-in Tvheadend stopped.')
+
+    def set_recordings_dir(self, folder: str) -> bool:
+        """Use ``folder`` from the next start, and now when running. False when the server refused it."""
+        self.recordings_dir = folder or ''
+        if not self.recordings_dir or not self.is_running():
+            return True
+        return set_recordings_dir(self.http_port, self.recordings_dir, self.username, self.password)
+
+    def set_padding(self, padding) -> bool:
+        """Use ``(minutes early, minutes late)`` from the next start, and now when running."""
+        self.padding = tuple(padding)
+        if not self.is_running():
+            return True
+        return set_padding(self.http_port, self.padding, self.username, self.password)
 
     def _child_alive(self) -> bool:
         return self.process.state() != QProcess.ProcessState.NotRunning

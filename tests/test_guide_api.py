@@ -21,11 +21,20 @@ class _Session:
     def __init__(self):
         self.calls = []
         self.queue = []
+        self.playlists = []
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
         payload = self.queue.pop(0) if self.queue else {}
         return _Response(payload)
+
+    def get(self, url, **kwargs):
+        self.calls.append(('GET', url, kwargs))
+        response = _Response(status=404)
+        if self.playlists:
+            response.status_code = 200
+            response.text = self.playlists.pop(0)
+        return response
 
     def close(self):
         return None
@@ -61,6 +70,7 @@ def _htsp():
     conn = _Conn()
     backend._conn = conn
     backend._ready = True
+    backend._metadata = True
     return backend, conn
 
 
@@ -184,6 +194,14 @@ def test_http_event_lists_profiles_images_and_status():
 
     url = backend.stream_url(Channel(uuid='chan', name='BBC'), profile='pass')
     assert url == 'http://u:p@127.0.0.1:9981/stream/channel/chan?profile=pass'
+    # A ticket replaces the login. The playlist's own profile=pass is dropped.
+    backend._session.playlists.append(
+        '#EXTM3U\n#EXTINF:-1,BBC\nhttp://elsewhere:9981/tvh/stream/channelid/4?ticket=tk&profile=pass\n'
+    )
+    assert backend.stream_url(Channel(uuid='chan', name='BBC')) == (
+        'http://127.0.0.1:9981/tvh/stream/channelid/4?ticket=tk'
+    )
+    assert backend._session.calls[-1][1] == 'http://127.0.0.1:9981/playlist/ticket/channel/chan'
     assert backend.image_url('imagecache/38') == 'http://u:p@127.0.0.1:9981/imagecache/38'
     assert backend.image_url('https://cdn.example/a.png') == 'https://cdn.example/a.png'
     assert backend.image_url('') == ''
@@ -376,6 +394,13 @@ def test_htsp_tags_guide_profiles_and_images():
     assert backend.stream_url(channel, profile='pass') == (
         'http://u:p@127.0.0.1:9981/stream/channelid/4?profile=pass'
     )
+    # A ticket replaces the login: digest-only servers refuse basic auth.
+    conn.replies['getTicket'] = {'path': '/stream/channelid/4', 'ticket': 'tk'}
+    assert backend.stream_url(channel, profile='pass') == (
+        'http://127.0.0.1:9981/stream/channelid/4?ticket=tk&profile=pass'
+    )
+    assert conn.calls[-1] == ('getTicket', {'channelId': 4})
+    del conn.replies['getTicket']
     conn.webroot = '/tvh'
     assert backend.image_url('imagecache/38') == 'http://u:p@127.0.0.1:9981/tvh/imagecache/38'
     assert backend.image_url('https://cdn.example/a.png') == 'https://cdn.example/a.png'
@@ -389,6 +414,7 @@ def test_htsp_tags_guide_profiles_and_images():
     ))
     rooted._conn = conn
     rooted._ready = True
+    rooted._metadata = True
     assert rooted.image_url('imagecache/38') == 'http://u:p@127.0.0.1:9981/tvh/imagecache/38'
 
     conn.replies['api'] = {'response': {
@@ -402,3 +428,32 @@ def test_htsp_tags_guide_profiles_and_images():
     assert activity.activities['dvr'] == 30
     assert activity.get('subscription_count') == 1
     assert conn.calls[-1][1]['path'] == 'status/activity'
+
+
+def test_htsp_reads_the_channel_list_only_for_calls_that_need_it():
+    backend, conn = _htsp()
+    backend._ready = False
+    backend._metadata = False
+    logins = []
+    conn.connect = lambda: logins.append('connect')
+    conn.hello = lambda: None
+    conn.authenticate = lambda *args, **kwargs: None
+
+    def recv_until(done, timeout=None, on_async=None):
+        on_async({'method': 'channelAdd', 'channelId': 7, 'channelName': 'News', 'channelNumber': 1})
+        on_async({'method': 'initialSyncCompleted'})
+
+    conn.recv_until = recv_until
+    conn.replies['api'] = {'response': {'entries': [], 'total': 0}}
+
+    # Status and stream addresses: a login, no channel list.
+    assert backend.get_subscriptions() == []
+    assert backend.stream_url(Channel(uuid='', name='News', htsp_id=7)).endswith('/stream/channelid/7')
+    assert [method for method, _ in conn.calls] == ['api', 'getTicket']
+    assert logins == ['connect']
+
+    # The channel list asks the same connection for metadata once.
+    assert [channel.name for channel in backend.get_channels()] == ['News']
+    backend.list_channel_tags()
+    assert [method for method, _ in conn.calls] == ['api', 'getTicket', 'enableAsyncMetadata']
+    assert logins == ['connect']

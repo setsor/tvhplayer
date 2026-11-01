@@ -15,30 +15,47 @@ from tvhplayer.core.builtin_server import find_bundled_binary
 from tvhplayer.core.errors import PlaylistError, TvhAuthError, TvhConnectionError
 from tvhplayer.core.playlist import SkippedEntry, parse_playlist, plan_channels
 from tvhplayer.core.playlist_sync import (
+    MAX_STREAMS,
     NETWORK_CONF,
+    NOT_WORKING,
     PlaylistSource,
     SyncResult,
+    check_message,
+    choose_channels,
+    chosen_plans,
     error_message,
     ffmpeg_for_server,
     find_source,
+    health_counts,
     mux_conf,
     remove_playlist,
     result_message,
     server_key,
+    show_all_channels,
     sync_playlist,
     unique_name,
+    wait_for_checks,
 )
 from tvhplayer.core.tvh_admin import TvhAdmin
 from tvhplayer.core.xmltv import load_guide
 
 
 class FakeAdmin:
-    def __init__(self):
+    """New and rescanned muxes stay pending until ``finish_scans``."""
+
+    def __init__(self, dead=(), bouquets=True):
+        self.bouquets = bouquets
+        self.channels = {}
+        self.tags = {}
         self.networks = {}
         self.muxes = {}
+        self.services = {}
         self.saved = []
         self.deleted = []
         self.mapped = []
+        self.scanned = []
+        self.orphans_cleared = []
+        self.dead = set(dead)
         self._next = 0
 
     def _uuid(self):
@@ -56,22 +73,88 @@ class FakeAdmin:
         self.networks[uuid] = conf
         return uuid
 
-    def list_muxes(self, network_uuid):
+    def update_network(self, uuid, conf):
+        self.networks[uuid].update(conf)
+
+    def has_network_bouquets(self, network_uuid):
+        return self.bouquets
+
+    def list_channels(self):
+        return [dict(row, uuid=uuid) for uuid, row in self.channels.items()]
+
+    def create_channel(self, conf):
+        uuid = self._uuid()
+        self.channels[uuid] = conf
+        return uuid
+
+    def list_channel_tags(self):
+        return [{'uuid': uuid, 'name': name} for uuid, name in self.tags.items()]
+
+    def create_channel_tag(self, conf):
+        uuid = self._uuid()
+        self.tags[uuid] = conf['name']
+        return uuid
+
+    def channel_names(self):
+        """Names of the channels on a server without bouquets, from their services."""
+        return sorted(
+            self.muxes[self.services[service]['multiplex_uuid']]['iptv_sname']
+            for row in self.channels.values() for service in row['services']
+            if service in self.services and self.services[service]['multiplex_uuid'] in self.muxes
+        )
+
+    def list_muxes(self, network_uuid, fields=None):
         return [dict(row, uuid=uuid) for uuid, row in self.muxes.items() if row['network_uuid'] == network_uuid]
 
     def create_mux(self, network_uuid, conf):
         uuid = self._uuid()
-        self.muxes[uuid] = dict(conf, network_uuid=network_uuid)
+        self.muxes[uuid] = dict(conf, network_uuid=network_uuid, name=conf['iptv_sname'], scan_state=1, scan_result=0)
+        self.services[f's{uuid}'] = {'multiplex_uuid': uuid, 'enabled': True}
         return uuid
+
+    def list_services(self, mux_uuids, fields=None):
+        return [dict(row, uuid=uuid) for uuid, row in self.services.items() if row['multiplex_uuid'] in mux_uuids]
+
+    def scan_network(self, network_uuid):
+        self.scanned.append(network_uuid)
+        for row in self.muxes.values():
+            if row['network_uuid'] == network_uuid:
+                row['scan_state'] = 1
+
+    def scan_muxes(self, uuids):
+        self.scanned.extend(uuids)
+        for uuid in uuids:
+            self.muxes[uuid]['scan_state'] = 1
+
+    def finish_scans(self):
+        for row in self.muxes.values():
+            if row['scan_state']:
+                row['scan_state'] = 0
+                row['scan_result'] = 2 if row['name'] in self.dead else 1
+
+    def visible(self):
+        """Names whose channel the bouquet would show."""
+        return sorted(
+            self.muxes[row['multiplex_uuid']]['name'] for row in self.services.values()
+            if row['enabled'] and row['multiplex_uuid'] in self.muxes
+        )
 
     def save(self, nodes):
         self.saved.extend(nodes)
         for node in nodes:
-            self.muxes[node['uuid']].update({k: v for k, v in node.items() if k != 'uuid'})
+            target = self.services if node['uuid'] in self.services else self.muxes
+            target[node['uuid']].update({k: v for k, v in node.items() if k != 'uuid'})
 
     def delete(self, uuids):
         self.deleted.extend(uuids)
         for uuid in uuids:
+            if uuid in self.muxes:
+                # Tvheadend 4.2 keeps a channel whose service is deleted.
+                for service in [key for key, row in self.services.items() if row['multiplex_uuid'] == uuid]:
+                    del self.services[service]
+                    for row in self.channels.values():
+                        row['services'] = [other for other in row['services'] if other != service]
+            self.channels.pop(uuid, None)
             self.muxes.pop(uuid, None)
             self.networks.pop(uuid, None)
 
@@ -80,6 +163,10 @@ class FakeAdmin:
 
     def map_network_bouquet(self, network_uuid):
         self.mapped.append(network_uuid)
+
+    def delete_orphan_channels(self, network_uuid):
+        self.orphans_cleared.append(network_uuid)
+        return 0
 
     def delete_network(self, network_uuid):
         self.delete([uuid for uuid, row in self.muxes.items() if row['network_uuid'] == network_uuid])
@@ -138,9 +225,168 @@ def test_unchanged_refresh_writes_nothing():
     admin = FakeAdmin()
     source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
     sync_playlist(admin, source, _plans(FIRST))
+    admin.finish_scans()
+    wait_for_checks(admin, source, SyncResult())
+    admin.saved.clear()
     result = sync_playlist(admin, source, _plans(FIRST))
     assert (result.added, result.updated, result.removed) == (0, 0, 0)
     assert admin.saved == []
+
+
+def test_channels_that_fail_the_scan_are_hidden():
+    admin = FakeAdmin(dead={'B'})
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    # Not tested yet, so shown.
+    assert admin.visible() == ['A', 'B']
+    seen = []
+    wait_for_checks(admin, source, result, progress=lambda *args: seen.append(args), sleep=lambda _s: admin.finish_scans())
+    assert admin.visible() == ['A']
+    assert seen == [(0, 2), (2, 2)]
+    assert (result.working, result.not_working) == (1, ['B'])
+    assert result.skipped[-1] == SkippedEntry('B', NOT_WORKING)
+
+    # A refresh of an unchanged playlist tests nothing.
+    admin.dead = {'A'}
+    result = sync_playlist(admin, source, _plans(FIRST))
+    assert admin.scanned == []
+    assert admin.visible() == ['A']
+
+    # Checking the playlist tests every stream again; B kept its mux and comes back once it works.
+    admin.scan_network(source.network_uuid)
+    wait_for_checks(admin, source, result, sleep=lambda _s: admin.finish_scans())
+    assert admin.visible() == ['B']
+    assert len(admin.muxes) == 2
+
+
+def test_a_refresh_tests_only_streams_whose_address_changed():
+    admin = FakeAdmin(dead={'B'})
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    sync_playlist(admin, source, _plans(FIRST))
+    admin.finish_scans()
+    wait_for_checks(admin, source, SyncResult())
+    assert admin.visible() == ['A']
+    renamed = FIRST.replace(',A\n', ',A renamed\n')
+    assert renamed != FIRST
+    sync_playlist(admin, source, _plans(renamed))
+    assert admin.scanned == []
+    moved = FIRST.replace('http://x/b.ts', 'http://x/b-new.ts')
+    assert moved != FIRST
+    admin.dead = set()
+    result = sync_playlist(admin, source, _plans(moved))
+    assert admin.scanned == [source.muxes['id:b']]
+    wait_for_checks(admin, source, result, sleep=lambda _s: admin.finish_scans())
+    assert admin.visible() == ['A', 'B']
+
+
+def test_a_refresh_hides_channels_already_known_to_be_dead():
+    admin = FakeAdmin(dead={'B'})
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    sync_playlist(admin, source, _plans(FIRST))
+    admin.finish_scans()
+    # An older version left every service on, whatever the scan said.
+    for row in admin.services.values():
+        row['enabled'] = True
+    sync_playlist(admin, source, _plans(FIRST))
+    assert admin.visible() == ['A']
+
+
+def test_stopping_the_check_keeps_unchecked_channels_shown():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    wait_for_checks(admin, source, result, cancelled=lambda: True, sleep=lambda _s: None)
+    assert result.check_stopped
+    assert admin.visible() == ['A', 'B']
+
+
+def test_a_mux_the_server_never_scanned_is_not_counted_as_working():
+    admin = FakeAdmin(dead={'B'})
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    # A disabled mux: Tvheadend declines to scan it, so it stays idle without a verdict.
+    admin.muxes[source.muxes['id:a']]['scan_state'] = 0
+    wait_for_checks(admin, source, result, sleep=lambda _s: admin.finish_scans())
+    assert (result.working, result.not_working, result.untested) == (0, ['B'], 1)
+    assert admin.visible() == ['A']
+
+
+def test_without_checks_a_refresh_tests_nothing_and_hides_nothing():
+    admin = FakeAdmin(dead={'B'})
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    wait_for_checks(admin, source, result, sleep=lambda _s: admin.finish_scans())
+    assert admin.visible() == ['A']
+    sync_playlist(admin, source, _plans(FIRST), check=False)
+    assert admin.scanned == []
+    assert admin.visible() == ['A']
+    assert show_all_channels(admin, source) == 1
+    assert admin.visible() == ['A', 'B']
+    assert show_all_channels(admin, PlaylistSource('Gone', 'http://x/gone.m3u', 'builtin')) == 0
+
+
+def test_without_checks_reconciles_health_after_channels_are_removed():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    sync_playlist(admin, source, _plans(FIRST), check=False)
+    source.health_totals = {'working': 2, 'failed': 0, 'untested': 0, 'checking': 0}
+    sync_playlist(admin, source, _plans(FIRST)[:1], check=False)
+    assert health_counts(source) == {'working': 1, 'failed': 0, 'untested': 0, 'checking': 0}
+
+
+def test_lost_muxes_are_adopted_by_address_and_duplicates_deleted():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    plans = _plans(FIRST)
+    sync_playlist(admin, source, plans)
+    # An older version lost the map and imported the playlist a second time.
+    for plan in plans:
+        admin.create_mux(source.network_uuid, mux_conf(plan))
+    a_uuid = source.muxes['id:a']
+    source.muxes = {'id:b': source.muxes['id:b']}
+    result = sync_playlist(admin, source, plans)
+    assert len(admin.muxes) == 2
+    assert (result.added, result.removed) == (0, 2)
+    assert source.muxes['id:a'] == a_uuid
+    assert set(source.muxes.values()) == set(admin.muxes)
+
+
+def test_refresh_switches_the_network_back_on():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    sync_playlist(admin, source, _plans(FIRST))
+    admin.networks[source.network_uuid]['enabled'] = False
+    admin.networks[source.network_uuid]['max_streams'] = 2
+    sync_playlist(admin, source, _plans(FIRST))
+    assert admin.networks[source.network_uuid]['enabled'] is True
+    assert admin.networks[source.network_uuid]['max_timeout'] == 30
+    assert admin.networks[source.network_uuid]['max_streams'] == MAX_STREAMS
+    assert admin.orphans_cleared == [source.network_uuid]
+
+
+def test_network_streams_follow_the_account_limit():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/get.php', 'builtin', max_streams=1)
+    sync_playlist(admin, source, _plans(FIRST))
+    assert admin.networks[source.network_uuid]['max_streams'] == 1
+    source.max_streams = 20
+    sync_playlist(admin, source, _plans(FIRST))
+    assert admin.networks[source.network_uuid]['max_streams'] == MAX_STREAMS
+    assert PlaylistSource.from_dict(dict(source.to_dict(), max_streams='2')).max_streams == 2
+    assert PlaylistSource.from_dict({'max_streams': 'x'}).max_streams == 0
+
+
+def test_stream_health_is_saved_per_channel():
+    admin = FakeAdmin(dead={'B'})
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    assert health_counts(source) == {'working': 0, 'failed': 0, 'untested': 0, 'checking': 2}
+    wait_for_checks(admin, source, result, sleep=lambda _seconds: admin.finish_scans())
+    assert health_counts(source) == {'working': 1, 'failed': 1, 'untested': 0, 'checking': 0}
+    assert 'id:a' not in source.health
+    assert source.health['id:b']['status'] == 'failed'
+    assert source.last_checked > 0
+    assert PlaylistSource.from_dict(source.to_dict()).health == source.health
 
 
 def test_server_values_compare_equal_to_planned_values():
@@ -201,6 +447,55 @@ def test_remove_playlist_deletes_network():
     assert admin.tags_deleted == ['News']
     assert source.network_uuid == ''
     assert source.tags == []
+
+
+GROUPED = (
+    '#EXTM3U\n'
+    '#EXTINF:-1 tvg-id="a" group-title="News",A\nhttp://x/a.ts\n'
+    '#EXTINF:-1 tvg-id="b" group-title="news;Sport",B\nhttp://x/b.ts\n'
+)
+
+
+def test_without_bouquets_the_app_makes_the_channels():
+    admin = FakeAdmin(bouquets=False)
+    admin.tags['t0'] = 'Sport'
+    source = PlaylistSource('List', 'http://x/list.m3u', 'local')
+    sync_playlist(admin, source, _plans(GROUPED))
+    assert admin.mapped == []
+    assert admin.channel_names() == ['A', 'B']
+    # Channels take name and number from their service, and tags match by name without regard to case.
+    assert all(set(row) == {'enabled', 'services', 'tags'} for row in admin.channels.values())
+    assert sorted(admin.tags.values()) == ['News', 'Sport']
+    news = next(uuid for uuid, name in admin.tags.items() if name == 'News')
+    assert sorted(row['tags'] for row in admin.channels.values()) == [[news], [news, 't0']]
+
+    # A refresh makes no second channel.
+    sync_playlist(admin, source, _plans(GROUPED))
+    assert len(admin.channels) == 2
+
+
+def test_without_bouquets_hidden_channels_are_deleted_and_come_back():
+    admin = FakeAdmin(dead={'B'}, bouquets=False)
+    source = PlaylistSource('List', 'http://x/list.m3u', 'local')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    wait_for_checks(admin, source, result, sleep=lambda _s: admin.finish_scans())
+    assert admin.channel_names() == ['A']
+    assert show_all_channels(admin, source) == 1
+    assert admin.channel_names() == ['A', 'B']
+
+
+def test_without_bouquets_removed_streams_take_their_channels():
+    admin = FakeAdmin(bouquets=False)
+    source = PlaylistSource('List', 'http://x/list.m3u', 'local')
+    sync_playlist(admin, source, _plans(FIRST))
+    admin.channels['mine'] = {'services': [], 'tags': []}
+    second = '#EXTM3U\n#EXTINF:-1 tvg-id="a",A\nhttp://x/a.ts\n'
+    sync_playlist(admin, source, _plans(second))
+    assert admin.channel_names() == ['A']
+    # A channel the user made without a service is not the playlist's.
+    assert set(admin.channels) == {next(iter(admin.channels)), 'mine'} and len(admin.channels) == 2
+    remove_playlist(admin, source)
+    assert list(admin.channels) == ['mine']
 
 
 def test_source_round_trips_and_names_its_server():
@@ -307,20 +602,27 @@ def _first_bytes(port, channel_uuid, size=188 * 200):
 
 
 @pytest.mark.skipif(not (FFMPEG and TVHEADEND), reason='needs ffmpeg and a Tvheadend build')
-def test_import_plays_refreshes_and_removes(tvheadend, media):
+def test_import_plays_refreshes_and_removes(tvheadend, media, monkeypatch):
     port = tvheadend
+    # The server ends the test of a working stream only when its tables are all in,
+    # and ffmpeg's lack a few (CAT, NIT, TDT): each waited the full 30 s. The
+    # streams here are local and answer at once.
+    monkeypatch.setitem(NETWORK_CONF, 'max_timeout', 5)
     text = (
         '#EXTM3U\n'
         f'#EXTINF:-1 tvg-id="a" tvg-chno="7" group-title="News",Pattern\n{media}/a.ts\n'
         '#EXTINF:-1 tvg-chno="8",Tone\n'
         f'pipe://{FFMPEG} -re -f lavfi -i sine -f lavfi -i testsrc -c:v mpeg2video -c:a mp2 -f mpegts pipe:1\n'
+        f'#EXTINF:-1 tvg-chno="9",Gone\n{media}/missing.ts\n'
     )
     plans, skipped = plan_channels(parse_playlist(text), FFMPEG, 'Test', allow_commands=True)
     assert skipped == []
     source = PlaylistSource('Test', 'test.m3u', 'builtin')
     with TvhAdmin({'url': f'http://127.0.0.1:{port}'}) as admin:
         result = sync_playlist(admin, source, plans)
-        assert result.added == 2
+        assert result.added == 3
+        wait_for_checks(admin, source, result, sleep=time.sleep)
+        assert (result.working, result.not_working, result.check_stopped) == (2, ['Gone'], False)
 
         channels = _wait(lambda: len(_channels(port)) == 2 and _channels(port))
         server = {'url': f'http://127.0.0.1:{port}', 'builtin': True}
@@ -334,13 +636,25 @@ def test_import_plays_refreshes_and_removes(tvheadend, media):
         data = _first_bytes(port, channels['Tone']['uuid'])
         assert len(data) == 188 * 200 and data[0] == 0x47
 
+        # A switched-off network hides its muxes from the default grid and is never scanned.
+        admin.save([{'uuid': source.network_uuid, 'enabled': False}])
+        source.muxes = {}
+        result = sync_playlist(admin, source, plans)
+        assert (result.added, result.removed) == (0, 0)
+        assert _api(port, 'mpegts/mux/grid?limit=100')['total'] == 3
+        wait_for_checks(admin, source, result)
+        assert (result.working, result.not_working) == (2, ['Gone'])
+        assert sorted(_channels(port)) == ['Pattern', 'Tone']
+
         text = (
             '#EXTM3U\n'
             f'#EXTINF:-1 tvg-id="a" tvg-chno="7",Pattern renamed\n{media}/a2.ts\n'
         )
         plans, _skipped = plan_channels(parse_playlist(text), FFMPEG, 'Test')
         result = sync_playlist(admin, source, plans)
-        assert (result.added, result.updated, result.removed) == (0, 1, 1)
+        assert (result.added, result.updated, result.removed) == (0, 1, 2)
+        wait_for_checks(admin, source, result)
+        assert (result.working, result.not_working) == (1, [])
         channels = _wait(lambda: list(_channels(port)) == ['Pattern renamed'] and _channels(port))
         assert channels['Pattern renamed']['uuid'] == pattern_uuid
 
@@ -352,9 +666,10 @@ def test_import_plays_refreshes_and_removes(tvheadend, media):
 
 
 def test_ffmpeg_location_per_server():
-    assert ffmpeg_for_server({'builtin': True}, which=lambda _name: '/app/bin/ffmpeg') == '/app/bin/ffmpeg'
+    no_starter = functools.partial(ffmpeg_for_server, starter=lambda _path: None)
+    assert no_starter({'builtin': True}, which=lambda _name: '/app/bin/ffmpeg') == '/app/bin/ffmpeg'
     with pytest.raises(PlaylistError):
-        ffmpeg_for_server({'builtin': True}, which=lambda _name: None)
+        no_starter({'builtin': True}, which=lambda _name: None)
     assert ffmpeg_for_server({'url': 'http://tv.lan:9981'}) == '/usr/bin/ffmpeg'
 
 
@@ -366,14 +681,67 @@ def test_sources_are_found_and_named_per_server():
     assert unique_name(sources, 'ir', 'http://tv.lan') == 'ir'
 
 
+def test_xtream_source_identity_ignores_a_rotated_password():
+    old = PlaylistSource(
+        'Provider',
+        'https://xc.example/get.php?username=viewer&password=old',
+        'builtin',
+        source_type='xc',
+    )
+    sources = [old]
+    assert find_source(
+        sources,
+        'https://xc.example/get.php?username=viewer&password=new',
+        'builtin',
+        'xc',
+    ) is old
+    assert find_source(
+        sources,
+        'https://xc.example/get.php?username=other&password=new',
+        'builtin',
+        'xc',
+    ) is None
+
+
+def test_check_messages_read_naturally():
+    assert check_message('ir', SyncResult(working=3)) == 'Checked the channels from ir: all 3 are working.'
+    assert check_message('ir', SyncResult(working=3, not_working=['b'])) == (
+        'Checked the channels from ir: 3 working. 1 is hidden because it is not working.'
+    )
+    assert check_message('ir', SyncResult(working=1, not_working=['b', 'c'], check_stopped=True)) == (
+        'Stopped checking the channels from ir. 2 are hidden because they are not working.'
+    )
+    assert check_message('ir', SyncResult(working=3, untested=1)) == (
+        'Checked the channels from ir: 3 working. 1 could not be tested and stays in the list.'
+    )
+    assert check_message('ir', SyncResult(working=0, not_working=['b'], untested=2)) == (
+        'Checked the channels from ir: 0 working. 1 is hidden because it is not working.'
+        ' 2 could not be tested and stay in the list.'
+    )
+
+
 def test_result_messages_read_naturally():
-    assert result_message('ir', SyncResult(added=1), True) == 'Added 1 channel from ir.'
+    assert result_message('ir', SyncResult(added=1, working=1), True) == 'Added 1 channel from ir.'
+    assert result_message('ir', SyncResult(added=1, films=244693), True) == (
+        'Added 1 channel from ir. 244,693 films and series episodes were left out '
+        'because TVHplayer imports only TV channels.'
+    )
+    assert result_message('ir', SyncResult(films=2), False) == 'The channels from ir are up to date.'
+    assert result_message('ir', SyncResult(added=3, working=1, not_working=['b', 'c']), True) == (
+        'Added 3 channels from ir. 2 are hidden because they are not working.'
+    )
+    assert result_message('ir', SyncResult(not_working=['b']), False) == (
+        'The channels from ir are up to date. 1 channel is not working right now and is hidden.'
+    )
+    assert result_message('ir', SyncResult(added=2, check_stopped=True), True) == (
+        'Added 2 channels from ir. Channels that were not checked yet stay in the list.'
+    )
     assert result_message('ir', SyncResult(added=3, removed=2), False) == (
         'Updated the channels from ir: 3 added, 2 removed.'
     )
     assert result_message('ir', SyncResult(updated=4), False) == 'The channels from ir are up to date.'
     skipped = [SkippedEntry('a', 'x'), SkippedEntry('b', 'y')]
-    assert result_message('ir', SyncResult(added=5, skipped=skipped), True) == (
+    assert result_message('ir', SyncResult(added=5, working=5, skipped=skipped), True) == (
         'Added 5 channels from ir. 2 entries could not be added.'
     )
     assert result_message('ir', SyncResult(added=2, cancelled=True), True) == (
@@ -387,3 +755,73 @@ def test_error_messages_are_plain():
     assert error_message(PlaylistError('This file is not a TV playlist.'), 'Home') == (
         'This file is not a TV playlist.'
     )
+
+
+CHOOSABLE = (
+    '#EXTM3U\n'
+    '#EXTINF:-1 tvg-id="a" group-title="News",A\nhttp://x/a.ts\n'
+    '#EXTINF:-1 tvg-id="b" group-title="News",B\nhttp://x/b.ts\n'
+    '#EXTINF:-1 tvg-id="c" group-title="Sport;News",C\nhttp://x/c.ts\n'
+    '#EXTINF:-1 tvg-id="d",D\nhttp://x/d.ts\n'
+)
+
+
+def _keys(plans):
+    return [plan.key for plan in plans]
+
+
+def test_keeping_every_group_also_keeps_groups_added_later():
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    plans = _plans(CHOOSABLE)
+    assert _keys(chosen_plans(source, plans)) == ['id:a', 'id:b', 'id:c', 'id:d']
+    choose_channels(source, plans, ['id:a', 'id:c', 'id:d'])
+    assert (source.chosen_groups, source.left_out) == (None, ['id:b'])
+    later = _plans(CHOOSABLE + '#EXTINF:-1 tvg-id="e" group-title="Films",E\nhttp://x/e.ts\n')
+    assert _keys(chosen_plans(source, later)) == ['id:a', 'id:c', 'id:d', 'id:e']
+
+
+def test_leaving_out_a_group_also_leaves_out_groups_added_later():
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    plans = _plans(CHOOSABLE)
+    # C is chosen by its first group, Sport; D has no group.
+    choose_channels(source, plans, ['id:a', 'id:b', 'id:d'])
+    assert (source.chosen_groups, source.left_out) == (['', 'News'], [])
+    later = _plans(
+        CHOOSABLE
+        + '#EXTINF:-1 tvg-id="e" group-title="Films",E\nhttp://x/e.ts\n'
+        + '#EXTINF:-1 tvg-id="f" group-title="News",F\nhttp://x/f.ts\n'
+    )
+    assert _keys(chosen_plans(source, later)) == ['id:a', 'id:b', 'id:d', 'id:f']
+    restored = PlaylistSource.from_dict(source.to_dict())
+    assert restored == source
+    # Playlists saved before channels could be chosen keep every channel.
+    assert PlaylistSource.from_dict({'name': 'Old'}).chosen_groups is None
+
+
+def test_sync_removes_channels_no_longer_chosen():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    plans = _plans(CHOOSABLE)
+    sync_playlist(admin, source, chosen_plans(source, plans))
+    assert len(source.muxes) == 4
+    choose_channels(source, plans, ['id:a'])
+    result = sync_playlist(admin, source, chosen_plans(source, plans))
+    assert result.removed == 3
+    assert list(source.muxes) == ['id:a']
+
+
+def test_admin_grids_read_every_page(monkeypatch):
+    import tvhplayer.core.tvh_admin as tvh_admin
+
+    monkeypatch.setattr(tvh_admin, 'ADMIN_GRID_LIMIT', 2)
+    rows = [{'uuid': str(n), 'network_uuid': 'net'} for n in range(5)]
+    calls = []
+
+    def request(path, data=None, params=None):
+        calls.append((params['start'], params['limit']))
+        return {'total': 5, 'entries': rows[params['start']:params['start'] + params['limit']]}
+
+    with TvhAdmin({'url': 'http://127.0.0.1:9981'}) as admin:
+        monkeypatch.setattr(admin, '_request', request)
+        assert [row['uuid'] for row in admin.list_muxes('net')] == ['0', '1', '2', '3', '4']
+    assert calls == [(0, 2), (2, 2), (4, 2)]

@@ -15,13 +15,19 @@ import os
 import random
 import re
 import secrets
+import shutil
 import signal
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
+
+from .ffmpeg_starter import install_starter, starter_path
+from .playlist_sync import retarget_commands
+from .tvh_admin import ADMIN_GRID_LIMIT, SAVE_BATCH
 
 BUILTIN_NAME = 'Built-in Server'
 STANDARD_HTTP_PORT = 9981
@@ -373,15 +379,62 @@ def _post(http_port: int, path: str, form: dict, username='', password='', timeo
         return False
 
 
-def apply_builtin_defaults(http_port: int, username='', password='') -> list[str]:
+def _post_json(http_port: int, path: str, form: dict, username='', password='', timeout: float = 2.0):
+    url = f'http://127.0.0.1:{int(http_port)}/{path}'
+    body = urllib.parse.urlencode(form).encode()
+    try:
+        with _direct_opener(url, username, password).open(url, data=body, timeout=timeout) as response:
+            return json.loads(response.read().decode('utf-8'))
+    except (OSError, urllib.error.URLError, ValueError):
+        return None
+
+
+def set_recording_profile(http_port: int, changes: dict, username='', password='') -> bool:
+    """Change fields of the default recording profile. Other profiles keep their own."""
+    grid = _post_json(http_port, 'api/dvr/config/grid', {'limit': '100'}, username, password)
+    if not isinstance(grid, dict):
+        return False
+    default = next((row for row in grid.get('entries') or [] if not row.get('name')), None)
+    if default is None or not default.get('uuid'):
+        return False
+    changed = {key: value for key, value in changes.items() if default.get(key) != value}
+    if not changed:
+        return True
+    node = json.dumps(dict(changed, uuid=default['uuid']))
+    return _post(http_port, 'api/idnode/save', {'node': node}, username, password)
+
+
+def set_recordings_dir(http_port: int, folder: str, username='', password='') -> bool:
+    """Point the default recording profile at ``folder``."""
+    return set_recording_profile(http_port, {'storage': folder}, username, password)
+
+
+def padding_changes(padding) -> dict:
+    """Profile fields for ``(minutes early, minutes late)``."""
+    early, late = padding
+    return {'pre-extra-time': max(0, int(early)), 'post-extra-time': max(0, int(late))}
+
+
+def set_padding(http_port: int, padding, username='', password='') -> bool:
+    """Start recordings ``padding[0]`` minutes early and end them ``padding[1]`` minutes late."""
+    return set_recording_profile(http_port, padding_changes(padding), username, password)
+
+
+def apply_builtin_defaults(
+    http_port: int, username='', password='', recordings_dir='', padding=None,
+) -> list[str]:
     """Settings that make the built-in server ready to use; returns those that failed.
 
     * Accept a plain login as well as digest. Tvheadend defaults to digest
-      only, and VLC sends the login in the stream URL as plain (Basic), so
+      only, and the player sends the login in the stream URL as plain (Basic), so
       playback failed with 401. The server listens on 127.0.0.1 only and keeps
       its generated password, so this opens it to no one else.
     * Turn off the first-run setup wizard, so the web interface opens on its
       normal pages. The wizard can still be started from Configuration → General.
+    * Record into the app's recordings folder, when there is one. Left alone,
+      Tvheadend falls back to the folder it was started from when there is no
+      Videos folder, which in the Flatpak is the read-only app folder.
+    * Start and end recordings with the margins from Settings, when given.
 
     Applied on every start, so an older built-in config gets them too.
     """
@@ -390,16 +443,52 @@ def apply_builtin_defaults(http_port: int, username='', password='') -> list[str
         # The handler needs a request body, even an unused one.
         ('setup wizard off', 'api/wizard/cancel', {'cancel': '1'}),
     )
-    return [
+    failed = [
         name for name, path, form in steps
         if not _post(http_port, path, form, username, password)
     ]
+    if recordings_dir and not set_recordings_dir(http_port, recordings_dir, username, password):
+        failed.append('recordings folder')
+    if padding is not None and not set_padding(http_port, padding, username, password):
+        failed.append('recording margins')
+    return failed
 
 
-def ensure_builtin_server(servers, http_port=0, htsp_port=0, username='', password=''):
-    """Return a server list that contains one permanent built-in entry."""
+def use_ffmpeg_starter(
+    http_port: int, username='', password='', which=shutil.which, starter=install_starter,
+) -> int:
+    """Make the server's playlist channels run the app's ffmpeg stand-in.
+
+    Channels imported before it existed run ffmpeg directly. When the stand-in
+    cannot be installed, channels that use it go back to ffmpeg. Returns how
+    many channels changed, or -1 when the server could not be asked.
+    """
+    ffmpeg = which('ffmpeg')
+    if not ffmpeg:
+        return 0
+    stand_in = starter(ffmpeg)
+    target, others = (stand_in, [ffmpeg]) if stand_in else (ffmpeg, [str(starter_path())])
+    form = {'limit': str(ADMIN_GRID_LIMIT), 'hidemode': 'none', 'list': 'uuid,iptv_url'}
+    grid = _post_json(http_port, 'api/mpegts/mux/grid', form, username, password, timeout=30)
+    if not isinstance(grid, dict):
+        return -1
+    changes = retarget_commands(grid.get('entries') or [], target, others)
+    for start in range(0, len(changes), SAVE_BATCH):
+        node = json.dumps(changes[start:start + SAVE_BATCH])
+        if not _post(http_port, 'api/idnode/save', {'node': node}, username, password, timeout=30):
+            return -1
+    return len(changes)
+
+
+def ensure_builtin_server(servers, http_port=0, htsp_port=0, username='', password='', available=None):
+    """Return a server list that contains one permanent built-in entry.
+
+    ``available`` False drops the entry, as when no Tvheadend is packaged.
+    """
     servers = list(servers or [])
-    if not platform_supports_builtin():
+    if available is None:
+        available = platform_supports_builtin()
+    if not available:
         return [server for server in servers if not is_builtin_server(server)]
     url = ''
     htsp = STANDARD_HTSP_PORT
@@ -418,7 +507,7 @@ def ensure_builtin_server(servers, http_port=0, htsp_port=0, username='', passwo
         entry = dict(server)
         entry['name'] = BUILTIN_NAME
         entry['builtin'] = True
-        entry['protocol'] = 'http'
+        entry['protocol'] = 'htsp'
         entry['username'] = username
         entry['password'] = password
         if url:
@@ -431,7 +520,7 @@ def ensure_builtin_server(servers, http_port=0, htsp_port=0, username='', passwo
             'url': url,
             'username': username,
             'password': password,
-            'protocol': 'http',
+            'protocol': 'htsp',
             'htsp_port': htsp,
             'builtin': True,
         })
@@ -486,17 +575,95 @@ def recording_titles(entries) -> list[str]:
     return titles
 
 
-def quit_confirmation(titles, lookup_failed: bool) -> str | None:
-    """Text for the quit dialog, or None when quit can proceed."""
+def upcoming_recordings(entries, now=None) -> list:
+    """Enabled DVR rows still waiting to record, soonest first."""
+    now = time.time() if now is None else now
+    upcoming = []
+    for entry in entries or []:
+        category = entry.category() if hasattr(entry, 'category') else ''
+        if category != 'upcoming':
+            continue
+        raw = getattr(entry, 'raw', None) or {}
+        enabled = raw.get('enabled', True)
+        if isinstance(enabled, str):
+            enabled = enabled.strip().lower() not in ('0', 'false', 'no', 'off', '')
+        if not enabled:
+            continue
+        start = int(getattr(entry, 'start', 0) or 0)
+        stop = start + int(getattr(entry, 'duration', 0) or 0)
+        if max(start, stop) <= now:
+            continue
+        upcoming.append(entry)
+    return sorted(upcoming, key=lambda entry: entry.start or 0)
+
+
+def when_text(start, now=None) -> str:
+    """``today at 21:00``, ``tomorrow at 06:30`` or ``Sat 31 Oct at 20:15``."""
+    now = time.time() if now is None else now
+    moment = datetime.fromtimestamp(start)
+    days = (moment.date() - datetime.fromtimestamp(now).date()).days
+    clock = moment.strftime('%H:%M')
+    if days <= 0:
+        return f'today at {clock}'
+    if days == 1:
+        return f'tomorrow at {clock}'
+    return f"{moment.strftime('%a %d %b')} at {clock}"
+
+
+def quit_confirmation(
+    titles,
+    lookup_failed: bool,
+    upcoming=(),
+    local_recording: str = '',
+    playlist_updates=(),
+    now=None,
+    conversions=(),
+) -> str | None:
+    """Text for the quit dialog, or None when quit can proceed.
+
+    ``titles`` and ``upcoming`` come from the built-in server; ``lookup_failed``
+    says its recording list could not be read. ``local_recording`` names what is
+    being recorded to this computer; ``conversions`` names recordings being
+    converted for editing. ``playlist_updates`` only adds a note when
+    there is already a reason to ask.
+    """
+    reasons = []
+    if local_recording:
+        reasons.append(
+            f'A recording to this computer is in progress: {local_recording}. '
+            'Quitting stops it and the file ends there.'
+        )
+    if conversions:
+        reasons.append(
+            f'Converting for editing: {", ".join(conversions)}. '
+            'Quitting stops the conversion; the original recording is kept.'
+        )
     if titles:
         names = ', '.join(titles)
-        return (
-            f'A recording is currently in progress on the built-in server: {names}. '
-            'Exiting TVHplayer will stop this recording. Are you sure you want to quit?'
+        reasons.append(
+            f'A recording is in progress on the built-in server: {names}. '
+            'Quitting stops this recording.'
         )
-    if lookup_failed:
-        return (
+    if upcoming:
+        first = upcoming[0]
+        title = getattr(first, 'title', '') or 'Untitled'
+        text = f'{title} {when_text(first.start, now)}'
+        if len(upcoming) > 1:
+            text += f' (and {len(upcoming) - 1} more)'
+        reasons.append(
+            f'Recordings are scheduled on the built-in server. Next: {text}. '
+            'They will not be recorded while TVHplayer is closed.'
+        )
+    if lookup_failed and not titles and not upcoming:
+        reasons.append(
             'The built-in server is running and its recording list could not be read. '
-            'Exiting TVHplayer will stop the built-in server. Are you sure you want to quit?'
+            'Quitting stops the built-in server.'
         )
-    return None
+    if not reasons:
+        return None
+    if playlist_updates:
+        reasons.append(
+            f'A playlist update is still running ({", ".join(playlist_updates)}). '
+            'It runs again the next time the built-in server starts.'
+        )
+    return '\n\n'.join(reasons + ['Are you sure you want to quit?'])

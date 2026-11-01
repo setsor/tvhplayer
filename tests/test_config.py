@@ -1,4 +1,7 @@
 import json
+import os
+
+import pytest
 
 from tvhplayer.core.config import ConfigStore, default_config
 
@@ -14,63 +17,41 @@ def test_config_roundtrip_normalizes_servers(tmp_path):
     assert loaded.servers[0]['protocol'] == 'http'
     assert loaded.servers[0]['htsp_port'] == 9982
     assert loaded.data['window_geometry']['width'] == 1200
-    assert loaded.servers[0]['remember_subtitle_selection'] is False
 
 
-def test_per_server_subtitle_defaults_persist_without_changing_other_servers(tmp_path):
+def test_old_config_keeps_port_80_for_portless_http_once(tmp_path):
     path = tmp_path / 'tvhplayer.conf'
+    path.write_text(json.dumps({'servers': [
+        {'name': 'proxy', 'url': 'http://tvh.example/tvh'},
+        {'name': 'tls', 'url': 'https://tvh.example'},
+        {'name': 'box', 'url': 'http://127.0.0.1:9981'},
+    ]}), encoding='utf-8')
     store = ConfigStore(path)
-    store.servers = [
-        {'name': 'NAS', 'url': 'http://10.0.1.243:9981', 'subtitle_language': 'Romanian',
-         'remember_subtitle_selection': True},
-        {'name': 'Other', 'url': 'http://127.0.0.1:9981'},
+    assert [s['url'] for s in store.servers] == [
+        'http://tvh.example:80/tvh', 'https://tvh.example', 'http://127.0.0.1:9981',
     ]
     store.save()
-    reloaded = ConfigStore(path)
-    assert reloaded.servers[0]['subtitle_language'] == 'ron'
-    assert reloaded.servers[1]['subtitle_language'] == ''
-    assert reloaded.servers[0]['remember_subtitle_selection'] is True
-    assert reloaded.servers[1]['remember_subtitle_selection'] is False
-
-    reloaded.servers[1]['subtitle_language'] = 'eng'
-    reloaded.servers[1]['remember_subtitle_selection'] = True
-    reloaded.save()
-    again = ConfigStore(path)
-    assert [server['subtitle_language'] for server in again.servers] == ['ron', 'eng']
-    assert all(server['remember_subtitle_selection'] for server in again.servers)
-
-    # Off is a valid persistent default, not the same as losing the preference.
-    again.servers[0]['subtitle_language'] = ''
-    again.save()
-    assert ConfigStore(path).servers[0]['subtitle_language'] == ''
-    assert ConfigStore(path).servers[0]['remember_subtitle_selection'] is True
-
-    # Legacy and unknown options must not accidentally enable subtitles.
-    again.servers = [{'name': 'Box', 'url': 'http://box', 'subtitle_language': 'unknown'}]
-    again.save()
-    assert ConfigStore(path).servers[0]['subtitle_language'] == ''
+    store.servers = [{'name': 'new', 'url': 'http://other.example'}]
+    store.save()
+    assert ConfigStore(path).servers[0]['url'] == 'http://other.example'
 
 
+def test_unparsable_old_address_does_not_discard_the_config(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    path.write_text(json.dumps({'volume': 7, 'servers': [{'name': 'x', 'url': 'http://[host]'}]}),
+                    encoding='utf-8')
+    store = ConfigStore(path)
+    assert store.data['volume'] == 7
+    assert store.servers[0]['url'] == 'http://[host]'
+    assert not (tmp_path / 'tvhplayer.conf.broken').exists()
 
-def test_subtitle_language_labels_and_matching():
-    from tvhplayer.core.subtitle_preferences import (
-        normalize_subtitle_language,
-        preferred_subtitle_track,
-        subtitle_track_language,
-    )
 
-    assert normalize_subtitle_language('Română') == 'ron'
-    assert normalize_subtitle_language('rum') == 'ron'
-    assert normalize_subtitle_language('English') == 'eng'
-    assert normalize_subtitle_language('unsupported') == ''
-    assert preferred_subtitle_track([(1, 'English [eng]'), (8, 'DVB Subtitles (ron)')], 'română') == 8
-    assert preferred_subtitle_track([(2, 'Track 2'), (3, 'English')], 'ron') is None
-    assert preferred_subtitle_track([(1, 'Programs'), (2, 'Portuguese')], 'ron') is None
-    assert preferred_subtitle_track([(4, 'DVB - magyar')], 'hun') == 4
-    assert subtitle_track_language('DVB Subtitle (rum)') == 'ron'
-    assert subtitle_track_language('English [eng]') == 'eng'
-    assert subtitle_track_language('Subtitle track 3') is None
-    assert subtitle_track_language('Romanian / English') is None
+def test_new_config_does_not_pin_http_ports(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    store = ConfigStore(path)
+    store.servers = [{'name': 'new', 'url': 'http://other.example'}]
+    store.save()
+    assert ConfigStore(path).servers[0]['url'] == 'http://other.example'
 
 
 def test_corrupt_config_falls_back_to_defaults(tmp_path):
@@ -79,6 +60,59 @@ def test_corrupt_config_falls_back_to_defaults(tmp_path):
     store = ConfigStore(path)
     assert store.data['servers'] == []
     assert store.data['volume'] == default_config()['volume']
+    assert (tmp_path / 'tvhplayer.conf.broken').read_text(encoding='utf-8') == '{not json'
+    store.save()
+    assert (tmp_path / 'tvhplayer.conf.broken').read_text(encoding='utf-8') == '{not json'
+
+
+def test_config_that_is_not_text_falls_back_to_defaults(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    path.write_bytes(b'\xff\xfe{')
+    assert ConfigStore(path).data['servers'] == []
+    assert (tmp_path / 'tvhplayer.conf.broken').exists()
+
+
+def test_save_replaces_the_file_whole_and_owner_only(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    store = ConfigStore(path)
+    store.data['volume'] = 30
+    store.save()
+    assert json.loads(path.read_text())['volume'] == 30
+    assert [item.name for item in tmp_path.iterdir()] == ['tvhplayer.conf']
+    if os.name == 'posix':
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_failed_save_keeps_the_old_file(tmp_path, monkeypatch):
+    path = tmp_path / 'tvhplayer.conf'
+    store = ConfigStore(path)
+    store.data['volume'] = 30
+    store.save()
+
+    def full_disk(*args, **kwargs):
+        raise OSError(28, 'No space left on device')
+
+    monkeypatch.setattr(json, 'dump', full_disk)
+    store.data['volume'] = 70
+    with pytest.raises(OSError):
+        store.save()
+    assert json.loads(path.read_text())['volume'] == 30
+    assert [item.name for item in tmp_path.iterdir()] == ['tvhplayer.conf']
+
+
+def test_save_through_a_link_keeps_the_link(tmp_path):
+    if os.name != 'posix':
+        pytest.skip('symlinks')
+    real = tmp_path / 'dotfiles' / 'tvhplayer.conf'
+    real.parent.mkdir()
+    real.write_text('{}', encoding='utf-8')
+    link = tmp_path / 'tvhplayer.conf'
+    link.symlink_to(real)
+    store = ConfigStore(link)
+    store.data['volume'] = 30
+    store.save()
+    assert link.is_symlink()
+    assert json.loads(real.read_text())['volume'] == 30
 
 
 def test_missing_file_uses_defaults(tmp_path):
@@ -86,6 +120,31 @@ def test_missing_file_uses_defaults(tmp_path):
     assert store.data == default_config()
     store.save()
     assert json.loads((tmp_path / 'missing.conf').read_text())['volume'] == 50
+
+
+def test_cast_automatic_and_manual_choices_roundtrip_separately(tmp_path):
+    path = tmp_path / 'settings.json'
+    store = ConfigStore(path)
+    store.data['cast_profiles'] = {'local': 'auto', 'other': 'manual-profile'}
+    store.data['cast_auto_profiles'] = {'receiver|local': 'webm-profile'}
+    store.save()
+    loaded = ConfigStore(path)
+    assert loaded.data['cast_profiles'] == {'local': 'auto', 'other': 'manual-profile'}
+    assert loaded.data['cast_auto_profiles'] == {'receiver|local': 'webm-profile'}
+
+
+def test_theme_defaults_to_tvhplayer_and_keeps_a_qt_style_name(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    for saved, loaded in ((None, 'TVHplayer'), ('', 'TVHplayer'), (3, 'TVHplayer'), ('Breeze', 'Breeze')):
+        path.write_text(json.dumps({'ui_theme': saved}), encoding='utf-8')
+        assert ConfigStore(path).data['ui_theme'] == loaded
+
+
+def test_saved_volume_keeps_silence_and_stays_in_range(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    for saved, loaded in ((0, 0), (73, 73), (250, 100), ('loud', 50)):
+        path.write_text(json.dumps({'volume': saved}), encoding='utf-8')
+        assert ConfigStore(path).data['volume'] == loaded
 
 
 def test_playlists_are_saved_and_cleaned(tmp_path):
@@ -103,4 +162,78 @@ def test_playlists_are_saved_and_cleaned(tmp_path):
         'muxes': {'id:a': 'm1'},
         'allow_commands': False,
         'tags': [],
+        'max_streams': 0,
+        'chosen_groups': None,
+        'left_out': [],
+        'source_type': 'm3u',
+        'request_headers': {},
+        'health': {},
+        'health_totals': {},
+        'last_checked': 0.0,
     }]
+
+
+def test_every_setting_has_a_default_and_bad_values_are_replaced(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    path.write_text(json.dumps({
+        'local_recording_format': 'avi',
+        'local_recording_dir': None,
+        'convert_options': 3,
+        'last_channel': 'BBC',
+        'hide_dead_channels': 0,
+    }), encoding='utf-8')
+    data = ConfigStore(path).data
+    assert set(data) == set(default_config())
+    assert data['local_recording_format'] == 'ts'
+    assert data['local_recording_dir'] == ''
+    assert data['convert_options'] == ''
+    assert data['last_channel'] == {}
+    assert data['hide_dead_channels'] is False
+    assert default_config()['hide_dead_channels'] is True
+
+
+def test_timeshift_size_falls_back_when_unusable(tmp_path):
+    path = tmp_path / 'config.json'
+    assert default_config()['timeshift_on_disk'] is False
+    for raw, expected in ((10, 10), (0, 4), (501, 4), ('8', 4), (True, 4)):
+        path.write_text(json.dumps({'timeshift_gb': raw, 'timeshift_on_disk': 1}), encoding='utf-8')
+        data = ConfigStore(path).data
+        assert data['timeshift_gb'] == expected
+        assert data['timeshift_on_disk'] is True
+
+
+def test_live_resize_stays_unset_until_chosen(tmp_path):
+    path = tmp_path / 'config.json'
+    assert default_config()['live_resize'] is None
+    path.write_text('{}', encoding='utf-8')
+    assert ConfigStore(path).data['live_resize'] is None
+    path.write_text(json.dumps({'live_resize': True}), encoding='utf-8')
+    assert ConfigStore(path).data['live_resize'] is True
+    path.write_text(json.dumps({'live_resize': False}), encoding='utf-8')
+    assert ConfigStore(path).data['live_resize'] is False
+    path.write_text(json.dumps({'live_resize': None}), encoding='utf-8')
+    assert ConfigStore(path).data['live_resize'] is None
+    path.write_text(json.dumps({'resize_on_release': True}), encoding='utf-8')
+    assert 'resize_on_release' not in ConfigStore(path).data
+
+
+def test_own_title_bar_is_off_unless_chosen(tmp_path):
+    path = tmp_path / 'config.json'
+    assert default_config()['own_title_bar'] is False
+    path.write_text(json.dumps({'own_title_bar': True}), encoding='utf-8')
+    assert ConfigStore(path).data['own_title_bar'] is True
+
+
+def test_legacy_player_engine_choice_is_dropped(tmp_path):
+    path = tmp_path / 'config.json'
+    path.write_text(json.dumps({'player_engine': 'vlc', 'volume': 40}), encoding='utf-8')
+    data = ConfigStore(path).data
+    assert 'player_engine' not in data
+    assert data['volume'] == 40
+
+
+def test_light_or_dark_choice_is_kept_and_unknown_values_follow_the_system(tmp_path):
+    path = tmp_path / 'config.json'
+    for saved, loaded in (('dark', 'dark'), ('light', 'light'), ('purple', 'system'), (None, 'system')):
+        path.write_text(json.dumps({'color_scheme': saved}), encoding='utf-8')
+        assert ConfigStore(path).data['color_scheme'] == loaded

@@ -6,11 +6,35 @@ The window owns the video widget. An engine opens a URL in that widget.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, List, NamedTuple, Optional, Tuple
+
+# Deinterlacing: the engine decides from the stream, always on, or off.
+DEINTERLACE_AUTO = 'auto'
+DEINTERLACE_ON = 'on'
+DEINTERLACE_OFF = 'off'
+DEINTERLACE_MODES = (DEINTERLACE_AUTO, DEINTERLACE_ON, DEINTERLACE_OFF)
+# The track id that turns subtitles off.
+NO_TRACK = -1
+
+
+class Timeshift(NamedTuple):
+    """Where the picture is in what the player has buffered of a live stream."""
+    paused: bool
+    # Seconds behind live; 0 when live.
+    behind: float
+    # Seconds buffered in all, from the oldest picture kept to live.
+    span: float
+
+
+class BufferRecordingPoint(NamedTuple):
+    """A position in one particular playback session, captured before the recording dialog."""
+    stream: int
+    position: float
+    behind: float
 
 
 class Player(ABC):
-    """Play one media URL into a native window id."""
+    """Play one media URL into the window's video surface."""
 
     def __init__(self):
         self._on_playing: Optional[Callable[[], None]] = None
@@ -37,7 +61,7 @@ class Player(ABC):
 
     @abstractmethod
     def attach(self, window_id):
-        """Draw video into this native window id."""
+        """Draw video into this native window id, or the video widget for libmpv."""
 
     @abstractmethod
     def play(self, url: str):
@@ -62,6 +86,71 @@ class Player(ABC):
     @abstractmethod
     def set_muted(self, muted: bool):
         """Silence or restore sound."""
+
+    def audio_tracks(self) -> List[Tuple[int, str]]:
+        """``(id, name)`` of each sound track in the stream. The default has none."""
+        return []
+
+    def audio_track(self) -> int:
+        return NO_TRACK
+
+    def set_audio_track(self, track_id: int):
+        """Play this sound track. The default does nothing."""
+
+    def subtitle_tracks(self) -> List[Tuple[int, str]]:
+        """``(id, name)`` of each subtitle track, teletext pages included. The default has none."""
+        return []
+
+    def subtitle_track(self) -> int:
+        return NO_TRACK
+
+    def set_subtitle_track(self, track_id: int):
+        """Show this subtitle track, or none with ``NO_TRACK``. The default does nothing."""
+
+    def deinterlace(self) -> str:
+        return DEINTERLACE_AUTO
+
+    def set_deinterlace(self, mode: str) -> bool:
+        """Choose one of ``DEINTERLACE_MODES``.
+
+        Returns True when the picture already changed, False when it takes
+        effect the next time a stream starts.
+        """
+        return False
+
+    def set_fast_start(self, on: bool):
+        """Probe new streams briefly, for a quicker first picture. Applies from the next stream.
+
+        The default does nothing.
+        """
+
+    def timeshift(self) -> Optional[Timeshift]:
+        """Where the picture is while the stream can pause and go back, else None."""
+        return None
+
+    def set_paused(self, paused: bool):
+        """Pause or resume the stream. The default does nothing."""
+
+    def skip(self, seconds: float) -> bool:
+        """Move within what is buffered, back when negative. False when it cannot."""
+        return False
+
+    def go_live(self):
+        """Resume at the newest buffered picture. The default does nothing."""
+
+    def set_timeshift_store(self, folder: Optional[str], size_bytes: int = 0):
+        """Buffer streams in ``folder`` on disk up to ``size_bytes``, or in memory with None.
+
+        Applies from the next stream. The default does nothing.
+        """
+
+    def buffer_recording_point(self):
+        """Capture a buffered recording start, or None when unavailable."""
+        return None
+
+    def record_buffer(self, file_path, point):
+        """Record from a captured position through live; return a local recorder."""
+        raise RuntimeError('Recording from the timeshift buffer is unavailable')
 
     def show_message(self, text: str, duration_ms: int = 3000):
         """Draw short text over the picture, then let it fade. The default does nothing."""
