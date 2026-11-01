@@ -15,8 +15,8 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
-from PyQt6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QObject, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPalette, QPixmap
+from PyQt6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QObject, QRect, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QIcon, QImage, QPainter, QPalette, QPen, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QHeaderView,
@@ -149,6 +149,54 @@ def programme_text(event, now, with_start=False):
     if event.summary and event.summary != event.subtitle:
         lines.append(event.summary)
     return text, '\n'.join(lines), ', '.join(lines[:3])
+
+
+def _logo_badge_colors(palette):
+    """Neutral background and border based on the palette in use."""
+    base = palette.color(QPalette.ColorRole.Base)
+    ink = palette.color(QPalette.ColorRole.Text)
+
+    def mix(first, second, amount):
+        return QColor(*(
+            round(a * (1 - amount) + b * amount)
+            for a, b in zip(first.getRgb()[:3], second.getRgb()[:3])
+        ))
+
+    # Mid-grey supports both white and dark lettering in transparent logos.
+    neutral = QColor(136, 139, 143)
+    background = mix(base, neutral, 0.60 if base.lightness() < 128 else 0.48)
+    border = mix(background, ink, 0.27)
+    return background, border
+
+
+def _framed_logo(pixmap, background, border):
+    """Draw the badge around the displayed copy, leaving the downloaded logo intact."""
+    frame = QPixmap(LOGO_SIZE)
+    frame.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(frame)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+    painter.setPen(QPen(border, 1))
+    painter.setBrush(background)
+    painter.drawRoundedRect(
+        QRectF(0.5, 0.5, LOGO_SIZE.width() - 1, LOGO_SIZE.height() - 1), 4, 4
+    )
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+    inset = 3
+    area = QSize(LOGO_SIZE.width() - 2 * inset, LOGO_SIZE.height() - 2 * inset)
+    image = pixmap.scaled(
+        area, Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation,
+    )
+    painter.drawPixmap(
+        (LOGO_SIZE.width() - image.width()) // 2,
+        (LOGO_SIZE.height() - image.height()) // 2,
+        image,
+    )
+    painter.end()
+    icon = QIcon()
+    for mode in (QIcon.Mode.Normal, QIcon.Mode.Selected, QIcon.Mode.Active, QIcon.Mode.Disabled):
+        icon.addPixmap(frame, mode)
+    return icon
 
 
 def row_height(density, line_spacing, two_line=False):
@@ -310,9 +358,15 @@ class ChannelTableModel(QAbstractTableModel):
         pixmap = self._pixmaps.get(reference)
         if pixmap is None:
             return self._placeholder
+        # Theme changes update QApplication's palette. Rebuild only badges
+        # whose logo or palette actually changed; loading placeholders stay clear.
+        background, border = _logo_badge_colors(QApplication.palette())
+        key = (pixmap.cacheKey(), background.rgba(), border.rgba())
         cached = self._icons.get(reference)
-        if cached is None or cached[0] != pixmap.cacheKey():
-            cached = self._icons[reference] = (pixmap.cacheKey(), QIcon(pixmap))
+        if cached is None or cached[0] != key:
+            cached = self._icons[reference] = (
+                key, _framed_logo(pixmap, background, border),
+            )
         return cached[1]
 
     # Reading rows
