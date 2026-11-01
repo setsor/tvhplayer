@@ -128,7 +128,6 @@ try:
         ChannelTableModel,
         ChannelTableView,
         LogoLoader,
-        embossed_logo,
         padded_pixmap,
     )
 except ImportError:
@@ -232,7 +231,6 @@ except ImportError:
         ChannelTableModel,
         ChannelTableView,
         LogoLoader,
-        embossed_logo,
         padded_pixmap,
     )
 try:
@@ -2977,16 +2975,12 @@ class IdleSplash(QWidget):
         layout.addStretch(1)
         self.clear_caption()
 
-    def set_channel(self, channel, pixmap=None):
-        """Keep the chosen channel visible when playback has not started."""
+    def set_channel(self, channel):
+        """Show the selected channel name without enlarging its list thumbnail."""
         self._channel_name = channel.name if channel is not None else ''
         if channel is None:
             self.logo.clear()
             self.logo.setStyleSheet(self._default_logo_style)
-        elif pixmap is not None and not pixmap.isNull():
-            self.logo.setStyleSheet("background: transparent;")
-            self.logo.setText("")
-            self.logo.setPixmap(embossed_logo(pixmap, size=QSize(220, 130)))
         else:
             self.logo.clear()
             self.logo.setStyleSheet(
@@ -3006,7 +3000,7 @@ class IdleSplash(QWidget):
         self.caption.hide()
         self.caption.clear()
         if self._channel_name:
-            describe(self, self._channel_name, "Selected channel logo")
+            describe(self, self._channel_name, "Selected channel while playback is idle")
         else:
             describe(self, "Nothing playing", "TVHplayer logo, shown when nothing is playing")
 
@@ -4023,7 +4017,6 @@ class TVHeadendClient(QMainWindow):
         self._playback_channel = None
         self._playback_server = None
         self._splash_channel = None
-        self._splash_logo_ref = ''
         self._show_playing_on_load = False
         self._video_menu = None
         self.cast_manager = CastManager(self, known_profiles=self.config.get('cast_auto_profiles'))
@@ -5078,20 +5071,12 @@ class TVHeadendClient(QMainWindow):
 
     def _select_splash_channel(self, channel):
         self._splash_channel = channel
-        self._splash_logo_ref = self.channel_logo_reference(channel) if channel is not None else ''
         self._refresh_splash_channel()
-        if self._splash_logo_ref and self._splash_logo_ref not in self._logo_pixmaps:
-            # Existing loader performs disk/network work off the Qt thread.
-            self._logo_for(self._splash_logo_ref, None)
-            self._visible_logo_timer.start()
 
     def _refresh_splash_channel(self):
         splash = getattr(self, 'idle_splash', None)
         if splash is not None:
-            splash.set_channel(
-                getattr(self, '_splash_channel', None),
-                self._logo_pixmaps.get(getattr(self, '_splash_logo_ref', '')),
-            )
+            splash.set_channel(getattr(self, '_splash_channel', None))
 
     def _logo_backend(self):
         try:
@@ -5130,8 +5115,6 @@ class TVHeadendClient(QMainWindow):
 
     def _on_logo_loaded(self, reference, image):
         self._logo_pixmaps[reference] = QPixmap.fromImage(image)
-        if reference == getattr(self, '_splash_logo_ref', None):
-            self._refresh_splash_channel()
         # Logos arrive one by one, thousands for a large list; set them on the rows together.
         self._logos_arrived.add(reference)
         if not self._logo_timer.isActive():
