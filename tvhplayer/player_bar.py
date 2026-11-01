@@ -260,6 +260,7 @@ class PlayerBar(QWidget):
         )
         self.record_btn.setToolTip(keys_text("Record (Ctrl+R / Ctrl+Shift+R)"))
         layout.addWidget(self.record_btn)
+        self.record_btn.hide()  # A player without a confirmed channel cannot record from here.
 
         # Shown while recording: a red pill. Stop on the left, the Record menu on the right.
         self.recording_group = QFrame()
@@ -338,6 +339,8 @@ class PlayerBar(QWidget):
             local_icon,
             with_keys("Record on this computer", "Ctrl+Shift+R"),
         )
+        self.record_server_action.setEnabled(False)
+        self.record_local_action.setEnabled(False)
 
         self.stop_menu = QMenu(self)
         self.stop_menu.setAccessibleName("Stop which recording?")
@@ -534,17 +537,18 @@ class PlayerBar(QWidget):
         self.live_btn.setText(f"−{_clock(behind)}" if behind > 0 else "LIVE")
         self.live_btn.setEnabled(behind > 0)
 
-    def set_recording(self, server, local, channel_name='', local_here=None, starting=False):
-        """Keep Stop recording available; hide Record until a new channel starts.
+    def set_recording(self, server, local, channel_name='', local_here=None, playing=False):
+        """Record and Stop belong only to the channel currently playing here.
 
         ``local_here`` identifies a local recording of this channel.
         """
         local_here = bool(local) if local_here is None else bool(local_here)
         self._server, self._local = bool(server), bool(local)
         recording = self._server or self._local
-        self.record_btn.setVisible(not recording and not starting)
-        self.recording_group.setVisible(recording)
-        self.record_more_btn.setEnabled(not starting)
+        self.record_btn.setVisible(bool(playing) and not recording)
+        self.recording_group.setVisible(bool(playing) and recording)
+        self.stop_record_btn.setEnabled(bool(playing) and recording)
+        self.record_more_btn.setEnabled(bool(playing) and recording)
         both = self._server and self._local
         if both:
             self.stop_record_btn.setToolTip("Stop recording… (asks which)")
@@ -569,12 +573,12 @@ class PlayerBar(QWidget):
             self.record_server_action.setText("Record on server\tRecording")
         else:
             self.record_server_action.setText(with_keys("Record on server…", "Ctrl+R"))
-        self.record_server_action.setEnabled(not self._server and not starting)
+        self.record_server_action.setEnabled(bool(playing) and not self._server)
         if local_here:
             self.record_local_action.setText("Record on this computer\tRecording")
         else:
             self.record_local_action.setText(with_keys("Record on this computer", "Ctrl+Shift+R"))
-        self.record_local_action.setEnabled(not local_here and not starting)
+        self.record_local_action.setEnabled(bool(playing) and not local_here)
 
     def set_muted(self, muted):
         self._muted = bool(muted)

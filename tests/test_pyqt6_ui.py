@@ -481,7 +481,8 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
 
         assert window.idle_splash.isVisible()
         assert not window.playback_spinner.isVisible()
-        assert window.record_btn.isVisible()
+        assert not window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
 
         class Backend:
             def stream_url(self, channel, profile=None):
@@ -534,7 +535,8 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert not window.playback_spinner._timer.isActive()
         assert window.playback_spinner.accessibleName() == 'Playback failed'
         assert window.status_label.text() == 'Playback failed'
-        assert window.record_btn.isVisible()
+        assert not window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
 
         window.stop_playback()
         app.processEvents()
@@ -545,39 +547,149 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         app.processEvents()
 
 
-def test_stop_recording_remains_available_while_another_channel_starts(monkeypatch, tmp_path):
+def test_record_controls_follow_the_playing_channel_not_the_selected_row(monkeypatch, tmp_path):
     from tvhplayer.core.models import Channel, DvrEntry
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
     try:
         window.show()
         app.processEvents()
-        channel = Channel(uuid='news', name='News')
-        window.active_channel = lambda: channel
-        recording = DvrEntry(
+        news = Channel(uuid='news', name='News')
+        films = Channel(uuid='films', name='Films')
+        window.channel_model.set_channels([news, films])
+        window.channel_list.setCurrentCell(0, ui.COL_NAME)
+
+        news_recording = DvrEntry(
             uuid='rec', title='News at Six', channel_name='News',
             raw={'channel': 'news'}, start=int(time.time()) - 30,
             duration=900, status='Running', sched_status='recording',
         )
-        window.channel_recordings_changed([recording])
-        assert window.stop_record_btn.isVisible()
-
-        window._show_playback_wait()
-        assert window._awaiting_playback
+        window.channel_recordings_changed([news_recording])
         assert not window.record_btn.isVisible()
-        assert window.stop_record_btn.isVisible()
-        assert window.stop_record_btn.isEnabled()
-        assert not window.record_more_btn.isEnabled()
-        assert not window.controls_bar.record_local_action.isEnabled()
+        assert not window.stop_record_btn.isVisible()
 
-        window._sync_record_controls()
-        assert window.stop_record_btn.isVisible()
+        window._playback_channel = news
+        window._show_playback_wait()
+        assert window.active_channel() is None
+        assert not window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
         window._on_playback_started()
+        assert window.active_channel() is news
         assert window.stop_record_btn.isVisible()
-        assert window.record_more_btn.isEnabled()
+        assert not window.record_btn.isVisible()
+
+        # Selecting Films does not redirect Stop away from the playing News channel.
+        window.channel_list.setCurrentCell(1, ui.COL_NAME)
+        app.processEvents()
+        assert window.active_channel() is news
+        assert window.stop_record_btn.isVisible()
+
+        # During the channel change, neither command is valid in the player.
+        window._playback_channel = films
+        window._show_playback_wait()
+        assert window.active_channel() is None
+        assert not window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
+        window.channel_recordings_changed([news_recording])
+        assert not window.stop_record_btn.isVisible()
+
+        window._on_playback_started()
+        assert window.active_channel() is films
+        assert window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
+        window.channel_list.setCurrentCell(0, ui.COL_NAME)
+        app.processEvents()
+        assert window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
 
         window.stop_playback()
-        assert window.stop_record_btn.isVisible()
+        assert window.active_channel() is None
+        assert not window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
+        assert window._dvr_entries == [news_recording]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_stop_channel_does_not_stop_an_unrelated_single_recording(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel, DvrEntry
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    recordings = [
+        DvrEntry(uuid='one', title='News', channel_name='News', raw={'channel': 'news'},
+                 start=int(time.time()) - 30, duration=600, status='Running',
+                 sched_status='recording')
+    ]
+    stopped, results = [], []
+
+    class Backend:
+        def list_dvr_entries(self):
+            return recordings
+
+        def stop_dvr_entry(self, entry):
+            stopped.append(entry.uuid)
+
+        def close(self):
+            pass
+
+    worker = ui.DvrOperation(
+        {'name': 'tvheadend', 'url': 'http://127.0.0.1:9981'}, 'stop_channel',
+        channel=Channel(uuid='films', name='Films'),
+        backend_factory=lambda _server: Backend(),
+    )
+    worker.finished.connect(lambda result, error: results.append((result, error)))
+    try:
+        worker._run()
+        assert stopped == []
+        assert results[0][1] is None
+        assert results[0][0]['targets'] == []
+
+        # Tasks still stops a specific recording, even with no active playback.
+        worker2 = ui.DvrOperation(
+            {'name': 'tvheadend', 'url': 'http://127.0.0.1:9981'}, 'stop_entry',
+            entry=recordings[0], backend_factory=lambda _server: Backend(),
+        )
+        worker2.finished.connect(lambda result, error: results.append((result, error)))
+        worker2._run()
+        assert stopped == ['one']
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_record_command_uses_playing_channel_not_list_selection(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    channels = [Channel(uuid='news', name='News'), Channel(uuid='films', name='Films')]
+    recorded = []
+
+    class Dialog:
+        def __init__(self, _parent, channel, _event):
+            recorded.append(channel.uuid)
+
+        def exec(self):
+            return ui.QDialog.DialogCode.Rejected
+
+    try:
+        window.channel_model.set_channels(channels)
+        window.channel_list.setCurrentCell(0, ui.COL_NAME)
+        window._programme_on_now = lambda _channel: None
+        monkeypatch.setattr(ui, 'RecordingDurationDialog', Dialog)
+        window.start_recording()
+        assert recorded == []
+
+        window._playback_channel = channels[1]
+        window._protect_video_surface(True)
+        window.start_recording()
+        assert recorded == ['films']
+        window.start_recording(channels[0])  # Explicit channel-list context action.
+        assert recorded == ['films', 'news']
+
+        window._show_playback_wait()
+        window.start_recording()
+        assert recorded == ['films', 'news']
     finally:
         window.close()
         app.processEvents()
@@ -1229,7 +1341,7 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert window.play_btn.statusTip() == ""
         assert window.record_btn.toolTip() == "Record (Ctrl+R / Ctrl+Shift+R)"
         assert window.record_btn.statusTip() == ""
-        assert window.record_btn.isVisible()
+        assert not window.record_btn.isVisible()
         assert not window.stop_record_btn.isVisible()
         assert window.mute_btn.toolTip() == "Mute (M)"
         assert window.volume_slider.toolTip() == "Volume"
@@ -2256,7 +2368,7 @@ def test_local_recording_saves_to_the_settings_folder_and_stops_on_time(monkeypa
         window.start_local_recording(Channel(uuid='c', name='BBC/News'))
         assert Path(started[1]).suffix == '.mp4'
         assert options[1] == ['-b:a', '128k', '-metadata', 'title=Evening news']
-        window.stop_local_recording()
+        window.stop_local_recording(window.local_jobs[-1])
 
         # Options that do not parse stop before anything starts.
         warnings = []
@@ -2308,8 +2420,8 @@ def test_several_channels_record_to_this_computer_at_once(monkeypatch, tmp_path)
     one, two = Channel(uuid='a', name='One'), Channel(uuid='b', name='Two')
     try:
         window.start_local_recording(one)
-        window.active_channel = lambda: two
-        window._sync_record_controls()
+        window._playback_channel = two
+        window._protect_video_surface(True)
         assert window.controls_bar.record_local_action.isEnabled() is True
         window.start_local_recording(two)
         assert started == ['http://tv/a', 'http://tv/b']
@@ -2399,9 +2511,9 @@ def test_flatpak_asks_for_the_recordings_folder_once(monkeypatch, tmp_path):
     try:
         assert window.local_recording_dir() == ''
         window.start_local_recording(Channel(uuid='c', name='One'))
-        window.stop_local_recording()
+        window.stop_local_recording(window.local_jobs[-1])
         window.start_local_recording(Channel(uuid='c', name='One'))
-        window.stop_local_recording()
+        window.stop_local_recording(window.local_jobs[-1])
         assert len(asked) == 1 and len(prompts) == 1
         assert 'from now on' in prompts[0]
         assert window.config_store.data['local_recording_dir'] == str(chosen)
@@ -2438,7 +2550,7 @@ def test_conversions_show_in_tasks_and_follow_a_recording(monkeypatch, tmp_path)
     try:
         window.show()
         app.processEvents()
-        window.stop_local_recording()
+        window.stop_local_recording(window.local_jobs[0])
         assert len(window.conversions) == 1
         job = window.conversions[0]
         assert job.target == str(tmp_path / 'recording_One_edit.mp4')
@@ -3263,6 +3375,8 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
         record_pill_width = bar.record_btn.width()
         assert bar.recording_group.sizeHint().width() <= record_pill_width
         assert window.play_btn.accessibleName() == "Play"
+        assert not window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
 
         played = []
         stopped = []
@@ -3283,7 +3397,8 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
         recorder = FakeRecorder()
         channel = Channel(uuid='c', name='BBC News')
         window.local_jobs = [ui.LocalJob(recorder, channel)]
-        window.active_channel = lambda: channel
+        window._playback_channel = channel
+        window._protect_video_surface(True)
         recording = DvrEntry(
             uuid='r', title='Newsday', channel_name='BBC News', raw={'channel': 'c'},
             start=int(time.time()) - 60, duration=600, status='Running', sched_status='recording',
@@ -3317,15 +3432,16 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
         bar.stop_both_action.trigger()
         assert calls == ['server', 'server', 'local']
 
-        # Another channel: its own Record button, the recordings stay in Tasks.
+        # Another playing channel: its Record button; old DVR stays in Tasks.
         other = Channel(uuid='o', name='Other')
-        window.active_channel = lambda: other
+        window._playback_channel = other
         window._sync_record_controls()
         assert window.record_btn.isVisible()
         assert not window.stop_record_btn.isVisible()
         assert bar.record_server_action.isEnabled() is True
         assert bar.record_local_action.isEnabled() is True
-        window.active_channel = lambda: channel
+        window._playback_channel = channel
+        window._sync_record_controls()
 
         # Only this computer: Stop ends the local recording.
         window.channel_recordings_changed([])

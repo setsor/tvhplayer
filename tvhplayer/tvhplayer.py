@@ -791,7 +791,11 @@ class DvrOperation(QObject):
                 entries = backend.list_dvr_entries()
                 running = [entry for entry in entries if entry.category() == 'recording']
                 result['running_count'] = len(running)
-                targets = recordings_to_stop(entries, self.channel)
+                # Never stop an unrelated recording just because it is the only one.
+                targets = [
+                    entry for entry in running
+                    if self.channel is not None and entry.matches_channel(self.channel)
+                ]
                 for target in targets:
                     print(f"Debug: DVR stop RPC: {target.title!r} on {target.channel_name!r}")
                     backend.stop_dvr_entry(target)
@@ -4349,9 +4353,9 @@ class TVHeadendClient(QMainWindow):
         self.stop_record_btn = bar.stop_record_btn
         self.stop_record_btn.clicked.connect(self.stop_any_recording)
         self.record_more_btn = bar.record_more_btn
-        bar.record_server_action.triggered.connect(self.start_recording)
+        bar.record_server_action.triggered.connect(lambda: self.start_recording())
         bar.record_local_action.triggered.connect(
-            lambda: self.start_local_recording(self.selected_channel())
+            lambda: self.start_local_recording(self.active_channel())
         )
         bar.stop_server_action.triggered.connect(self.stop_recording)
         bar.stop_local_action.triggered.connect(self.stop_local_recording)
@@ -4665,15 +4669,9 @@ class TVHeadendClient(QMainWindow):
         return None
 
     def active_channel(self):
-        """Channel the record controls apply to.
-
-        The highlighted row wins. With no highlight, use the channel that is playing.
-        """
-        row = self.channel_list.currentRow()
-        if row >= 0:
-            channel = self.channel_from_row(row)
-            if channel:
-                return channel
+        """The channel confirmed playing, not the highlighted row in the list."""
+        if not getattr(self, '_playback_active', False) or getattr(self, '_awaiting_playback', False):
+            return None
         return getattr(self, '_playback_channel', None)
 
     def _channels_match(self, left, right):
@@ -5621,13 +5619,14 @@ class TVHeadendClient(QMainWindow):
             return None
         return event
 
-    def start_recording(self):
+    def start_recording(self, channel=None):
         print("Debug: Starting recording")
         try:
-            channel = self.selected_channel()
-            if not channel:
-                print("Debug: No channel selected for recording")
-                self.statusbar.showMessage("Please select a channel to record")
+            # The player controls target the picture, while the channel-list
+            # context menu can explicitly request a different channel.
+            channel = channel if channel is not None else self.active_channel()
+            if channel is None:
+                self.statusbar.showMessage("Play a channel before recording")
                 return
 
             if not self.server_recordings_ready():
@@ -5779,7 +5778,7 @@ class TVHeadendClient(QMainWindow):
             bool(self._server_recordings_for(channel)), local,
             channel.name if channel is not None else '',
             local_here=local,
-            starting=bool(getattr(self, '_awaiting_playback', False)),
+            playing=channel is not None,
         )
 
     def local_recording_running(self):
@@ -5796,8 +5795,10 @@ class TVHeadendClient(QMainWindow):
         ]
 
     def stop_any_recording(self):
-        """Stop recording ends the active channel's recording, and asks only when both kinds run."""
+        """Stop only a recording of the channel confirmed playing."""
         channel = self.active_channel()
+        if channel is None:
+            return
         server = bool(self._server_recordings_for(channel))
         local = bool(self._local_jobs_for(channel))
         if server and local:
@@ -6780,15 +6781,15 @@ class TVHeadendClient(QMainWindow):
         menu.addSeparator()
 
         record_action = menu.addAction(svg_icon(MENU_DOT_SVG, RECORD_RED, 16), with_keys("Record", "Ctrl+R"))
-        record_action.setEnabled(channel is not None)
-        record_action.triggered.connect(self.start_recording)
+        record_action.setEnabled(self.active_channel() is not None)
+        record_action.triggered.connect(lambda: self.start_recording())
 
         local_action = menu.addAction(
             tinted('download.svg'),
             with_keys("Record Locally", "Ctrl+Shift+R"),
         )
-        local_action.setEnabled(channel is not None)
-        local_action.triggered.connect(lambda: self.start_local_recording(channel))
+        local_action.setEnabled(self.active_channel() is not None)
+        local_action.triggered.connect(lambda: self.start_local_recording(self.active_channel()))
 
         epg_action = menu.addAction(tinted('event_note.svg'), "Show EPG")
         epg_action.setEnabled(channel is not None)
@@ -6846,7 +6847,7 @@ class TVHeadendClient(QMainWindow):
             action("Stop Server R&ecording", lambda: self.stop_recording(), "Ctrl+E"),
             action(
                 "Record on This &Computer",
-                lambda: self.start_local_recording(self.selected_channel()),
+                lambda: self.start_local_recording(self.active_channel()),
                 "Ctrl+Shift+R",
             ),
             action("Stop &Local Recording", lambda: self.stop_local_recording(), "Ctrl+Shift+E"),
@@ -7396,8 +7397,10 @@ class TVHeadendClient(QMainWindow):
         self._sync_record_controls()
 
     def stop_recording(self):
-        """Stop the active channel's server recording outside the UI thread."""
-        self._request_dvr_operation('stop_channel', channel=self.active_channel())
+        """Stop the playing channel's server recording, never an unrelated DVR entry."""
+        channel = self.active_channel()
+        if channel is not None:
+            self._request_dvr_operation('stop_channel', channel=channel)
 
     def start_recording_indicator(self):
         """Show the Recording pill in the status bar."""
@@ -7584,13 +7587,14 @@ class TVHeadendClient(QMainWindow):
             QMessageBox.critical(self, "Recording Error", str(e))
 
     def stop_local_recording(self, job=None):
-        """Stop job; without one, the active channel's local recordings, or else all of them."""
+        """Stop an explicit Tasks job or a local recording of the playing channel."""
         if isinstance(job, LocalJob):
             jobs = [job]
         else:
-            jobs = self._local_jobs_for(self.active_channel()) or [
-                item for item in self.local_jobs if item.is_running
-            ]
+            channel = self.active_channel()
+            jobs = self._local_jobs_for(channel) if channel is not None else []
+        if not jobs:
+            return
         try:
             for item in jobs:
                 self._stop_local_job(item)
@@ -8585,7 +8589,7 @@ class TVHeadendClient(QMainWindow):
             play_action = menu.addAction(with_keys("Play", "Enter"))
             play_action.triggered.connect(lambda: self.play_channel_by_data(channel_data))
             record_action = menu.addAction(with_keys("Record", "Ctrl+R"))
-            record_action.triggered.connect(lambda: self.start_recording())
+            record_action.triggered.connect(lambda: self.start_recording(channel_data))
             local_record_action = menu.addAction(with_keys("Record Locally", "Ctrl+Shift+R"))
             local_record_action.triggered.connect(
                 lambda: self.start_local_recording(channel_data))
