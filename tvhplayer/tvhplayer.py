@@ -3139,6 +3139,102 @@ class PlaybackSpinner(QWidget):
         painter.drawText(QRectF(left + dot + gap, top, width + 1, metrics.height()), Qt.AlignmentFlag.AlignLeft, text)
 
 
+class ProgrammeOverlay(QFrame):
+    """Five-second programme details, clear of the subtitle area."""
+
+    DURATION_MS = 5000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("programme_overlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet(
+            "#programme_overlay { background: rgba(12, 15, 20, 210); "
+            "border: 1px solid rgba(255, 255, 255, 32); border-radius: 10px; }"
+            "#programme_overlay QLabel { background: transparent; border: none; color: white; }"
+            "#programme_channel { font-size: 11px; color: #d2dbe7; }"
+            "#programme_title { font-size: 16px; font-weight: 600; }"
+            "#programme_time { font-size: 12px; color: #d2dbe7; }"
+            "#programme_description { font-size: 12px; color: #e4e8ef; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 9, 14, 9)
+        layout.setSpacing(2)
+        self.channel_label = QLabel(self)
+        self.title_label = QLabel(self)
+        self.time_label = QLabel(self)
+        self.description_label = QLabel(self)
+        for label, name in (
+            (self.channel_label, "programme_channel"),
+            (self.title_label, "programme_title"),
+            (self.time_label, "programme_time"),
+            (self.description_label, "programme_description"),
+        ):
+            label.setObjectName(name)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(label)
+        self.description_label.setWordWrap(True)
+        self.description_label.setMaximumHeight(34)
+        self._channel_key = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.dismiss)
+        self.hide()
+
+    def place(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        width = max(1, min(760, parent.width() - 32))
+        height = min(125, max(88, parent.height() // 3))
+        bottom_room = max(58, parent.height() // 6)
+        left = (parent.width() - width) // 2
+        top = max(0, parent.height() - height - bottom_room)
+        self.setGeometry(left, top, width, height)
+
+    def _fill(self, channel, event):
+        self.channel_label.setText(channel.name)
+        self.title_label.setText(event.title if event is not None else "EPG unavailable")
+        times = []
+        if event is not None:
+            if event.start:
+                times.append(datetime.fromtimestamp(event.start).strftime("%H:%M"))
+            if event.stop:
+                times.append(datetime.fromtimestamp(event.stop).strftime("%H:%M"))
+        when = "–".join(times)
+        if event is not None and event.stop > event.start > 0:
+            minutes = max(1, (event.stop - event.start + 59) // 60)
+            when = f"{when} · {minutes} min"
+        self.time_label.setText(when)
+        self.time_label.setVisible(bool(when))
+        description = (event.description or event.summary or event.subtitle or '') if event is not None else ''
+        description = " ".join(description.split())
+        if len(description) > 235:
+            description = description[:234].rstrip() + "…"
+        self.description_label.setText(description)
+        self.description_label.setVisible(bool(description))
+        self.setAccessibleName(f"{channel.name}: {self.title_label.text()}. {when}. {description}")
+
+    def start(self, key, channel, event):
+        self._channel_key = key
+        self._fill(channel, event)
+        self.place()
+        self.show()
+        self.raise_()
+        self._timer.start(self.DURATION_MS)
+
+    def refresh(self, key, channel, event):
+        if self.isVisible() and self._channel_key == key:
+            self._fill(channel, event)
+
+    def dismiss(self):
+        self._timer.stop()
+        self._channel_key = None
+        self.hide()
+
+
 class IconToolButton(QToolButton):
     """A tool button that draws an icon file in its text color, again when the palette changes."""
 
