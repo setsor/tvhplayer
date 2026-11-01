@@ -1,0 +1,46 @@
+name: Check channel splash and transparent embossed logos
+
+on:
+  push:
+    branches:
+      - ci/channel-splash-emboss-20261101
+    paths:
+      - .github/workflows/check-channel-splash-emboss-20261101.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_OPENGL: software
+    steps:
+      - name: Checkout exact UI revision
+        uses: actions/checkout@v7
+        with:
+          ref: cda30d5cc5b352c3be96e4fa549d0d7f33e077c2
+          persist-credentials: false
+      - name: Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install Qt runtime and requirements
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
+          python -m pip install -e . pytest
+          python -m pip check
+      - name: Check emboss, selected channel and playback lifecycle
+        run: |
+          python -m pytest -q tests/test_channel_view.py \
+            -k 'test_embossed_channel_logo_follows_the_active_palette or test_logo_loader_fetches_once_caches_on_disk_and_skips_failures'
+          python -m pytest -q tests/test_pyqt6_ui.py \
+            -k 'test_selected_channel_logo_replaces_idle_splash_and_survives_stop or test_spinner_shows_until_playback_starts or test_player_bar_casts_the_selected_channel_and_routes_audio or test_playback_surface_ignores_transient_stop_and_qt_paints'
+      - name: Compile changed modules
+        run: |
+          python -m py_compile tvhplayer/channel_view.py tvhplayer/tvhplayer.py tests/test_channel_view.py tests/test_pyqt6_ui.py
