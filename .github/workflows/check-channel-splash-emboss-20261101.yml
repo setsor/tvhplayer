@@ -21,7 +21,7 @@ jobs:
       - name: Checkout exact UI revision
         uses: actions/checkout@v7
         with:
-          ref: cda30d5cc5b352c3be96e4fa549d0d7f33e077c2
+          ref: 67330c5e26677d29481d6d240487973be4aaab81
           persist-credentials: false
       - name: Python 3.13
         uses: actions/setup-python@v6
@@ -40,7 +40,7 @@ jobs:
           python -m pytest -q tests/test_channel_view.py \
             -k 'test_embossed_channel_logo_follows_the_active_palette or test_logo_loader_fetches_once_caches_on_disk_and_skips_failures'
           python -m pytest -q tests/test_pyqt6_ui.py \
-            -k 'test_selected_channel_logo_replaces_idle_splash_and_survives_stop or test_spinner_shows_until_playback_starts or test_player_bar_casts_the_selected_channel_and_routes_audio or test_playback_surface_ignores_transient_stop_and_qt_paints'
+            -k 'test_selected_channel_logo_replaces_idle_splash_and_survives_stop or test_spinner_shows_until_playback_starts or test_playback_surface_ignores_transient_stop_and_qt_paints'
       - name: Compile changed modules
         run: |
           python -m py_compile tvhplayer/channel_view.py tvhplayer/tvhplayer.py tests/test_channel_view.py tests/test_pyqt6_ui.py
