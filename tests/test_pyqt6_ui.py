@@ -473,7 +473,7 @@ def test_playback_surface_ignores_transient_stop_and_qt_paints(monkeypatch, tmp_
         app.processEvents()
 
 
-def test_selected_channel_logo_replaces_idle_splash_and_survives_stop(monkeypatch, tmp_path):
+def test_selected_channel_name_replaces_idle_splash_without_upscaling_logo(monkeypatch, tmp_path):
     from PyQt6.QtGui import QColor, QImage
     from PyQt6.QtCore import Qt
     from tvhplayer.core.models import Channel
@@ -496,8 +496,10 @@ def test_selected_channel_logo_replaces_idle_splash_and_survives_stop(monkeypatc
         image = QImage(56, 32, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(QColor('#ff5533'))
         window._on_logo_loaded('imagecache/12', image)
-        assert window.idle_splash.logo.pixmap() is not None
-        assert window.idle_splash.logo.pixmap().size().width() == 220
+        # The loader's 56x32 channel-list image must never be stretched
+        # to the centre of the player.
+        assert window.idle_splash.logo.text() == 'News'
+        assert window.idle_splash.logo.pixmap().isNull()
 
         window.servers = []
         window._playback_channel = news
@@ -505,12 +507,14 @@ def test_selected_channel_logo_replaces_idle_splash_and_survives_stop(monkeypatc
         app.processEvents()
         assert window.idle_splash.isVisible()
         assert window.playback_spinner.isVisible()
-        assert window.idle_splash.logo.pixmap() is not None
+        assert window.idle_splash.logo.pixmap().isNull()
+        assert window.idle_splash.logo.text() == 'News'
         window._on_playback_started()
         assert not window.idle_splash.isVisible()
         window.stop_playback()
         assert window.idle_splash.isVisible()
         assert window.idle_splash._channel_name == 'News'
+        assert window.idle_splash.logo.text() == 'News'
 
         window.channel_list.setCurrentCell(1, ui.COL_NAME)
         app.processEvents()
