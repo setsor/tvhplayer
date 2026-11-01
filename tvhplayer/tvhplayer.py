@@ -128,6 +128,7 @@ try:
         ChannelTableModel,
         ChannelTableView,
         LogoLoader,
+        embossed_logo,
         padded_pixmap,
     )
 except ImportError:
@@ -231,6 +232,7 @@ except ImportError:
         ChannelTableModel,
         ChannelTableView,
         LogoLoader,
+        embossed_logo,
         padded_pixmap,
     )
 try:
@@ -2938,14 +2940,15 @@ class IdleSplash(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         logo = Path(logo_path).as_posix()
-        self.setStyleSheet(
-            "#idle_splash { background-color: black; }"
-            "#idle_logo {"
+        self._default_logo_style = (
+            f'background-image: url("{logo}");'
             "background-color: transparent;"
-            f"background-image: url(\"{logo}\");"
             "background-position: center;"
             "background-repeat: no-repeat;"
-            "}"
+        )
+        self._channel_name = ''
+        self.setStyleSheet(
+            "#idle_splash { background-color: black; }"
             "#idle_cast_caption {"
             "color: rgba(255, 255, 255, 230);"
             "background: transparent;"
@@ -2959,6 +2962,9 @@ class IdleSplash(QWidget):
         self.logo = QLabel(self)
         self.logo.setObjectName('idle_logo')
         self.logo.setFixedSize(240, 240)
+        self.logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.logo.setWordWrap(True)
+        self.logo.setStyleSheet(self._default_logo_style)
         self.logo.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         layout.addWidget(self.logo, 0, Qt.AlignmentFlag.AlignHCenter)
         self.caption = QLabel(self)
@@ -2971,6 +2977,25 @@ class IdleSplash(QWidget):
         layout.addStretch(1)
         self.clear_caption()
 
+    def set_channel(self, channel, pixmap=None):
+        """Keep the chosen channel visible when playback has not started."""
+        self._channel_name = channel.name if channel is not None else ''
+        if channel is None:
+            self.logo.clear()
+            self.logo.setStyleSheet(self._default_logo_style)
+        elif pixmap is not None and not pixmap.isNull():
+            self.logo.setStyleSheet("background: transparent;")
+            self.logo.setText("")
+            self.logo.setPixmap(embossed_logo(pixmap, size=QSize(220, 130)))
+        else:
+            self.logo.clear()
+            self.logo.setStyleSheet(
+                "background: transparent; color: white; font-size: 22px; font-weight: 600;"
+            )
+            self.logo.setText(self._channel_name)
+        if self.caption.isHidden():
+            self.clear_caption()
+
     def set_playing_on(self, name):
         text = f"Playing on {name}" if name else "Playing on Chromecast"
         self.caption.setText(text)
@@ -2980,7 +3005,10 @@ class IdleSplash(QWidget):
     def clear_caption(self):
         self.caption.hide()
         self.caption.clear()
-        describe(self, "Nothing playing", "TVHplayer logo, shown when nothing is playing")
+        if self._channel_name:
+            describe(self, self._channel_name, "Selected channel logo")
+        else:
+            describe(self, "Nothing playing", "TVHplayer logo, shown when nothing is playing")
 
 
 class PlaybackSpinner(QWidget):
@@ -3000,9 +3028,9 @@ class PlaybackSpinner(QWidget):
         self._signal_words = ''
         self._problem = ''
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.setStyleSheet("background-color: black;")
+        self.setStyleSheet("background: transparent;")
         self.hide()
 
     def set_caption(self, text):
@@ -3053,7 +3081,6 @@ class PlaybackSpinner(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor(0, 0, 0))
         if self._problem:
             painter.setPen(QColor(255, 255, 255, 230))
             font = painter.font()
@@ -3071,7 +3098,7 @@ class PlaybackSpinner(QWidget):
         thickness = max(4, diameter // 10)
         rect = QRectF(
             (self.width() - diameter) / 2,
-            (self.height() - diameter) / 2,
+            min(max(0, self.height() - diameter - 62), self.height() / 2 + 90),
             diameter,
             diameter,
         )
