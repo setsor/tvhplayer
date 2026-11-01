@@ -4349,7 +4349,7 @@ class TVHeadendClient(QMainWindow):
         self.stop_record_btn = bar.stop_record_btn
         self.stop_record_btn.clicked.connect(self.stop_any_recording)
         self.record_more_btn = bar.record_more_btn
-        bar.record_server_action.triggered.connect(self.start_recording)
+        bar.record_server_action.triggered.connect(lambda: self.start_recording())
         bar.record_local_action.triggered.connect(
             lambda: self.start_local_recording(self.active_channel())
         )
@@ -6778,7 +6778,7 @@ class TVHeadendClient(QMainWindow):
 
         record_action = menu.addAction(svg_icon(MENU_DOT_SVG, RECORD_RED, 16), with_keys("Record", "Ctrl+R"))
         record_action.setEnabled(self.active_channel() is not None)
-        record_action.triggered.connect(self.start_recording)
+        record_action.triggered.connect(lambda: self.start_recording())
 
         local_action = menu.addAction(
             tinted('download.svg'),
