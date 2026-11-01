@@ -4448,6 +4448,7 @@ class TVHeadendClient(QMainWindow):
         self.idle_splash = IdleSplash(splash_path, self.player_container)
 
         self.playback_spinner = PlaybackSpinner(self.player_container)
+        self.programme_overlay = ProgrammeOverlay(self.player_container)
         describe(
             self.playback_spinner,
             "Starting playback",
@@ -4983,12 +4984,39 @@ class TVHeadendClient(QMainWindow):
             self._now_next = result
             self._now_next_loaded = True
             self._update_programme_cells()
+            self._refresh_programme_overlay()
 
     def _update_programme_cells(self):
         """Redraw now and next, and the progress bars, from the last fetch."""
         self.channel_model.set_programmes(
             self._now_next, self.channel_options['now_progress'], self._now_next_loaded
         )
+
+    def _current_programme(self, channel):
+        if channel is None or self._playback_server != self._channels_server:
+            return None
+        entry = self._now_next.get(channel_key(channel))
+        event = entry.now if entry is not None else None
+        if event is None:
+            return None
+        now = int(time.time())
+        if (event.stop and event.stop <= now) or (event.start and event.start > now):
+            return None
+        return event
+
+    def _start_programme_overlay(self):
+        channel = getattr(self, '_playback_channel', None)
+        overlay = getattr(self, 'programme_overlay', None)
+        if (overlay is None or channel is None or not self._playback_active
+                or self._awaiting_playback or self.cast_manager.is_connected):
+            return
+        overlay.start(channel_key(channel), channel, self._current_programme(channel))
+
+    def _refresh_programme_overlay(self):
+        channel = getattr(self, '_playback_channel', None)
+        overlay = getattr(self, 'programme_overlay', None)
+        if overlay is not None and channel is not None and self._playback_active:
+            overlay.refresh(channel_key(channel), channel, self._current_programme(channel))
 
     def _fill_channel_rows(self):
         """Rebuild the table from the fetched channels and the current settings."""
@@ -6034,6 +6062,7 @@ class TVHeadendClient(QMainWindow):
 
     def _show_playback_wait(self):
         """Cover the player until mpv reports that playback has started."""
+        self.programme_overlay.dismiss()
         self._awaiting_playback = True
         if hasattr(self, '_splash_idle_timer'):
             self._splash_idle_timer.stop()
@@ -6109,6 +6138,8 @@ class TVHeadendClient(QMainWindow):
         self._sync_play_button()
         self._sync_timeshift()
         self._sync_record_controls()
+        if not playing:
+            self.programme_overlay.dismiss()
         if hasattr(self, '_splash_idle_timer'):
             self._splash_idle_timer.stop()
         waiting = bool(getattr(self, '_awaiting_playback', False))
@@ -6257,6 +6288,7 @@ class TVHeadendClient(QMainWindow):
         if channel is not None:
             self.statusbar.showMessage(f"Playing: {channel.name}")
             self._show_on_picture(f"{channel.number}  {channel.name}" if channel.number else channel.name)
+            self._start_programme_overlay()
         if not casting and not self.cast_manager.is_connected:
             self._start_subtitle_default()
 
@@ -7217,6 +7249,9 @@ class TVHeadendClient(QMainWindow):
                 spinner.setGeometry(player_container.rect())
                 if spinner.isVisible():
                     spinner.raise_()
+            programme = getattr(self, 'programme_overlay', None)
+            if programme is not None:
+                programme.place()
             return False
         video_frame = getattr(self, 'video_frame', None)
         if video_frame is not None and obj is video_frame:
