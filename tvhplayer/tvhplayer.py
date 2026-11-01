@@ -3926,6 +3926,8 @@ class TVHeadendClient(QMainWindow):
         self._awaiting_playback = False
         self._playback_channel = None
         self._playback_server = None
+        self._splash_channel = None
+        self._splash_logo_ref = ''
         self._show_playing_on_load = False
         self._video_menu = None
         self.cast_manager = CastManager(self, known_profiles=self.config.get('cast_auto_profiles'))
@@ -4261,6 +4263,7 @@ class TVHeadendClient(QMainWindow):
         self.channel_list.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # Stop recording follows the highlighted channel.
         self.channel_list.selectionModel().currentRowChanged.connect(lambda *_: self._sync_record_controls())
+        self.channel_list.selectionModel().currentRowChanged.connect(self._splash_row_changed)
         self.channel_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         # Channels come sorted by number; a column click sorts by that column.
         self.channel_list.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
@@ -4943,6 +4946,29 @@ class TVHeadendClient(QMainWindow):
         self.channel_model.set_kinds(self._channel_kinds)
         self._update_programme_cells()
 
+    def _splash_row_changed(self, current, _previous):
+        if current.isValid():
+            channel = self.channel_from_row(current.row())
+            if channel is not None:
+                self._select_splash_channel(channel)
+
+    def _select_splash_channel(self, channel):
+        self._splash_channel = channel
+        self._splash_logo_ref = self.channel_logo_reference(channel) if channel is not None else ''
+        self._refresh_splash_channel()
+        if self._splash_logo_ref and self._splash_logo_ref not in self._logo_pixmaps:
+            # Existing loader performs disk/network work off the Qt thread.
+            self._logo_for(self._splash_logo_ref, None)
+            self._visible_logo_timer.start()
+
+    def _refresh_splash_channel(self):
+        splash = getattr(self, 'idle_splash', None)
+        if splash is not None:
+            splash.set_channel(
+                getattr(self, '_splash_channel', None),
+                self._logo_pixmaps.get(getattr(self, '_splash_logo_ref', '')),
+            )
+
     def _logo_backend(self):
         try:
             if self.current_server() and self._server_requests_ready():
@@ -4980,6 +5006,8 @@ class TVHeadendClient(QMainWindow):
 
     def _on_logo_loaded(self, reference, image):
         self._logo_pixmaps[reference] = QPixmap.fromImage(image)
+        if reference == getattr(self, '_splash_logo_ref', None):
+            self._refresh_splash_channel()
         # Logos arrive one by one, thousands for a large list; set them on the rows together.
         self._logos_arrived.add(reference)
         if not self._logo_timer.isActive():
@@ -8777,6 +8805,7 @@ class TVHeadendClient(QMainWindow):
                 channel = channel_data
             else:
                 channel = Channel.from_raw(channel_data)
+            self._select_splash_channel(channel)
             self._playback_channel = channel
             self._playback_server = self._channels_server
             self._remember_channel(channel)
