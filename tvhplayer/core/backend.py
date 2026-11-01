@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from .channel_info import NowNext, event_ids_for_channels, match_now_next, next_event_ids
 from .dvr import RecordingFile
 from .models import (
     PROTOCOL_HTSP,
@@ -78,6 +79,50 @@ class TvhBackend(ABC):
         HTTP ``api/epg/events/load``. HTSP ``getEvent``. Raises ``TvhError``
         when the server has no such event.
         """
+
+    @abstractmethod
+    def load_events(self, event_ids: List[int]) -> List[EpgEvent]:
+        """Return several programmes in one request.
+
+        HTTP ``api/epg/events/load`` with ``eventId`` as a JSON list. HTSP
+        sends the same path through ``api``. Unknown ids are left out.
+        """
+
+    def get_now_next(self, channels: List[Channel]) -> Dict[str, NowNext]:
+        """Current and next programme per channel, keyed by ``channel_key``.
+
+        HTSP channels carry ``eventId`` and ``nextEventId``, so one load
+        is enough. Otherwise the grid's ``mode=now`` gives the current
+        programmes and their ``nextEventId`` values are loaded after.
+        """
+        ids = event_ids_for_channels(channels)
+        if ids:
+            return match_now_next(channels, self.load_events(ids))
+        return self.get_now_next_live(channels)
+
+    def get_now_next_live(self, channels: List[Channel]) -> Dict[str, NowNext]:
+        """Refresh from the server's current EPG grid without a channel sync.
+
+        HTSP eventId/nextEventId in the previously loaded channel list can be
+        stale. The mode=now API proxy works over a normal authenticated HTSP
+        connection (without enableAsyncMetadata). HTTP likewise avoids a
+        redundant full channel/grid request. The next programme is retrieved
+        using the current event's nextEventId.
+        """
+        events = self.query_epg(EpgQuery(mode='now', limit=10000))
+        following = next_event_ids(events)
+        if following:
+            events = events + self.load_events(following)
+        return match_now_next(channels, events, use_channel_event_ids=False)
+
+    def list_channel_services(self) -> List[dict]:
+        """Service rows that tell radio, HD, and encrypted channels apart.
+
+        HTTP ``mpegts/service/grid`` with ``channel``, ``dvb_servicetype``,
+        ``encrypted``, and ``provider``. The grid needs admin rights; HTSP
+        sends the same facts with each channel, so it returns nothing.
+        """
+        return []
 
     @abstractmethod
     def list_related_events(self, event_id: int) -> List[EpgEvent]:
@@ -206,12 +251,12 @@ class TvhBackend(ABC):
 
     @abstractmethod
     def recording_url(self, entry: DvrEntry) -> str:
-        """HTTP URL VLC can play for a stored recording.
+        """HTTP URL the player can open for a stored recording.
 
         HTTP uses the entry ``url`` (``dvrfile/<uuid>``) and embeds basic
         auth when credentials are configured. HTSP calls ``getTicket`` with
-        ``dvrId`` and appends ``ticket`` to that path. The ticket path is
-        used as returned; it already includes any webroot.
+        ``dvrId`` and appends ``ticket`` to that path, without basic auth.
+        The ticket path is used as returned; it already includes any webroot.
         """
 
     @abstractmethod
@@ -377,11 +422,12 @@ class TvhBackend(ABC):
 
     @abstractmethod
     def stream_url(self, channel: Channel, profile: Optional[str] = None) -> str:
-        """HTTP URL VLC/ffmpeg can play (HTSP muxpkt is not used).
+        """HTTP URL mpv/ffmpeg can play (HTSP muxpkt is not used).
 
-        HTTP uses ``/stream/channel/{uuid}``. HTSP uses
-        ``/stream/channelid/{id}``. ``profile`` is added as ``?profile=``
-        when set.
+        HTTP uses ``/stream/channel/{uuid}``. HTSP uses the
+        ``/stream/channelid/{id}`` path and ticket from ``getTicket``, so
+        digest-only servers work; without a ticket it embeds basic auth.
+        ``profile`` is added as ``?profile=`` when set.
         """
 
     @abstractmethod

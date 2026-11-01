@@ -1,0 +1,129 @@
+from pathlib import Path
+
+from PyQt6.QtCore import QMargins, QPoint, QSize, Qt
+from PyQt6.QtWidgets import QMainWindow, QMenuBar, QWidget
+
+from tvhplayer.window_frame import (
+    SHADOW_MARGINS,
+    TITLE_BAR_HEIGHT,
+    WindowFrame,
+    cursor_for,
+    edges_at,
+    kde_button_layout,
+    kwin_button_layout,
+    parse_button_layout,
+    wants_own_title_bar,
+)
+
+GNOME = {'XDG_CURRENT_DESKTOP': 'ubuntu:GNOME'}
+KDE = {'XDG_CURRENT_DESKTOP': 'KDE'}
+
+
+def test_gnome_and_kde_can_have_the_apps_title_bar():
+    assert wants_own_title_bar('wayland', GNOME)
+    assert wants_own_title_bar('wayland', {'XDG_CURRENT_DESKTOP': 'GNOME'})
+    assert wants_own_title_bar('wayland', KDE)
+    # GNOME draws the title bar of X11 windows, and other desktops keep theirs.
+    assert not wants_own_title_bar('xcb', GNOME)
+    assert not wants_own_title_bar('wayland', {'XDG_CURRENT_DESKTOP': 'XFCE'})
+    assert not wants_own_title_bar('wayland', {})
+    assert not wants_own_title_bar('cocoa', KDE)
+
+
+def test_kde_on_x11_needs_a_compositor_for_the_shadow():
+    assert wants_own_title_bar('xcb', KDE, compositing=True)
+    assert not wants_own_title_bar('xcb', KDE, compositing=False)
+    # Under XWayland the compositor is always there.
+    assert wants_own_title_bar('xcb', {**KDE, 'WAYLAND_DISPLAY': 'wayland-0'}, compositing=False)
+
+
+def test_kwin_button_order_is_followed(tmp_path, monkeypatch):
+    assert kwin_button_layout() == ':minimize,maximize,close'
+    assert parse_button_layout(kwin_button_layout('XAI', 'M')) == (['close', 'maximize', 'minimize'], [])
+    (tmp_path / 'kwinrc').write_text(
+        '[org.kde.kdecoration2]\nButtonsOnLeft=X\nButtonsOnRight=IA\n', encoding='utf-8'
+    )
+    assert kde_button_layout({'XDG_CONFIG_HOME': str(tmp_path)}) == 'close:minimize,maximize'
+    # In Flatpak XDG_CONFIG_HOME is the sandbox's; the host's kwinrc is shared in ~/.config.
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path / 'home')
+    no_portal = lambda: None  # noqa: E731
+    assert kde_button_layout({'XDG_CONFIG_HOME': str(tmp_path / 'none')}, no_portal) == ':minimize,maximize,close'
+    (tmp_path / 'home' / '.config').mkdir(parents=True)
+    (tmp_path / 'kwinrc').rename(tmp_path / 'home' / '.config' / 'kwinrc')
+    assert kde_button_layout({'XDG_CONFIG_HOME': str(tmp_path / 'sandbox')}) == 'close:minimize,maximize'
+
+
+def test_flatpak_on_kde_reads_the_button_order_from_the_portal(tmp_path, monkeypatch):
+    # The Flatpak cannot read kwinrc. Plasma's portal answers the GNOME key,
+    # which Plasma keeps in step with KWin's order.
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path / 'home')
+    sandbox = {'XDG_CONFIG_HOME': str(tmp_path / 'sandbox')}
+    assert kde_button_layout(sandbox, lambda: 'close:minimize,maximize') == 'close:minimize,maximize'
+    # A kwinrc that can be read wins: the app outside Flatpak.
+    (tmp_path / 'sandbox').mkdir()
+    (tmp_path / 'sandbox' / 'kwinrc').write_text(
+        '[org.kde.kdecoration2]\nButtonsOnLeft=\nButtonsOnRight=X\n', encoding='utf-8'
+    )
+    assert kde_button_layout(sandbox, lambda: 'close:minimize,maximize') == ':close'
+
+
+def test_button_layout_keeps_the_window_buttons_on_their_sides():
+    assert parse_button_layout('icon:minimize,maximize,close') == ([], ['minimize', 'maximize', 'close'])
+    assert parse_button_layout('appmenu:close') == ([], ['close'])
+    assert parse_button_layout('close,minimize:') == (['close', 'minimize'], [])
+    assert parse_button_layout('') == ([], [])
+
+
+def test_edges_and_corners_resize_as_expected():
+    size, m = QSize(800, 600), QMargins(14, 10, 14, 18)
+    assert edges_at(QPoint(400, 2), size, m) == Qt.Edge.TopEdge
+    assert edges_at(QPoint(2, 300), size, m) == Qt.Edge.LeftEdge
+    assert edges_at(QPoint(795, 300), size, m) == Qt.Edge.RightEdge
+    assert edges_at(QPoint(400, 595), size, m) == Qt.Edge.BottomEdge
+    # Near a corner, on either side of it, both edges move.
+    assert edges_at(QPoint(20, 2), size, m) == Qt.Edge.LeftEdge | Qt.Edge.TopEdge
+    assert edges_at(QPoint(2, 20), size, m) == Qt.Edge.LeftEdge | Qt.Edge.TopEdge
+    assert edges_at(QPoint(790, 590), size, m) == Qt.Edge.RightEdge | Qt.Edge.BottomEdge
+    assert cursor_for(Qt.Edge.LeftEdge | Qt.Edge.TopEdge) == Qt.CursorShape.SizeFDiagCursor
+    assert cursor_for(Qt.Edge.RightEdge | Qt.Edge.TopEdge) == Qt.CursorShape.SizeBDiagCursor
+    assert cursor_for(Qt.Edge.TopEdge) == Qt.CursorShape.SizeVerCursor
+
+
+def test_frame_holds_the_menus_and_makes_room_for_the_shadow(qapp):
+    window = QMainWindow()
+    window.setCentralWidget(QWidget())
+    menubar = QMenuBar(window)
+    menubar.addMenu('&File')
+    frame = WindowFrame(window, menubar, button_layout='icon:minimize,maximize,close')
+    try:
+        assert window.menuWidget() is frame.title_bar
+        assert menubar.parent() is frame.title_bar
+        assert window.windowFlags() & Qt.WindowType.FramelessWindowHint
+        assert window.contentsMargins() == SHADOW_MARGINS
+        assert set(frame.title_bar.buttons) == {'minimize', 'maximize', 'close'}
+        assert frame.title_bar.height() == TITLE_BAR_HEIGHT
+        window.setWindowState(Qt.WindowState.WindowMaximized)
+        qapp.processEvents()
+        assert window.contentsMargins() == QMargins()
+        assert frame.title_bar.buttons['maximize'].accessibleName() == 'Restore'
+    finally:
+        window.deleteLater()
+        qapp.processEvents()
+
+
+def test_styles_that_ask_for_the_menu_bar_keep_the_title_bar(qapp):
+    # Breeze asks every main window for its menu bar; one that is no menu bar
+    # would be replaced by a new empty one and the title bar deleted.
+    window = QMainWindow()
+    window.setCentralWidget(QWidget())
+    menubar = QMenuBar(window)
+    menubar.addMenu('&File')
+    frame = WindowFrame(window, menubar, button_layout='icon:minimize,maximize,close')
+    try:
+        assert window.menuBar() is frame.title_bar
+        assert window.menuWidget() is frame.title_bar
+        assert not frame.title_bar.isNativeMenuBar()
+        frame.title_bar.sync_state()
+    finally:
+        window.deleteLater()
+        qapp.processEvents()

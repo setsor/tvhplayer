@@ -1,22 +1,31 @@
 import shlex
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+import requests
 
 from tvhplayer.core.errors import PlaylistError
 from tvhplayer.core.playlist import (
     FILE_FAILED,
     MAX_PIPE_ARGS,
     NOT_A_PLAYLIST,
+    ONLY_FILMS,
+    STOPPED,
+    XTREAM_AUTH_FAILED,
     decode_playlist,
     ffmpeg_command,
     ffmpeg_input,
     load_playlist,
+    load_xtream,
     parse_playlist,
     plan_channels,
     playlist_commands,
     playlist_name,
     shell_command,
     tvh_split,
+    xtream_connections,
+    xtream_playlist_url,
 )
 
 KODI = (
@@ -55,6 +64,29 @@ def test_parse_rejects_other_files():
         with pytest.raises(PlaylistError) as info:
             parse_playlist(text)
         assert str(info.value) == NOT_A_PLAYLIST
+
+
+def test_parse_skips_xtream_films_and_series():
+    playlist = parse_playlist(
+        '#EXTM3U\n'
+        '#EXTINF:-1 group-title="News",News\n'
+        'http://xtream.example:80/user/pass/1371\n'
+        '#EXTINF:-1 group-title="Films",A Film\n'
+        'http://xtream.example:80/movie/user/pass/835957.mkv\n'
+        '#EXTINF:-1 group-title="Series",A Show S01E01\n'
+        'http://xtream.example:80/series/user/pass/832464.mp4\n'
+        '#EXTINF:-1,Movie Channel\n'
+        'http://example.com/movie/live.m3u8\n'
+    )
+    assert [entry.name for entry in playlist.entries] == ['News', 'Movie Channel']
+    assert playlist.entries[0].groups == ['News']
+    assert playlist.films == 2
+
+
+def test_playlist_of_only_films_says_so():
+    with pytest.raises(PlaylistError) as info:
+        parse_playlist('#EXTM3U\n#EXTINF:-1,A Film\nhttp://xtream.example/movie/u/p/1.mkv\n')
+    assert str(info.value) == ONLY_FILMS
 
 
 def test_decode_falls_back_to_latin1():
@@ -212,3 +244,150 @@ def test_load_playlist_reads_files(tmp_path):
     with pytest.raises(PlaylistError) as info:
         load_playlist(str(tmp_path / 'missing.m3u'))
     assert str(info.value) == FILE_FAILED
+
+
+def test_provider_headers_apply_to_download_and_streams():
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.headers.get('User-Agent'), self.headers.get('X-Token')))
+            body = b'#EXTM3U\n#EXTINF:-1,A\nhttp://x/a.ts|X-Token=entry\n'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        playlist = load_playlist(
+            f'http://127.0.0.1:{server.server_address[1]}/list.m3u',
+            headers={'User-Agent': 'TV provider', 'X-Token': 'default', 'Referer': 'https://provider/'},
+        )
+        assert seen == [('TV provider', 'default')]
+        assert playlist.entries[0].headers == {
+            'User-Agent': 'TV provider', 'X-Token': 'entry', 'Referer': 'https://provider/',
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_native_xtream_live_channels_are_ingested(monkeypatch):
+    calls = []
+
+    class Reply:
+        status_code = 200
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+    replies = [
+        {'user_info': {'max_connections': '2'}},
+        [{'category_id': '7', 'category_name': 'News'}],
+        [{
+            'stream_id': 42, 'name': 'World News', 'category_id': '7', 'epg_channel_id': 'world.news',
+            'stream_icon': 'https://img/news.png', 'num': 11, 'container_extension': 'm3u8',
+        }],
+    ]
+
+    def get(session, url, params=None, timeout=None):
+        calls.append((url, params, dict(session.headers)))
+        return Reply(replies.pop(0))
+
+    monkeypatch.setattr(requests.Session, 'get', get)
+    location = xtream_playlist_url('https://xc.example:8080/base/', 'u@x', 'p a')
+    playlist = load_xtream(location, headers={'User-Agent': 'XC client'})
+    assert location == 'https://xc.example:8080/base/get.php?username=u%40x&password=p+a'
+    assert playlist.max_connections == 2
+    assert playlist.guide_url == 'https://xc.example:8080/base/xmltv.php?username=u%40x&password=p+a'
+    entry = playlist.entries[0]
+    assert entry.name == 'World News'
+    assert entry.url == 'https://xc.example:8080/base/live/u%40x/p%20a/42.m3u8'
+    assert entry.groups == ['News']
+    assert entry.attrs['tvg-id'] == 'world.news'
+    assert entry.headers == {'User-Agent': 'XC client'}
+    assert [call[1].get('action') for call in calls] == [None, 'get_live_categories', 'get_live_streams']
+
+
+def test_xtream_rejected_credentials_have_a_clear_error(monkeypatch):
+    class Reply:
+        status_code = 200
+
+        def json(self):
+            return {'user_info': {'auth': 0}}
+
+    monkeypatch.setattr(requests.Session, 'get', lambda *_args, **_kwargs: Reply())
+    with pytest.raises(PlaylistError) as info:
+        load_xtream(xtream_playlist_url('https://xc.example', 'user', 'wrong'))
+    assert str(info.value) == XTREAM_AUTH_FAILED
+
+
+def test_load_playlist_downloads_and_stops_when_cancelled():
+    body = b'#EXTM3U\n' + b'#EXTINF:-1,A\nhttp://x/a.ts\n' * 20000
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f'http://127.0.0.1:{server.server_address[1]}/get.php'
+    try:
+        assert len(load_playlist(url).entries) == 20000
+        asked = []
+        with pytest.raises(PlaylistError) as info:
+            load_playlist(url, cancelled=lambda: asked.append(True) or len(asked) > 1)
+        assert str(info.value) == STOPPED
+        assert len(asked) == 2
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+class _Reply:
+    def __init__(self, data):
+        self._data = data
+
+    def json(self):
+        if isinstance(self._data, Exception):
+            raise self._data
+        return self._data
+
+
+def test_xtream_connections_asks_the_account(monkeypatch):
+    asked = []
+
+    def get(_session, url, timeout):
+        asked.append(url)
+        return _Reply(replies.pop(0))
+
+    monkeypatch.setattr(requests.Session, 'get', get)
+    replies = [{'user_info': {'max_connections': '1'}}]
+    assert xtream_connections('http://xt.example:8080/get.php?username=u%40x&password=p&type=m3u_plus') == 1
+    assert asked == ['http://xt.example:8080/player_api.php?username=u%40x&password=p']
+    replies = [
+        {'user_info': {'max_connections': '0'}},
+        {'user_info': {}},
+        ['not', 'a', 'dict'],
+        ValueError('not JSON'),
+        requests.ConnectionError(),
+    ]
+    for _ in range(5):
+        assert xtream_connections('http://xt.example/get.php?username=u&password=p') is None
+    for location in ('http://example.com/list.m3u', 'http://xt.example/get.php?username=u', '/home/u/get.php'):
+        assert xtream_connections(location) is None
+    assert len(asked) == 6

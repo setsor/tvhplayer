@@ -22,7 +22,8 @@ REQUIRED_PATHS = (
     '/usr/share/tvhplayer/tvheadend/src/webui/static',
     '/usr/share/tvhplayer/tvheadend/data/dvb-scan',
     '/usr/share/tvhplayer/tvhplayer.py',
-    '/usr/share/tvhplayer/icons/play.svg',
+    '/usr/share/tvhplayer/icons/play_circle.svg',
+    '/usr/share/tvhplayer/icons/cast.svg',
     '/usr/share/applications/io.github.mfat.tvhplayer.desktop',
     '/usr/share/metainfo/io.github.mfat.tvhplayer.metainfo.xml',
     '/usr/share/icons/hicolor/scalable/apps/io.github.mfat.tvhplayer.svg',
@@ -34,12 +35,21 @@ if missing:
 
 # The launcher runs tvhplayer.py from APP_DIR, which imports core.* as top-level modules.
 sys.path.insert(0, str(APP_DIR))
-modules = ['tvhplayer', 'builtin_supervisor', 'a11y', 'file_manager']
+modules = [
+    'tvhplayer', 'builtin_supervisor', 'a11y', 'file_manager', 'player_bar', 'settings_dialog', 'settings_widgets',
+    'sleep_inhibit', 'setup_wizard', 'guide_dialogs', 'ui_theme', 'about_dialog', 'system_color_scheme', 'cursor_debug',
+    'window_frame',
+]
 modules += [f'core.{path.stem}' for path in sorted((APP_DIR / 'core').glob('*.py')) if path.stem != '__init__']
 for name in modules:
     module = importlib.import_module(name)
     if not str(getattr(module, '__file__', '')).startswith(str(APP_DIR)):
         sys.exit(f'Imported {name} from {module.__file__}, not the installed package')
+
+try:
+    import pychromecast  # noqa: F401
+except ImportError as exc:
+    sys.exit(f'pychromecast is not installed: {exc}')
 
 from PyQt6.QtCore import QCoreApplication, QEventLoop, QTimer  # noqa: E402
 

@@ -1,8 +1,12 @@
 import ast
 import os
+import json
 import sys
+import time
 import types
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,11 +19,6 @@ def test_ui_module_parses():
 
 def test_ui_module_uses_pyqt6(monkeypatch):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    monkeypatch.setitem(
-        sys.modules,
-        'vlc',
-        types.SimpleNamespace(Instance=lambda *a, **k: None, MediaStats=object, __version__='stub'),
-    )
     sys.modules.pop('tvhplayer.tvhplayer', None)
 
     import tvhplayer.tvhplayer as ui
@@ -40,170 +39,151 @@ def test_ui_module_uses_pyqt6(monkeypatch):
     duration.set_duration(1, 30)
     assert duration.get_duration() == 5400
 
-    config_dialog = ui.ServerConfigDialog()
-    config_dialog.set_server_config({
+    server_dialog = ui.ServerDialog()
+    server_dialog.load_servers([{
         'name': 'local',
         'url': 'http://127.0.0.1:9981',
         'protocol': 'htsp',
         'htsp_port': 9982,
-    })
-    assert config_dialog.get_server_config()['protocol'] == 'htsp'
-    assert config_dialog.get_server_config()['subtitle_language'] == ''
-    assert config_dialog.get_server_config()['remember_subtitle_selection'] is False
-    config_dialog.set_server_config({
-        'name': 'NAS',
-        'url': 'http://127.0.0.1:9981',
-        'subtitle_language': 'rum',
-        'remember_subtitle_selection': True,
-    })
-    assert config_dialog.subtitle_language_combo.currentText() == 'Romanian'
-    assert config_dialog.get_server_config()['subtitle_language'] == 'ron'
-    assert config_dialog.remember_subtitle_checkbox.isChecked()
-    assert config_dialog.get_server_config()['remember_subtitle_selection'] is True
-    config_dialog.set_server_config({'name': 'NAS', 'url': 'http://127.0.0.1:9981'})
-    assert config_dialog.get_server_config()['subtitle_language'] == ''
-    assert config_dialog.get_server_config()['remember_subtitle_selection'] is False
-
-    error_dialog = ui.ConnectionErrorDialog('local', 'connection refused')
-    assert error_dialog.windowTitle() == 'Connection Error'
+    }])
+    assert server_dialog.protocol_combo.currentData() == 'htsp'
+    assert server_dialog.htsp_port_input.value() == 9982
 
     app.processEvents()
-
-
-
-def test_server_gear_opens_management_dialog_without_crashing(monkeypatch, tmp_path):
-    """The gear used to abort macOS: ServerDialog called EPG-only refresh_recording_buttons."""
-    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
-    server = {'name': 'NAS', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}
-    window.servers = [server]
-    opened = []
-
-    def fake_dialog_exec(dialog):
-        opened.append(dialog)
-        assert dialog.windowTitle() == 'Server Management'
-        assert dialog.server_list.count() == 1
-        assert dialog.server_list.item(0).text() == 'NAS'
-        assert dialog.server_list.accessibleName() == 'Configured servers'
-        return ui.QDialog.DialogCode.Rejected
-
-    monkeypatch.setattr(ui.ServerDialog, 'exec', fake_dialog_exec)
-    try:
-        # Test construction OUTSIDE a Qt signal so a missing method gives an
-        # ordinary Python test failure rather than PyQt's fatal SIGABRT.
-        standalone = ui.ServerDialog(window)
-        standalone.load_servers([server])
-        assert standalone.server_list.item(0).text() == 'NAS'
-        standalone.close()
-
-        window.show()
-        app.processEvents()
-        window.manage_servers_btn.click()
-        app.processEvents()
-        assert len(opened) == 1
-        assert window.servers == [server]
-    finally:
-        window.close()
-        app.processEvents()
 
 
 class _FakeEvents:
     def __init__(self):
         self.handlers = {}
 
-    def event_attach(self, event_type, callback):
-        self.handlers[event_type] = callback
 
+class _FakePlayer:
+    """Stand-in for MpvPlayer: the window's Player interface plus event hooks for tests."""
 
-class _FakeVlcPlayer:
     def __init__(self):
-        self.key_input = None
-        self.mouse_input = None
-        self._muted = 0
+        self.key_input = False
+        self.mouse_input = False
+        self._muted = False
+        self._volume = -1
         self._playing = False
+        self.attached = None
+        self._on_playing = None
+        self._on_stopped = None
+        self._on_error = None
+        self._schedule = lambda fn: fn()
         self._events = _FakeEvents()
-        self.subtitle_id = -1
-        self.subtitle_options = []
+        self.audio = []
+        self.audio_id = -1
+        self.spu = []
+        self.spu_id = -1
+        self._deinterlace = 'auto'
 
-    def event_manager(self):
-        return self._events
+    def set_handlers(self, on_playing=None, on_stopped=None, schedule=None, on_error=None):
+        self._on_playing = on_playing
+        self._on_stopped = on_stopped
+        self._on_error = on_error
+        if schedule is not None:
+            self._schedule = schedule
+        self._events.handlers['playing'] = lambda _e: self._schedule(
+            lambda: self._on_playing and self._on_playing()
+        )
+        self._events.handlers['stopped'] = lambda _e: self._schedule(
+            lambda: self._on_stopped and self._on_stopped()
+        )
+        self._events.handlers['ended'] = self._events.handlers['stopped']
+        self._events.handlers['error'] = lambda _e: self._schedule(
+            lambda: self._on_error and self._on_error()
+        )
 
-    def set_xwindow(self, handle):
-        return None
+    def attach(self, surface):
+        self.attached = surface
 
-    def set_hwnd(self, handle):
-        return None
-
-    def set_nsobject(self, handle):
-        return None
-
-    def set_hardware_decoding(self, value):
-        return None
-
-    def video_set_key_input(self, value):
-        self.key_input = value
-
-    def video_set_mouse_input(self, value):
-        self.mouse_input = value
-
-    def audio_get_mute(self):
-        return self._muted
-
-    def audio_set_mute(self, value):
-        self._muted = value
-
-    def video_get_spu_description(self):
-        return list(self.subtitle_options)
-
-    def video_get_spu(self):
-        return self.subtitle_id
-
-    def video_set_spu(self, track_id):
-        if track_id not in [-1] + [track for track, _ in self.subtitle_options]:
-            return -1
-        self.subtitle_id = track_id
-        return 0
-
-    def audio_set_volume(self, value):
-        return None
-
-    def is_playing(self):
-        return self._playing
+    def play(self, url):
+        self._playing = True
 
     def stop(self):
         self._playing = False
 
-    def play(self):
-        self._playing = True
+    def is_playing(self):
+        return self._playing
 
-    def set_media(self, media):
+    def set_volume(self, value):
+        self._volume = int(value)
+
+    def is_muted(self):
+        return bool(self._muted)
+
+    def set_muted(self, muted):
+        self._muted = bool(muted)
+
+    def audio_tracks(self):
+        return [(int(i), n.decode() if isinstance(n, bytes) else str(n))
+                for i, n in self.audio if int(i) != -1]
+
+    def audio_track(self):
+        return int(self.audio_id)
+
+    def set_audio_track(self, track_id):
+        self.audio_id = int(track_id)
+
+    def subtitle_tracks(self):
+        return [(int(i), n.decode() if isinstance(n, bytes) else str(n))
+                for i, n in self.spu if int(i) != -1]
+
+    def subtitle_track(self):
+        return int(self.spu_id)
+
+    def set_subtitle_track(self, track_id):
+        self.spu_id = int(track_id)
+
+    def deinterlace(self):
+        return self._deinterlace
+
+    def set_deinterlace(self, mode):
+        self._deinterlace = mode
+        return True
+
+    def set_fast_start(self, on):
+        self.fast_start = on
+
+    timeshift_state = None
+
+    def timeshift(self):
+        return self.timeshift_state
+
+    def set_paused(self, paused):
+        self.timeshift_state = self.timeshift_state._replace(paused=paused)
+
+    def skip(self, seconds):
+        self.skips = getattr(self, 'skips', []) + [seconds]
+        return seconds < 0
+
+    def go_live(self):
+        self.timeshift_state = self.timeshift_state._replace(paused=False, behind=0.0)
+
+    def set_timeshift_store(self, folder, size_bytes=0):
+        self.store = (folder, size_bytes)
+
+    def show_message(self, text, duration_ms=3000):
         return None
 
-    def get_media(self):
+    def log_stats(self):
         return None
 
+    def close(self):
+        self._playing = False
 
-def _make_player(monkeypatch, tmp_path):
+    # Compat names some tests still call on the stand-in.
+    def audio_get_mute(self):
+        return self._muted
+
+    def audio_get_volume(self):
+        return self._volume
+
+
+def _make_player(monkeypatch, tmp_path, prepare=None):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    fake_player = _FakeVlcPlayer()
-    fake_instance = types.SimpleNamespace(
-        media_player_new=lambda: fake_player,
-        media_new=lambda url: object(),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        'vlc',
-        types.SimpleNamespace(
-            Instance=lambda *a, **k: fake_instance,
-            MediaStats=object,
-            EventType=types.SimpleNamespace(
-                MediaPlayerPlaying='playing',
-                MediaPlayerStopped='stopped',
-                MediaPlayerEndReached='ended',
-                MediaPlayerEncounteredError='error',
-            ),
-            __version__='stub',
-        ),
-    )
+    fake_player = _FakePlayer()
     sys.modules.pop('tvhplayer.tvhplayer', None)
     import tvhplayer.tvhplayer as ui
 
@@ -211,7 +191,13 @@ def _make_player(monkeypatch, tmp_path):
 
     store = ConfigStore(tmp_path / 'tvhplayer.conf')
     monkeypatch.setattr(ui, 'ConfigStore', lambda *a, **k: store)
-    monkeypatch.setattr(ui.TVHeadendClient, 'fetch_channels', lambda self: None)
+    # Not the picon pack on this computer: each window read its tens of thousands of logos.
+    monkeypatch.setattr(ui, 'default_picon_dir', lambda: tmp_path / 'picons')
+    monkeypatch.setattr(ui.TVHeadendClient, '_new_player', lambda self: fake_player)
+    if prepare is None:
+        monkeypatch.setattr(ui.TVHeadendClient, 'fetch_channels', lambda self, keep_place=False: None)
+    else:
+        prepare(ui)
 
     from PyQt6.QtWidgets import QApplication
 
@@ -221,6 +207,45 @@ def _make_player(monkeypatch, tmp_path):
     app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings, True)
     window = ui.TVHeadendClient()
     return app, ui, window, fake_player
+
+
+def test_window_starts_on_the_last_server_only(monkeypatch, tmp_path):
+    # The built-in server comes first; the remote one was used last and
+    # autostart is off. Starting loads the remote server and nothing else.
+    (tmp_path / 'tvhplayer.conf').write_text(json.dumps({
+        'servers': [
+            {'name': 'Built-in', 'builtin': True, 'protocol': 'htsp', 'url': ''},
+            {'name': 'Remote', 'url': 'http://192.0.2.1:9981'},
+        ],
+        'last_server': 1,
+        'builtin_autostart': False,
+    }), encoding='utf-8')
+    events = []
+
+    def prepare(ui):
+        monkeypatch.setattr(ui, 'platform_supports_builtin', lambda: True)
+        monkeypatch.setattr(ui, 'find_bundled_binary', lambda: '/bin/true')
+        monkeypatch.setattr(ui.BuiltinSupervisor, 'start', lambda self, *a, **k: events.append('builtin'))
+        monkeypatch.setattr(ui.ChannelFetch, 'start', lambda self: events.append(self.server['name']))
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path, prepare)
+    try:
+        assert window.server_combo.currentIndex() == 1
+        assert events == ['Remote']
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_window_starts_at_the_saved_volume(monkeypatch, tmp_path):
+    (tmp_path / 'tvhplayer.conf').write_text('{"volume": 30}', encoding='utf-8')
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        assert window.volume_slider.value() == 30
+        assert fake_player.audio_get_volume() == 30
+    finally:
+        window.close()
+        app.processEvents()
 
 
 def test_same_window_fullscreen_hides_chrome(monkeypatch, tmp_path):
@@ -238,6 +263,10 @@ def test_same_window_fullscreen_hides_chrome(monkeypatch, tmp_path):
         assert 'background-image' not in window.video_frame.styleSheet()
         assert window.idle_splash.isVisible()
         assert window.left_pane.isVisible()
+        # Hidden until a task is added.
+        assert not window.tasks_pane.isVisible()
+        window.tasks_action.trigger()
+        app.processEvents()
         assert window.tasks_pane.isVisible()
         assert window.controls_bar.isVisible()
         assert not window.is_fullscreen
@@ -252,7 +281,14 @@ def test_same_window_fullscreen_hides_chrome(monkeypatch, tmp_path):
         assert window.idle_splash.isVisible()
         assert not window.left_pane.isVisible()
         assert not window.tasks_pane.isVisible()
-        assert not window.controls_bar.isVisible()
+        # The controls float over the picture as an in-window overlay.
+        assert window.floating_bar.bar is window.controls_bar
+        assert not window.floating_bar.isWindow()
+        window.floating_bar.poke()
+        app.processEvents()
+        assert window.controls_bar.isVisible()
+        assert window.floating_bar.isVisible()
+        assert window.floating_bar.geometry().bottom() <= window.geometry().bottom()
         assert not window.menuBar().isVisible()
         assert window.right_pane.frameStyle() == int(ui.QFrame.Shape.NoFrame)
         assert window.right_layout.contentsMargins().left() == 0
@@ -273,6 +309,8 @@ def test_same_window_fullscreen_hides_chrome(monkeypatch, tmp_path):
         assert window.left_pane.isVisible()
         assert window.tasks_pane.isVisible()
         assert window.controls_bar.isVisible()
+        assert window.controls_bar.parent() is window.right_pane
+        assert not window.floating_bar.isVisible()
         assert window.menuBar().isVisible()
         assert window.right_pane.frameStyle() == windowed_frame
         assert window.splitter.handleWidth() == windowed_handle
@@ -283,293 +321,22 @@ def test_same_window_fullscreen_hides_chrome(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_leaving_fullscreen_restores_a_maximized_window(monkeypatch, tmp_path):
+    from PyQt6.QtCore import Qt
 
-def test_subtitles_context_menu_lists_tracks_switches_and_disables(monkeypatch, tmp_path):
-    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
     try:
-        menu_before = window._video_context_menu()
-        before = next(action.menu() for action in menu_before.actions()
-                      if action.text() == 'Subtitles')
-        assert not before.menuAction().isEnabled()
-
-        fake_player._playing = True
-        fake_player.subtitle_options = [(3, b'Romanian'), (5, 'English')]
-        available_menu = window._video_context_menu()
-        subtitles = next(action.menu() for action in available_menu.actions()
-                         if action.text() == 'Subtitles')
-        labels = [action.text() for action in subtitles.actions() if not action.isSeparator()]
-        assert labels == ['Off', 'Romanian', 'English', 'Remember subtitle choices for this server']
-        assert not subtitles.actions()[-1].isEnabled()  # No live server playback here.
-        assert subtitles.actions()[0].isChecked()
-        assert not next(action for action in subtitles.actions()
-                        if action.text() == 'Romanian').isChecked()
-
-        next(action for action in subtitles.actions() if action.text() == 'Romanian').trigger()
-        assert fake_player.subtitle_id == 3
-        assert window.status_notice_label.text() == 'Subtitles: Romanian'
-
-        checked = window._video_context_menu()
-        subs2 = next(action.menu() for action in checked.actions()
-                     if action.text() == 'Subtitles')
-        assert next(a for a in subs2.actions() if a.text() == 'Romanian').isChecked()
-        next(a for a in subs2.actions() if a.text() == 'Off').trigger()
-        assert fake_player.subtitle_id == -1
-
-        fake_player.subtitle_options = []
-        no_tracks_menu = window._video_context_menu()
-        subs3 = next(action.menu() for action in no_tracks_menu.actions()
-                     if action.text() == 'Subtitles')
-        no_tracks = next(a for a in subs3.actions()
-                         if a.text() == 'No subtitle tracks available')
-        assert not no_tracks.isEnabled()
-    finally:
-        window.close()
+        window.showMaximized()
         app.processEvents()
 
-
-
-
-def test_player_subtitle_choice_can_be_remembered_as_per_server_default(monkeypatch, tmp_path):
-    """An explicit track or Off updates only the active server when opted in."""
-    from tvhplayer.core.config import ConfigStore
-
-    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
-    try:
-        window.servers = [
-            {'name': 'NAS', 'url': 'http://tv.example:9981',
-             'subtitle_language': 'ron', 'remember_subtitle_selection': False},
-            {'name': 'Backup', 'url': 'http://backup.example:9981',
-             'subtitle_language': 'eng', 'remember_subtitle_selection': False},
-        ]
-        window.server_combo.blockSignals(True)
-        window.server_combo.clear()
-        for server in window.servers:
-            window.server_combo.addItem(server['name'])
-        window.server_combo.setCurrentIndex(0)
-        window.server_combo.blockSignals(False)
-        assert window.save_config()
-
-        class Backend:
-            def stream_url(self, channel):
-                return 'http://tv.example/stream/channel/' + channel.uuid
-
-        window.get_backend = lambda: Backend()
-        fake.subtitle_options = [(3, b'Romanian'), (5, b'English'), (7, b'Track 7')]
-        window.play_channel_by_data(ui.Channel(uuid='a', name='News'))
-        fake._events.handlers['playing'](None)
+        window.toggle_fullscreen()
+        app.processEvents()
+        window.toggle_fullscreen()
         app.processEvents()
 
-        def remember_action():
-            menu = window._video_context_menu()
-            subtitles = next(a.menu() for a in menu.actions() if a.text() == 'Subtitles')
-            return next(a for a in subtitles.actions()
-                        if a.text() == 'Remember subtitle choices for this server')
-
-        option = remember_action()
-        assert option.isEnabled() and not option.isChecked()
-        option.trigger()
-        assert window.servers[0]['remember_subtitle_selection'] is True
-        assert remember_action().isChecked()
-
-        # Automatic selection from track discovery does not rewrite settings.
-        assert ConfigStore(window.config_store.path).servers[0]['subtitle_language'] == 'ron'
-        window._select_subtitle_track(5, 'English')
-        assert fake.subtitle_id == 5
-        assert window.servers[0]['subtitle_language'] == 'eng'
-        assert ConfigStore(window.config_store.path).servers[0]['subtitle_language'] == 'eng'
-
-        # Unknown VLC track labels work manually, but do not erase defaults.
-        window._select_subtitle_track(7, 'Track 7')
-        assert fake.subtitle_id == 7
-        assert window.servers[0]['subtitle_language'] == 'eng'
-
-        window._select_subtitle_track(-1, 'Off')
-        assert fake.subtitle_id == -1
-        saved = ConfigStore(window.config_store.path)
-        assert saved.servers[0]['subtitle_language'] == ''
-        assert saved.servers[0]['remember_subtitle_selection'] is True
-        assert saved.servers[1]['subtitle_language'] == 'eng'
-        assert saved.servers[1]['remember_subtitle_selection'] is False
-
-        # Off is applied to the next channel even if VLC selects a track.
-        window.play_channel_by_data(ui.Channel(uuid='b', name='Films'))
-        fake.subtitle_id = 5
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert fake.subtitle_id == -1
-
-        # Turning remembrance off preserves the prior default.
-        remember_action().trigger()
-        assert window.servers[0]['remember_subtitle_selection'] is False
-        window._select_subtitle_track(3, 'Romanian')
-        assert ConfigStore(window.config_store.path).servers[0]['subtitle_language'] == ''
-
-        # Switching servers must not alter the previous server's default.
-        window.server_combo.setCurrentIndex(1)
-        window.play_channel_by_data(ui.Channel(uuid='c', name='Music'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert not remember_action().isChecked()
-        window._select_subtitle_track(3, 'Romanian')
-        saved = ConfigStore(window.config_store.path)
-        assert [x['subtitle_language'] for x in saved.servers] == ['', 'eng']
-
-        # Arbitrary URL playback must never rewrite server defaults.
-        window.server_combo.setCurrentIndex(0)
-        window.play_url('https://example.org/video.ts')
-        assert not remember_action().isEnabled()
-        window._select_subtitle_track(5, 'English')
-        saved = ConfigStore(window.config_store.path)
-        assert [x['subtitle_language'] for x in saved.servers] == ['', 'eng']
-    finally:
-        window.close()
-        app.processEvents()
-
-
-def test_server_subtitle_default_applies_after_track_discovery(monkeypatch, tmp_path):
-    """VLC often exposes DVB subtitle tracks only after the Playing event."""
-    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
-    try:
-        class Backend:
-            def stream_url(self, channel):
-                return 'http://tv.example/stream/channel/' + channel.uuid
-
-        window.current_server = lambda: {'subtitle_language': 'ron'}
-        window.get_backend = lambda: Backend()
-        window.play_channel_by_data(ui.Channel(uuid='a', name='Beauty.ON'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert window._subtitle_default_timer.isActive()
-        assert fake.subtitle_id == -1
-
-        fake.subtitle_options = [(3, b'English [eng]'), (7, b'DVB Subtitle (Romanian)')]
-        window._apply_subtitle_default()
-        assert fake.subtitle_id == 7
-        assert not window._subtitle_default_timer.isActive()
-        assert window._subtitle_auto_applied
-
-        # Once selected, a later menu choice must remain manual for this channel.
-        window._select_subtitle_track(3, 'English')
-        assert fake.subtitle_id == 3
-        assert window._subtitle_manual_override
-        window._apply_subtitle_default()
-        assert fake.subtitle_id == 3
-
-        # A new channel starts with the server preference, not the old override.
-        window.play_channel_by_data(ui.Channel(uuid='b', name='Nat Geo Wild'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert fake.subtitle_id == 7
-        assert not window._subtitle_manual_override
-    finally:
-        window.close()
-        app.processEvents()
-
-
-def test_manual_subtitles_override_pending_default_and_off_option(monkeypatch, tmp_path):
-    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
-    try:
-        class Backend:
-            def stream_url(self, channel):
-                return 'http://tv.example/' + channel.uuid
-
-        window.get_backend = lambda: Backend()
-        window.current_server = lambda: {'subtitle_language': 'ron'}
-        fake.subtitle_options = [(3, b'English')]
-        fake.subtitle_id = 3
-
-        window.play_channel_by_data(ui.Channel(uuid='a', name='News'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        # Wrong-language auto subtitles are switched off, not substituted.
-        assert fake.subtitle_id == -1
-        assert window._subtitle_default_timer.isActive()
-
-        window._select_subtitle_track(3, 'English')
-        fake.subtitle_options.append((7, b'Romanian'))
-        window._apply_subtitle_default()
-        assert fake.subtitle_id == 3
-        assert not window._subtitle_default_timer.isActive()
-
-        # An explicit server Off setting means manual control, not English auto.
-        window.current_server = lambda: {'subtitle_language': ''}
-        fake.subtitle_id = 3
-        window.play_channel_by_data(ui.Channel(uuid='b', name='Viasat Nature'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert fake.subtitle_id == -1
-        assert window._subtitle_auto_applied
-        window._select_subtitle_track(3, 'English')
-        assert fake.subtitle_id == 3
-
-        # URL playback must not inherit the prior server language.
-        window.play_url('http://example.com/movie.mkv')
-        assert window._subtitle_preference is None
-        assert not window._subtitle_default_timer.isActive()
-    finally:
-        window.close()
-        app.processEvents()
-
-
-
-def test_stale_spu_is_disabled_before_new_channel_track_discovery(monkeypatch, tmp_path):
-    """Do not leave a previous/early SPU painted while DVB tracks are unknown."""
-    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
-    try:
-        class Backend:
-            def stream_url(self, channel):
-                return 'http://tv.example/' + channel.uuid
-
-        window.get_backend = lambda: Backend()
-        window.current_server = lambda: {'subtitle_language': 'ron'}
-        window.play_channel_by_data(ui.Channel(uuid='a', name='Old'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert window._subtitle_default_timer.isActive()
-
-        # VLC can report an active old/wrong SPU before describing tracks.
-        fake.subtitle_options = []
-        fake.subtitle_id = 3
-        window._apply_subtitle_default()
-        assert fake.subtitle_id == -1
-        assert window._subtitle_default_timer.isActive()
-
-        # Once discovered, the actual preferred DVB track is still applied.
-        fake.subtitle_options = [(3, b'English'), (7, b'DVB Subtitle (Romanian)')]
-        window._apply_subtitle_default()
-        assert fake.subtitle_id == 7
-        assert window._subtitle_auto_applied
-        assert not window._subtitle_default_timer.isActive()
-    finally:
-        window.close()
-        app.processEvents()
-
-
-def test_subtitle_preference_timeout_and_stop_cancel(monkeypatch, tmp_path):
-    app, ui, window, fake = _make_player(monkeypatch, tmp_path)
-    try:
-        class Backend:
-            def stream_url(self, channel):
-                return 'http://tv.example/' + channel.uuid
-
-        window.current_server = lambda: {'subtitle_language': 'eng'}
-        window.get_backend = lambda: Backend()
-        window.play_channel_by_data(ui.Channel(uuid='a', name='Test'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert window._subtitle_default_timer.isActive()
-        for _ in range(32):
-            window._apply_subtitle_default()
-        assert not window._subtitle_default_timer.isActive()
-        assert fake.subtitle_id == -1
-
-        window.play_channel_by_data(ui.Channel(uuid='b', name='Other'))
-        fake._events.handlers['playing'](None)
-        app.processEvents()
-        assert window._subtitle_default_timer.isActive()
-        window.stop_playback()
-        assert not window._subtitle_default_timer.isActive()
-        assert window._subtitle_preference is None
+        # Left fullscreen, so the desktop gives back the title bar and resizing.
+        assert not window.windowState() & Qt.WindowState.WindowFullScreen
+        assert window.windowState() & Qt.WindowState.WindowMaximized
     finally:
         window.close()
         app.processEvents()
@@ -590,33 +357,44 @@ def test_video_context_menu_and_double_click(monkeypatch, tmp_path):
         )
 
         menu = window._video_context_menu()
-        labels = [action.text() for action in menu.actions() if not action.isSeparator()]
+        assert [action.text().split('\t')[1:] for action in menu.actions()[:8]] == [
+            [], ['Ctrl+.'], ['Ctrl+PgUp'], ['Ctrl+PgDown'], [], ['M'], ['F11'], [],
+        ]
+        labels = [action.text().split('\t')[0] for action in menu.actions() if not action.isSeparator()]
         assert labels == [
             'Play',
             'Stop',
+            'Previous Channel',
+            'Next Channel',
             'Mute',
             'Fullscreen',
-            'Subtitles',
             'Record',
             'Record Locally',
             'Show EPG',
+            'Show in TV Guide',
+            'Jump to Now Playing',
+            'Stream Pro&file',
+            '&Audio Track',
+            '&Subtitles',
+            '&Deinterlace',
         ]
         enabled = {
-            action.text(): action.isEnabled()
+            action.text().split('\t')[0]: action.isEnabled()
             for action in menu.actions()
             if not action.isSeparator()
         }
         assert enabled['Play'] is False
+        assert enabled['Jump to Now Playing'] is False
         assert enabled['Stop'] is False
         assert enabled['Mute'] is True
         assert enabled['Fullscreen'] is True
 
         fake_player._playing = True
-        fake_player._muted = 1
+        window.player.set_muted(True)
         window.is_fullscreen = True
         playing_menu = window._video_context_menu()
         playing_labels = [
-            action.text()
+            action.text().split('\t')[0]
             for action in playing_menu.actions()
             if not action.isSeparator()
         ]
@@ -642,19 +420,20 @@ def test_video_context_menu_and_double_click(monkeypatch, tmp_path):
         window._protect_video_surface(True)
         app.processEvents()
         assert not window.idle_splash.isVisible()
-        assert not window.video_frame.updatesEnabled()
+        assert window.video_frame.updatesEnabled()
         window.toggle_fullscreen()
         app.processEvents()
         assert not window.idle_splash.isVisible()
-        assert not window.video_frame.updatesEnabled()
+        assert window.video_frame.updatesEnabled()
     finally:
         window.close()
         app.processEvents()
 
 
 def test_playback_surface_ignores_transient_stop_and_qt_paints(monkeypatch, tmp_path):
-    from PyQt6.QtCore import QPoint, QRect, Qt
+    from PyQt6.QtCore import QPoint, Qt
     from PyQt6.QtGui import QPaintEvent
+    from PyQt6.QtCore import QRect
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
     try:
@@ -664,10 +443,11 @@ def test_playback_surface_ignores_transient_stop_and_qt_paints(monkeypatch, tmp_
         window._protect_video_surface(True)
         assert window._playback_active
         assert not window.idle_splash.isVisible()
-        assert not window.video_frame.updatesEnabled()
+        assert window.video_frame.updatesEnabled()
 
         paint = QPaintEvent(QRect(0, 0, 10, 10))
-        assert window.eventFilter(window.video_frame, paint) is True
+        # OpenGL video widget paints itself; the filter does not swallow paints.
+        assert window.eventFilter(window.video_frame, paint) is False
 
         fake_player._events.handlers['stopped'](None)
         app.processEvents()
@@ -703,7 +483,7 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert not window.playback_spinner.isVisible()
 
         class Backend:
-            def stream_url(self, channel):
+            def stream_url(self, channel, profile=None):
                 return 'http://tv.example/stream'
 
         window.get_backend = lambda: Backend()
@@ -715,8 +495,7 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert window.playback_spinner.isVisible()
         assert window.playback_spinner._timer.isActive()
         assert window.idle_splash.isVisible()
-        assert window.status_label.text() == 'Playing: News'
-        assert window.status_notice_label.text() == 'Starting: News'
+        assert window.status_label.text() == 'Starting: News'
         image = window.playback_spinner.grab().toImage()
         assert image.width() > 0
         assert any(
@@ -739,21 +518,339 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         fake_player._events.handlers['error'](None)
         app.processEvents()
 
+        # The spinner stays up without its ring to say what went wrong.
+        assert window.playback_spinner.isVisible()
+        assert not window.playback_spinner._timer.isActive()
+        assert window.playback_spinner.accessibleName() == 'Playback failed'
+        assert window.status_label.text() == 'Playback failed'
+
+        window.stop_playback()
+        app.processEvents()
         assert not window.playback_spinner.isVisible()
         assert window.idle_splash.isVisible()
-        assert window.status_label.text() == 'Ready'
-        assert window.status_notice_label.text() == 'Playback failed'
     finally:
         window.close()
         app.processEvents()
 
 
+def test_the_servers_reason_shows_over_the_player(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window.show()
+        app.processEvents()
+
+        class Backend:
+            def stream_url(self, channel, profile=None):
+                return 'http://tv.example/stream/channel/news?profile=pass'
+
+        window.get_backend = lambda: Backend()
+        window.servers = []
+        window.play_channel_by_data(ui.Channel(uuid='news', name='News'))
+        fake_player._events.handlers['playing'](None)
+        app.processEvents()
+        log = object()
+        window._stream_log = log
+
+        window._on_stream_log(log, ['t webui: Stop streaming /stream/channel/news?profile=pass, Subscription overridden'])
+        app.processEvents()
+
+        assert not window._playback_active
+        assert window.status_label.text() == 'News stopped: Subscription overridden'
+        assert window.playback_spinner.isVisible()
+        assert window.playback_spinner.accessibleName() == 'News stopped: Subscription overridden'
+
+        window.play_channel_by_data(ui.Channel(uuid='news', name='News'))
+        app.processEvents()
+        assert window.playback_spinner._timer.isActive()
+        assert not window.playback_spinner.showing_problem()
+    finally:
+        window._stream_log = None
+        window.close()
+        app.processEvents()
+
+
+class _Cell:
+    """One channel list cell, read through the model as the view would."""
+
+    def __init__(self, table, row, column):
+        self._index = table.model().index(row, column)
+
+    def data(self, role):
+        return self._index.data(role)
+
+    def text(self):
+        from PyQt6.QtCore import Qt
+
+        value = self.data(Qt.ItemDataRole.DisplayRole)
+        return '' if value is None else str(value)
+
+    def toolTip(self):
+        from PyQt6.QtCore import Qt
+
+        return self.data(Qt.ItemDataRole.ToolTipRole) or ''
+
+    def background(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QBrush
+
+        value = self.data(Qt.ItemDataRole.BackgroundRole)
+        return QBrush(value) if value is not None else QBrush()
+
+    def foreground(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QBrush
+
+        value = self.data(Qt.ItemDataRole.ForegroundRole)
+        return QBrush(value) if value is not None else QBrush()
+
+    def icon(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QIcon
+
+        value = self.data(Qt.ItemDataRole.DecorationRole)
+        return QIcon(value) if value is not None else QIcon()
+
+
+def _cell(table, row, column):
+    return _Cell(table, row, column)
+
+
 def _channel_row(table, name):
     for row in range(table.rowCount()):
-        item = table.item(row, 1)
-        if item is not None and item.text() == name:
+        if _cell(table, row, 1).text() == name:
             return row
     return -1
+
+
+def _wait_for_now_next(app, window, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while window._now_next_fetch is not None:
+        assert time.monotonic() < deadline, "now/next fetch did not finish"
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+
+
+def _wait_for_channels(app, window, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while window._channel_fetch is not None:
+        assert time.monotonic() < deadline, "channel fetch did not finish"
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+
+
+def test_channel_list_shows_loading_empty_and_error_states(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        news = ui.Channel(uuid='news', name='News', number=1)
+        gate = threading.Event()
+        answers = []
+        finished = []
+
+        class Backend:
+            def __init__(self, answer):
+                self.answer = answer
+
+            def get_channels(self):
+                gate.wait(5)
+                finished.append(self.answer)
+                if isinstance(self.answer, Exception):
+                    raise self.answer
+                return self.answer
+
+        # Each fetch takes its answer when it starts, so the order is fixed.
+        window._open_channel_backend = lambda server: Backend(answers.pop(0))
+        # This test supplies only channel-list outcomes, not an EPG backend.
+        window._start_now_next_fetch = lambda: None
+        window.servers = [{'name': 'Home', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
+        window.server_combo.blockSignals(True)
+        window.server_combo.addItem('Home')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        monkeypatch.undo()
+        state = window.channel_state
+
+        # First load: a spinner page stands in for the list.
+        answers.append(OSError('Connection refused'))
+        window.fetch_channels()
+        assert window.channel_stack.currentWidget() is state
+        assert not state.ring.isHidden()
+        assert state.retry_btn.isHidden()
+        assert "Loading channels from Home" in state.message.text()
+        gate.set()
+        _wait_for_channels(app, window)
+
+        # Failure: the message and a Retry button, no dialog.
+        assert window.channel_stack.currentWidget() is state
+        assert state.ring.isHidden()
+        assert not state.retry_btn.isHidden()
+        assert "Could not connect to Home" in state.message.text()
+        assert "Connection refused" in state.message.text()
+
+        answers.append([news])
+        state.retry_btn.click()
+        _wait_for_channels(app, window)
+        assert window.channel_stack.currentWidget() is window.channel_list
+        assert _channel_row(window.channel_list, 'News') >= 0
+
+        # Reload of the same server: the list stays and a thin bar runs.
+        gate.clear()
+        answers.append(OSError('timed out'))
+        window.fetch_channels()
+        assert window.channel_stack.currentWidget() is window.channel_list
+        assert not window.channel_busy.isHidden()
+        gate.set()
+        _wait_for_channels(app, window)
+        assert window.channel_busy.isHidden()
+        assert window.channel_stack.currentWidget() is window.channel_list
+        assert _channel_row(window.channel_list, 'News') >= 0
+
+        # A fetch replaced by a newer one is ignored when it ends.
+        gate.clear()
+        finished.clear()
+        answers.extend([[ui.Channel(uuid='old', name='Old', number=9)], []])
+        window.fetch_channels()
+        window.fetch_channels()
+        gate.set()
+        _wait_for_channels(app, window)
+        deadline = time.monotonic() + 5
+        while len(finished) < 2 and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        for _ in range(20):
+            app.processEvents()
+            time.sleep(0.01)
+        assert _channel_row(window.channel_list, 'Old') == -1
+        assert window.channel_stack.currentWidget() is state
+        assert "no channels" in state.message.text()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_channel_fetch_hands_its_connection_to_the_window(monkeypatch, tmp_path):
+    import threading
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        gate = threading.Event()
+        opened = []
+
+        class Backend:
+            def __init__(self):
+                self.closed = False
+                opened.append(self)
+
+            def get_channels(self):
+                gate.wait(5)
+                return [ui.Channel(uuid='news', name='News', number=1)]
+
+            def close(self):
+                self.closed = True
+
+        window._open_channel_backend = lambda server: Backend()
+        # Connection ownership is tested independently of background EPG.
+        window._start_now_next_fetch = lambda: None
+        window.servers = [{'name': 'Home', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
+        window.server_combo.blockSignals(True)
+        window.server_combo.addItem('Home')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        monkeypatch.undo()
+
+        # The finished fetch's connection becomes the window's, still open.
+        gate.set()
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        first = opened[0]
+        assert window.get_backend() is first
+        assert not first.closed
+
+        # A reload replaces it; a fetch overtaken by a newer one closes its own.
+        gate.clear()
+        window.fetch_channels()
+        window.fetch_channels()
+        gate.set()
+        _wait_for_channels(app, window)
+        deadline = time.monotonic() + 5
+        while not opened[1].closed and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert first.closed
+        assert opened[1].closed
+        assert window.get_backend() is opened[2]
+        assert not opened[2].closed
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_initial_channel_list_is_visible_while_epg_is_still_loading(monkeypatch, tmp_path):
+    """Do not serialize channel rendering behind an expensive Now/Next read."""
+    import threading
+
+    from tvhplayer.core.channel_info import NowNext
+    from tvhplayer.core.models import EpgEvent
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    channel = ui.Channel(uuid='news', name='News', number=1)
+    now = int(time.time())
+    news = EpgEvent(
+        start=now - 60, stop=now + 3600, title='Headlines',
+        channel_uuid='news', event_id=12,
+    )
+    reading = threading.Event()
+    release = threading.Event()
+
+    class Backend:
+        def get_channels(self):
+            return [channel]
+
+        def list_channel_tags(self):
+            return []
+
+        def get_now_next_live(self, channels):
+            assert channels == [channel]
+            reading.set()
+            if not release.wait(5):
+                raise TimeoutError('The EPG gate was not released')
+            return {'news': NowNext(news, None)}
+
+        def close(self):
+            pass
+
+    try:
+        window._open_channel_backend = lambda server: Backend()
+        window.servers = [{'name': 'Home', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
+        window.server_combo.blockSignals(True)
+        window.server_combo.addItem('Home')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        monkeypatch.undo()
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        assert reading.wait(5)
+        assert window.channel_stack.currentWidget() is window.channel_list
+        row = _channel_row(window.channel_list, 'News')
+        assert row >= 0
+        assert _cell(window.channel_list, row, ui.COL_NOW).text() == ''
+        assert window._now_next_fetch is not None
+
+        release.set()
+        _wait_for_now_next(app, window)
+        assert _cell(window.channel_list, row, ui.COL_NOW).text() == 'Headlines'
+    finally:
+        release.set()
+        window.close()
+        app.processEvents()
 
 
 def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
@@ -768,10 +865,11 @@ def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
             def get_channels(self):
                 return [news, sport]
 
-            def stream_url(self, channel):
+            def stream_url(self, channel, profile=None):
                 return f'http://tv.example/stream/{channel.uuid}'
 
         window.get_backend = lambda: Backend()
+        window._open_channel_backend = lambda server: Backend()
         window.servers = [{
             'name': 'local',
             'url': 'http://127.0.0.1:9981',
@@ -784,121 +882,214 @@ def test_channel_list_marks_the_playing_channel(monkeypatch, tmp_path):
 
         monkeypatch.undo()
         window.fetch_channels()
-        app.processEvents()
+        _wait_for_channels(app, window)
 
         news_row = _channel_row(window.channel_list, 'News')
         sport_row = _channel_row(window.channel_list, 'Sport')
         assert news_row >= 0 and sport_row >= 0
-        assert window.channel_list.item(news_row, 2).text() == ""
-        assert window.channel_list.item(sport_row, 2).text() == ""
+        assert _cell(window.channel_list, news_row, 2).text() == ""
+        assert _cell(window.channel_list, sport_row, 2).text() == ""
 
         window.play_channel_by_data(sport)
         app.processEvents()
 
         assert window.channel_list.currentRow() == sport_row
-        assert window.channel_list.item(sport_row, 2).text() == ""
-        assert not window.channel_list.item(sport_row, 2).icon().isNull()
-        assert window.channel_list.item(sport_row, 2).data(
+        assert window.windowTitle() == "Sport – TVHplayer"
+        assert _cell(window.channel_list, sport_row, 2).text() == "Playing"
+        assert _cell(window.channel_list, sport_row, 2).data(
             Qt.ItemDataRole.AccessibleTextRole
-        ) and "Playing;" in window.channel_list.item(sport_row, 2).data(
-            Qt.ItemDataRole.AccessibleTextRole
-        )
-        assert "Playing." in window.channel_list.item(sport_row, 1).data(
+        ) == "Playing"
+        assert "Playing." in _cell(window.channel_list, sport_row, 1).data(
             Qt.ItemDataRole.AccessibleDescriptionRole
         )
-        assert window.channel_list.item(news_row, 2).text() == ""
-        colors = ui.row_emphasis('playing')
-        if colors is not None:
-            assert window.channel_list.item(sport_row, 1).background().color().name() == colors[0].name()
-            assert window.channel_list.item(sport_row, 0).foreground().color().name() == colors[1].name()
+        assert _cell(window.channel_list, news_row, 2).text() == ""
+        assert _cell(window.channel_list, sport_row, 1).data(Qt.ItemDataRole.BackgroundRole) is None
 
         window.channel_list.setCurrentCell(news_row, 1)
         app.processEvents()
-        assert window.channel_list.item(sport_row, 2).text() == ""
-        assert not window.channel_list.item(sport_row, 2).icon().isNull()
-        assert window.channel_list.item(news_row, 2).text() == ""
+        assert _cell(window.channel_list, sport_row, 2).text() == "Playing"
+        assert _cell(window.channel_list, news_row, 2).text() == ""
+
+        # Jump to Now Playing clears a search that hides the row and selects it.
+        window.search_box.setText("News")
+        app.processEvents()
+        assert _channel_row(window.channel_list, 'Sport') < 0
+        window.go_to_playing_action.trigger()
+        app.processEvents()
+        assert window.search_box.text() == ""
+        assert _channel_row(window.channel_list, 'Sport') == sport_row
+        assert window.channel_list.currentRow() == sport_row
+        window.channel_list.setCurrentCell(news_row, 1)
 
         window.fetch_channels()
-        app.processEvents()
+        _wait_for_channels(app, window)
         sport_row = _channel_row(window.channel_list, 'Sport')
         news_row = _channel_row(window.channel_list, 'News')
-        assert window.channel_list.item(sport_row, 2).text() == ""
-        assert not window.channel_list.item(sport_row, 2).icon().isNull()
+        assert _cell(window.channel_list, sport_row, 2).text() == "Playing"
         assert window.channel_list.currentRow() == sport_row
 
         window.stop_playback()
         app.processEvents()
-        assert window.channel_list.item(sport_row, 2).text() == ""
-        assert window.channel_list.item(sport_row, 2).icon().isNull()
-        assert window.channel_list.item(sport_row, 1).background().style() == Qt.BrushStyle.NoBrush
-        assert "Playing." not in window.channel_list.item(sport_row, 1).data(
+        assert window.windowTitle() == "TVHplayer"
+        window.show_playing_channel()
+        assert window.status_label.text() == "Nothing is playing"
+        assert _cell(window.channel_list, sport_row, 2).text() == ""
+        assert _cell(window.channel_list, sport_row, 1).background().style() == Qt.BrushStyle.NoBrush
+        assert "Playing." not in _cell(window.channel_list, sport_row, 1).data(
             Qt.ItemDataRole.AccessibleDescriptionRole
         )
 
         window.play_channel_by_data(news)
         app.processEvents()
         news_row = _channel_row(window.channel_list, 'News')
-        assert window.channel_list.item(news_row, 2).text() == ""
-        assert not window.channel_list.item(news_row, 2).icon().isNull()
+        assert _cell(window.channel_list, news_row, 2).text() == "Playing"
         fake_player._events.handlers['error'](None)
         app.processEvents()
-        assert window.channel_list.item(news_row, 2).text() == ""
+        assert _cell(window.channel_list, news_row, 2).text() == ""
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_go_to_playing_channel_switches_to_its_server(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        lineups = {
+            'http://home.example:9981': [
+                ui.Channel(uuid='news', name='News', number=1),
+                ui.Channel(uuid='sport', name='Sport', number=2),
+            ],
+            'http://away.example:9981': [ui.Channel(uuid='sport', name='Movies', number=1)],
+        }
+
+        class Backend:
+            def __init__(self, server):
+                self.server = server
+
+            def get_channels(self):
+                return lineups[self.server['url']]
+
+            def stream_url(self, channel, profile=None):
+                return f'{self.server["url"]}/stream/{channel.uuid}'
+
+        window.get_backend = lambda: Backend(window.current_server())
+        window._open_channel_backend = Backend
+        window.servers = [
+            {'name': 'Home', 'url': 'http://home.example:9981', 'protocol': 'http'},
+            {'name': 'Away', 'url': 'http://away.example:9981', 'protocol': 'http'},
+        ]
+        window.server_combo.blockSignals(True)
+        window.server_combo.addItem('Home')
+        window.server_combo.addItem('Away')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+
+        monkeypatch.undo()
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        window.play_channel_by_data(lineups['http://home.example:9981'][1])
+        app.processEvents()
+
+        window.server_combo.setCurrentIndex(1)
+        _wait_for_channels(app, window)
+        # A channel on the other server with the same UUID is not the one playing.
+        assert _cell(window.channel_list, _channel_row(window.channel_list, 'Movies'), 2).text() == ""
+
+        window.go_to_playing_action.trigger()
+        _wait_for_channels(app, window)
+        app.processEvents()
+        assert window.server_combo.currentIndex() == 0
+        sport_row = _channel_row(window.channel_list, 'Sport')
+        assert window.channel_list.currentRow() == sport_row
+        assert _cell(window.channel_list, sport_row, 2).text() == "Playing"
     finally:
         window.close()
         app.processEvents()
 
 
 def test_dvr_status_dialog_stops_selected_recording(monkeypatch):
-    """DVR Status uses the shared gate and never sends a second Stop."""
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    monkeypatch.setitem(
-        sys.modules, 'vlc',
-        types.SimpleNamespace(Instance=lambda *a, **k: None, MediaStats=object, __version__='stub'),
-    )
     sys.modules.pop('tvhplayer.tvhplayer', None)
+
     import tvhplayer.tvhplayer as ui
     from PyQt6.QtWidgets import QApplication, QWidget
     from tvhplayer.core.models import DvrEntry
+
     app = QApplication.instance() or QApplication([])
 
-    entry = DvrEntry(
-        uuid='run', title='News', channel_name='IRINN', start=200,
-        duration=60, status='Running', sched_status='recording', htsp_id=7,
-    )
-    class Backend:
-        stopped = []
-        def stop_dvr_entry(self, item):
-            self.stopped.append(item.uuid)
+    class FakeBackend:
+        def __init__(self):
+            self.stopped = []
+            self.entries = [
+                DvrEntry(
+                    uuid='soon', title='Later', channel_name='BBC', start=100, duration=60,
+                    status='Scheduled', sched_status='scheduled',
+                ),
+                DvrEntry(
+                    uuid='run', title='News', channel_name='IRINN', start=200, duration=60,
+                    status='Running', sched_status='recording', htsp_id=7,
+                ),
+                DvrEntry(
+                    uuid='done', title='Old', channel_name='BBC', start=50, duration=60,
+                    status='Completed',
+                ),
+            ]
+
+        def list_dvr_entries(self):
+            return list(self.entries)
+
+        def stop_dvr_entry(self, entry):
+            self.stopped.append(entry.uuid)
+            self.entries = [item for item in self.entries if item.uuid != entry.uuid]
+
     class Parent(QWidget):
         def __init__(self):
             super().__init__()
-            self._dvr_gate = ui._DvrGate(self)
-            self.tasks_pane = types.SimpleNamespace(_server_entries=[entry])
-            self.local_recorder = types.SimpleNamespace(is_running=False)
+            self.is_recording = True
+            self.cleared = False
+            self.local_recording_running = lambda: False
             self.messages = []
-        def _refresh_tasks(self):
-            pass
+            self.statusbar = types.SimpleNamespace(showMessage=self.messages.append)
 
+        def stop_recording_indicator(self):
+            self.is_recording = False
+            self.cleared = True
+
+    backend = FakeBackend()
     parent = Parent()
-    backend = Backend()
     dialog = ui.DVRStatusDialog(backend, parent)
     dialog.update_timer.stop()
     try:
-        assert dialog.upcoming_table.rowCount() == 1
+        assert dialog.upcoming_table.rowCount() == 2
+        assert dialog.stop_btn.isEnabled() is False
+
         dialog.upcoming_table.selectRow(0)
         app.processEvents()
+        assert dialog.stop_btn.isEnabled() is False
         dialog.stop_selected()
-        dialog.stop_selected()  # Busy gate rejects second invocation.
-        from PyQt6.QtTest import QTest
-        for _ in range(100):
-            app.processEvents()
-            if not parent._dvr_gate.busy:
-                break
-            QTest.qWait(10)
+        assert backend.stopped == []
+
+        dialog.upcoming_table.selectRow(1)
+        app.processEvents()
+        assert dialog.stop_btn.isEnabled() is True
+        dialog.stop_selected()
         assert backend.stopped == ['run']
-        assert 'Stop accepted' in dialog.action_label.text()
+        assert 'News' in dialog.action_label.text()
+        assert dialog.upcoming_table.rowCount() == 1
+        assert dialog.stop_btn.isEnabled() is False
+        assert parent.cleared is True
+        assert parent.messages == ['Recording stopped']
+
+        dialog.tabs.setCurrentWidget(dialog.finished_table)
+        dialog.finished_table.selectRow(0)
+        app.processEvents()
+        assert dialog.stop_btn.isEnabled() is False
+        assert dialog.upcoming_table.accessibleName() == "Upcoming and current recordings"
     finally:
         dialog.close()
+        parent.close()
+        app.processEvents()
+
 
 def _column_widths_fill_viewport(table):
     header = table.horizontalHeader()
@@ -908,11 +1099,6 @@ def _column_widths_fill_viewport(table):
 
 def test_status_dialogs_fill_window_width(monkeypatch):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
-    monkeypatch.setitem(
-        sys.modules,
-        'vlc',
-        types.SimpleNamespace(Instance=lambda *a, **k: None, MediaStats=object, __version__='stub'),
-    )
     sys.modules.pop('tvhplayer.tvhplayer', None)
     import tvhplayer.tvhplayer as ui
     from PyQt6.QtWidgets import QApplication, QHeaderView
@@ -958,6 +1144,8 @@ def test_status_dialogs_fill_window_width(monkeypatch):
         assert dvr.failed_table.horizontalHeader().sectionResizeMode(3) == QHeaderView.ResizeMode.Stretch
         assert server.subscriptions_table.horizontalHeader().sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
         assert server.signal_table.horizontalHeader().sectionResizeMode(3) == QHeaderView.ResizeMode.Stretch
+        # A column title too wide for its column ends in … rather than being cut at both ends.
+        assert dvr.upcoming_table.horizontalHeader().textElideMode() == ui.Qt.TextElideMode.ElideRight
 
         for table in (
             dvr.upcoming_table,
@@ -977,6 +1165,7 @@ def test_status_dialogs_fill_window_width(monkeypatch):
 def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
     from PyQt6.QtCore import QEvent, Qt
     from PyQt6.QtGui import QKeyEvent
+    from PyQt6.QtTest import QTest
     from tvhplayer.core.models import Channel, EpgEvent
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
@@ -986,16 +1175,12 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
 
         assert app.applicationName() == "TVHplayer"
         assert window.play_btn.accessibleName() == "Play"
-        assert window.play_btn.toolTip() == "Play the selected channel (P)"
+        assert window.play_btn.toolTip() == "Play / Stop (P)"
         assert window.play_btn.statusTip() == ""
-        assert window.stop_btn.accessibleName() == "Stop"
-        assert window.stop_btn.toolTip() == "Stop playback (Ctrl+.)"
-        assert window.stop_btn.statusTip() == ""
-        assert window.start_record_btn.toolTip() == "Record on the server (Ctrl+R)"
-        assert window.start_record_btn.statusTip() == ""
-        assert window.stop_record_btn.toolTip() == "Stop the server recording (Ctrl+E)"
-        assert window.start_local_record_btn.toolTip() == "Record on this computer (Ctrl+Shift+R)"
-        assert window.stop_local_record_btn.toolTip() == "Stop the recording on this computer (Ctrl+Shift+E)"
+        assert window.record_btn.toolTip() == "Record (Ctrl+R / Ctrl+Shift+R)"
+        assert window.record_btn.statusTip() == ""
+        assert window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
         assert window.mute_btn.toolTip() == "Mute (M)"
         assert window.volume_slider.toolTip() == "Volume"
         assert window.fullscreen_btn.toolTip() == "Fullscreen (F11)"
@@ -1009,19 +1194,21 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert window.server_combo.statusTip() == ""
         assert window.status_label.toolTip() == ""
         assert window.status_label.statusTip() == ""
-        assert window.start_record_btn.accessibleName() == "Record on server"
-        assert window.stop_record_btn.accessibleName() == "Stop server recording"
-        assert window.start_local_record_btn.accessibleName() == "Record locally"
-        assert window.stop_local_record_btn.accessibleName() == "Stop local recording"
+        assert window.record_btn.accessibleName() == "Record"
+        assert window.stop_record_btn.accessibleName() == "Stop recording"
+        assert window.record_more_btn.accessibleName() == "Start another recording"
         assert window.mute_btn.accessibleName() == "Mute"
         assert window.fullscreen_btn.accessibleName() == "Fullscreen"
         assert window.manage_servers_btn.accessibleName() == "Manage servers"
         assert window.volume_slider.accessibleName() == "Volume"
         assert window.video_frame.accessibleName() == "Video player"
         assert window.channel_list.accessibleName() == "Channels"
-        assert window.channel_list.horizontalHeaderItem(0).text() == "Number"
-        assert window.channel_list.horizontalHeaderItem(2).text() == "Status"
+        assert window.channel_model.headerData(0, Qt.Orientation.Horizontal) == "Number"
+        assert window.channel_model.headerData(2, Qt.Orientation.Horizontal) == "Status"
         assert window.splitter.accessibleName() == "Channels, player, and tasks"
+        from PyQt6.QtCore import QT_VERSION_STR
+        from tvhplayer.video_widget import live_splitter_keeps_up
+        assert window.splitter.opaqueResize() is live_splitter_keeps_up(QT_VERSION_STR)
         assert window.splitter.handle(2).accessibleName() == "Resize player and tasks"
         assert window.tasks_pane.accessibleName() == "Tasks"
         assert window.tasks_pane.search_box.accessibleName() == "Filter tasks"
@@ -1032,7 +1219,8 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
             for index in range(window.tasks_pane.status_combo.count())
         ] == ["Active", "All", "Recording", "Scheduled", "Completed"]
         assert window.tasks_pane.task_table.accessibleName() == "Tasks"
-        assert window.tasks_pane.task_table.isVisible()
+        assert not window.tasks_pane.isVisible()
+        assert window.tasks_pane.task_table.isVisibleTo(window.tasks_pane)
         assert window.tasks_pane.task_table.rowCount() == 0
         assert window.tasks_pane.task_table.columnCount() == 7
         assert window.tasks_pane.task_table.horizontalHeaderItem(0).text() == ""
@@ -1048,7 +1236,7 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert window.tasks_pane.action_btn.isEnabled() is False
         assert window.tasks_pane.reveal_btn.accessibleName() == "Reveal in File Manager"
         assert window.tasks_pane.reveal_btn.isEnabled() is False
-        assert window.tasks_action.isChecked() is True
+        assert window.tasks_action.isChecked() is False
         assert any(label.buddy() is window.tasks_pane.search_box for label in window.findChildren(ui.QLabel))
         assert any(label.buddy() is window.tasks_pane.status_combo for label in window.findChildren(ui.QLabel))
         focus_chain = []
@@ -1063,7 +1251,9 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         list_at = focus_chain.index(window.tasks_pane.task_table)
         action_at = focus_chain.index(window.tasks_pane.action_btn)
         reveal_at = focus_chain.index(window.tasks_pane.reveal_btn)
-        assert search_at < status_at < list_at < action_at < reveal_at
+        close_at = focus_chain.index(window.tasks_pane.close_btn)
+        assert search_at < status_at < list_at < action_at < reveal_at < close_at
+        assert window.tasks_pane.close_btn.accessibleName() == "Close Tasks"
         assert "focus" in window.play_btn.styleSheet()
         assert window.fullscreen_action.shortcut().toString() == "F11"
         assert any(label.buddy() is window.search_box for label in window.findChildren(ui.QLabel))
@@ -1088,13 +1278,11 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert shortcuts.help_text.accessibleName() == "Keyboard shortcuts"
         shortcuts.close()
 
-        window._playback_channel = Channel(uuid="news", name="News")
-        window._awaiting_playback = True
-        window._refresh_playback_status()
+        window.statusbar.showMessage("Playing: News")
+        window.statusbar.showMessage("Playing: News")
         assert window.status_label.text() == "Playing: News"
-        assert window.status_label.accessibleName() == "Playing: News"
-        window.statusbar.showMessage("A separate native status message")
-        assert window.status_label.text() == "Playing: News"
+        # Read from its text: a name of its own would stop the label reporting changes.
+        assert window.status_label.accessibleName() == ""
 
         window.video_frame.setFocus()
         app.processEvents()
@@ -1104,7 +1292,7 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert fake_player.audio_get_mute()
         assert window.mute_btn.isChecked() is True
         assert window.mute_btn.accessibleName() == "Unmute"
-        assert window.status_notice_label.accessibleName() == "Muted"
+        assert window.status_label.text() == "Muted"
 
         window.channel_list.setFocus()
         app.processEvents()
@@ -1125,37 +1313,67 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         window.keyPressEvent(typed)
         assert window.search_box.text() == ""
 
-        louder = QKeyEvent(
-            QEvent.Type.KeyPress,
-            Qt.Key.Key_Up,
-            Qt.KeyboardModifier.ControlModifier,
-        )
-        window.keyPressEvent(louder)
+        # Ctrl+Up in the channel list changes the volume and leaves the list's row.
+        window.channel_model.set_channels([
+            ui.Channel(uuid="abc", name="News", number=4),
+            ui.Channel(uuid="def", name="Sport", number=5),
+        ])
+        window.channel_list.setCurrentCell(1, 1)
+        window.activateWindow()
+        QTest.qWaitForWindowActive(window)
+        window.channel_list.setFocus()
+        QTest.keyClick(window.channel_list, Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier)
         assert window.volume_slider.value() == 55
-        assert window.status_notice_label.text() == "Volume 55"
+        assert window.status_label.text() == "Volume 55"
+        assert window.config['volume'] == 55
+        assert window.channel_list.currentRow() == 1
 
-        window.channel_list.setSortingEnabled(False)
-        window.channel_list.insertRow(0)
-        number = ui.QTableWidgetItem()
-        number.setData(Qt.ItemDataRole.DisplayRole, 4)
-        name = ui.QTableWidgetItem("News")
-        name.setData(Qt.ItemDataRole.UserRole, {"uuid": "abc", "name": "News", "number": 4})
-        window.channel_list.setItem(0, 0, number)
-        window.channel_list.setItem(0, 1, name)
+        playback_labels = [action.text().replace("&", "") for action in window.playback_menu.actions()]
+        assert playback_labels[:11] == [
+            "Play or Stop\tP", "Stop Playback", "Previous Channel", "Next Channel", "",
+            "Pause or Resume", "Back 10 Seconds", "Forward 10 Seconds", "Go to Live", "", "Mute or Unmute\tM",
+        ]
+        shortcuts = {
+            action.text().replace("&", ""): action.shortcut().toString()
+            for action in window.playback_menu.actions()
+            if not action.shortcut().isEmpty()
+        }
+        assert shortcuts == {
+            "Stop Playback": "Ctrl+.",
+            "Previous Channel": "Ctrl+PgUp",
+            "Next Channel": "Ctrl+PgDown",
+            "Volume Up": "Ctrl+Up",
+            "Volume Down": "Ctrl+Down",
+            "Record on Server": "Ctrl+R",
+            "Stop Server Recording": "Ctrl+E",
+            "Record on This Computer": "Ctrl+Shift+R",
+            "Stop Local Recording": "Ctrl+Shift+E",
+        }
+
+        window.channel_model.set_channels([ui.Channel(uuid="abc", name="News", number=4)])
         window.channel_list.setCurrentCell(0, 1)
         window.servers = []
         enter = QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier)
         assert window.eventFilter(window.channel_list, enter) is True
-        assert "Playback error" in window.status_notice_label.text()
+        assert "Playback error" in window.status_label.text()
 
-        before_rec = window.recording_indicator.text()
         window.start_recording_indicator()
-        # A start notice must not manufacture an unverified REC 1.
-        assert window.recording_indicator.text() == before_rec
-        assert window.recording_indicator.isVisible()
+        badge = window.recording_indicator
+        assert badge.text() == "Recording"
+        assert badge.isVisible()
+        assert badge.dot.is_pulsing()
+        assert "Recording" in badge.accessibleName()
+        window.tasks_pane.recordings_changed.emit(2)
+        assert badge.text() == "2 recordings"
+        assert badge.accessibleName() == "2 recordings in progress"
+        window._close_tasks_pane()
+        badge.click()
+        assert window.tasks_pane.isVisible()
+        assert window.tasks_action.isChecked()
         window.stop_recording_indicator()
-        # Stop also waits for a verified server snapshot.
-        assert window.recording_indicator.text() == before_rec
+        assert not badge.dot.is_pulsing()
+        assert window.recording_indicator.text() == ""
+        assert window.recording_indicator.accessibleName() == "Not recording"
 
         window.toggle_fullscreen()
         app.processEvents()
@@ -1166,15 +1384,16 @@ def test_accessibility_names_keyboard_and_contrast(monkeypatch, tmp_path):
         assert window.video_frame.accessibleName() == "Video player"
 
         duration = ui.RecordingDurationDialog()
-        assert duration.hours_spin.accessibleName() == "Hours"
-        assert duration.minutes_spin.accessibleName() == "Minutes"
-        assert any(label.buddy() is duration.hours_spin for label in duration.findChildren(ui.QLabel))
+        assert duration.custom_spin.accessibleName() == "Length"
+        assert duration.preset_buttons['60'].accessibleName() == "1 h"
+        assert any(label.buddy() is duration.preset_buttons['30'] for label in duration.findChildren(ui.QLabel))
         duration.close()
 
-        config = ui.ServerConfigDialog()
+        config = ui.ServerDialog()
         assert config.password_input.echoMode() == ui.QLineEdit.EchoMode.Password
         assert any(label.buddy() is config.password_input for label in config.findChildren(ui.QLabel))
         assert any(label.buddy() is config.url_input for label in config.findChildren(ui.QLabel))
+        assert any(label.buddy() is config.server_list for label in config.findChildren(ui.QLabel))
         config.close()
 
         channel = Channel(uuid="c", name="News", number=1)
@@ -1269,24 +1488,333 @@ def _select_task(panel, needle):
     raise AssertionError(needle)
 
 
+def _wait_for_tasks(app, panel, timeout=5.0):
+    import time
+
+    deadline = time.monotonic() + timeout
+    while panel._fetching:
+        assert time.monotonic() < deadline, "task fetch did not finish"
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+
+
+def test_tasks_panel_reads_the_server_without_blocking(monkeypatch, tmp_path):
+    import threading
+    import time
+
+    from tvhplayer.core.models import DvrEntry
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    window.tasks_pane.update_timer.stop()
+    gate = threading.Event()
+
+    class SlowBackend:
+        def __init__(self, title):
+            self.title = title
+
+        def list_dvr_entries(self):
+            gate.wait(5)
+            return [DvrEntry(
+                uuid=self.title, title=self.title, channel_name='BBC', start=int(time.time()) + 600,
+                duration=60, status='Scheduled', sched_status='scheduled',
+            )]
+
+        def close(self):
+            pass
+
+    servers = {'name': 'old', 'url': 'http://old'}
+    window.current_server = lambda: servers
+    window._server_requests_ready = lambda: True
+    panel = window.tasks_pane
+    panel.open_backend = lambda server: SlowBackend(server['name'])
+    try:
+        started = time.monotonic()
+        panel.refresh()
+        assert time.monotonic() - started < 1
+        assert panel._fetching
+        assert panel.task_table.rowCount() == 0
+
+        # The server changes while the old one is still answering.
+        servers = {'name': 'new', 'url': 'http://new'}
+        panel.clear_server_tasks()
+        gate.set()
+        deadline = time.monotonic() + 5
+        while not any('new' in text for text in _task_texts(panel)):
+            assert time.monotonic() < deadline, "the new server's recordings never showed"
+            app.processEvents()
+            time.sleep(0.01)
+        assert all('old' not in text for text in _task_texts(panel))
+        _wait_for_tasks(app, panel)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+
+
+def test_tasks_stop_remains_responsive_while_server_is_blocked(monkeypatch, tmp_path):
+    """Stop from Tasks must not execute its RPC on the Qt event loop."""
+    import threading
+    import time
+    from tvhplayer.core.models import DvrEntry
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    panel = window.tasks_pane
+    panel.update_timer.stop()
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+    running = DvrEntry(
+        uuid='blocked', title='Film', channel_name='FILMBOX+ one',
+        start=int(time.time()) - 100, duration=300,
+        status='Running', sched_status='recording', htsp_id=15,
+    )
+
+    class Backend:
+        def list_dvr_entries(self):
+            return [running] if not calls else []
+
+        def stop_dvr_entry(self, entry):
+            calls.append(entry.uuid)
+            entered.set()
+            release.wait(5)
+
+        def close(self):
+            pass
+
+    backend = Backend()
+    window.current_server = lambda: {'name': 'TVH', 'url': 'http://127.0.0.1:9981'}
+    panel.open_backend = lambda server: backend
+    try:
+        panel.refresh()
+        _wait_for_tasks(app, panel)
+        _select_task(panel, 'Film')
+        before = time.monotonic()
+        panel.run_action()
+        assert time.monotonic() - before < 0.5
+        assert entered.wait(2)
+        assert window._dvr_operation is not None
+        assert not panel.action_btn.isEnabled()
+        # The UI must remain available even while stopDvrEntry is waiting.
+        responded = []
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: responded.append(True))
+        app.processEvents()
+        assert responded == [True]
+        assert window._request_dvr_operation('stop_entry', entry=running) is False
+        assert calls == ['blocked']
+        release.set()
+        deadline = time.monotonic() + 5
+        while window._dvr_operation is not None:
+            assert time.monotonic() < deadline
+            app.processEvents()
+            time.sleep(0.01)
+        _wait_for_tasks(app, panel)
+        assert calls == ['blocked']
+        assert 'Stop acknowledged' in window.status_label.text()
+    finally:
+        release.set()
+        window.close()
+        app.processEvents()
+
+
+def test_server_stop_timeout_does_not_repeat_an_uncertain_rpc(monkeypatch, tmp_path):
+    import threading
+    import time
+    from tvhplayer.core.models import DvrEntry, Channel
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    window.tasks_pane.update_timer.stop()
+    sent = []
+    slow = threading.Event()
+    release = threading.Event()
+    recording = DvrEntry(
+        uuid='one', title='Movie', channel_name='FILMBOX+ one',
+        start=int(time.time()) - 20, duration=90,
+        status='Running', sched_status='recording', htsp_id=42,
+        raw={'channelName': 'FILMBOX+ one'},
+    )
+    extra = DvrEntry(
+        uuid='two', title='Other', channel_name='TVR 1',
+        start=int(time.time()) - 20, duration=90,
+        status='Running', sched_status='recording', htsp_id=43,
+    )
+    class Backend:
+        def list_dvr_entries(self):
+            return [recording, extra]
+
+        def stop_dvr_entry(self, entry):
+            sent.append(entry.uuid)
+            slow.set()
+            release.wait(5)
+            raise TimeoutError("No acknowledgement")
+
+        def close(self):
+            pass
+
+    window.current_server = lambda: {'name': 'TVH', 'url': 'http://127.0.0.1:9981'}
+    window._dvr_backend_factory = lambda server: Backend()
+    channel = Channel(uuid='other', name='FILMBOX+ one', number=313)
+    window.active_channel = lambda: channel
+    try:
+        before = time.monotonic()
+        window.stop_recording()
+        assert time.monotonic() - before < 0.5
+        assert slow.wait(2)
+        assert sent == ['one']
+        window.stop_recording()
+        assert sent == ['one']
+        release.set()
+        deadline = time.monotonic() + 5
+        while window._dvr_operation is not None:
+            assert time.monotonic() < deadline
+            app.processEvents()
+            time.sleep(0.01)
+        assert sent == ['one']
+        assert 'not confirmed' in window.status_label.text()
+        assert 'refresh Tasks' in window.status_label.text()
+    finally:
+        release.set()
+        window.close()
+        app.processEvents()
+
+
+def test_blocked_dvr_operation_does_not_prevent_normal_window_close(monkeypatch, tmp_path):
+    import threading
+    from tvhplayer.core.models import DvrEntry
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    window.tasks_pane.update_timer.stop()
+    entered = threading.Event()
+    release = threading.Event()
+    entry = DvrEntry(uuid='run', title='News', channel_name='TVR 1',
+                     start=1, duration=5, status='Running', sched_status='recording')
+    class Backend:
+        def stop_dvr_entry(self, value):
+            entered.set()
+            release.wait(5)
+
+        def close(self):
+            pass
+
+    window.current_server = lambda: {'name':'TVH', 'url':'http://127.0.0.1:9981'}
+    window._dvr_backend_factory = lambda server: Backend()
+    try:
+        window._request_dvr_operation('stop_entry', entry=entry)
+        assert entered.wait(2)
+        assert window._dvr_operation is not None
+        # No synchronous RPC is invoked while the window closes.
+        window.close()
+        app.processEvents()
+        assert not window.isVisible()
+    finally:
+        release.set()
+        app.processEvents()
+
+
+def test_tasks_panel_opens_when_a_task_is_added(monkeypatch, tmp_path):
+    import time
+
+    from tvhplayer.core.models import DvrEntry
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    panel = window.tasks_pane
+    panel.update_timer.stop()
+
+    def entry(name):
+        return DvrEntry(
+            uuid=name, title=name, channel_name='BBC', start=int(time.time()) + 600,
+            duration=60, status='Scheduled', sched_status='scheduled',
+        )
+
+    try:
+        window.show()
+        app.processEvents()
+        assert not panel.isVisible()
+        assert window.tasks_action.isChecked() is False
+
+        # Recordings already on the server when it first answers are not new.
+        panel.clear_server_tasks()
+        panel._apply_server_entries([entry('Old')])
+        panel._redraw()
+        app.processEvents()
+        assert not panel.isVisible()
+
+        panel._apply_server_entries([entry('Old'), entry('New')])
+        panel._redraw()
+        app.processEvents()
+        assert panel.isVisible()
+        assert window.tasks_action.isChecked() is True
+
+        # Closed by the user, it stays closed until another task is added.
+        panel.close_btn.click()
+        panel._redraw()
+        app.processEvents()
+        assert not panel.isVisible()
+
+        # A task added in fullscreen shows the panel on leaving fullscreen.
+        window.toggle_fullscreen()
+        app.processEvents()
+        panel._apply_server_entries([entry('Old'), entry('New'), entry('Later')])
+        panel._redraw()
+        app.processEvents()
+        assert not panel.isVisible()
+        window.toggle_fullscreen()
+        app.processEvents()
+        assert panel.isVisible()
+        assert window.tasks_action.isChecked() is True
+
+        # A new server's recordings are not new either.
+        panel.close_btn.click()
+        panel.clear_server_tasks()
+        panel._apply_server_entries([entry('Other')])
+        panel._redraw()
+        app.processEvents()
+        assert not panel.isVisible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_tasks_panel_goes_to_the_task_channel(monkeypatch, tmp_path):
+    from tvhplayer.core.models import DvrEntry
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    window.tasks_pane.update_timer.stop()
+    news = ui.Channel(uuid='news', name='News', number=1, htsp_id=7)
+    sport = ui.Channel(uuid='sport', name='Sport', number=2, htsp_id=8)
+    try:
+        panel = window.tasks_pane
+        shown = []
+        window.show_channel_in_list = lambda channel=None, matches=None: shown.append(
+            [name for name in ('News', 'Sport')
+             if (matches or (lambda listed: window._channels_match(listed, channel)))(
+                 news if name == 'News' else sport)]
+        )
+        entry = DvrEntry(uuid='e', title='Match', channel_name='Sport', start=1, duration=1, raw={'channel': 8})
+        panel.selected_task = lambda: {'kind': 'Server', 'entry': entry, 'channel': 'Sport'}
+        panel.show_selected_channel()
+        job = types.SimpleNamespace(channel=news)
+        panel.selected_task = lambda: {'kind': 'Local', 'entry': None, 'job': job, 'channel': 'News'}
+        panel.show_selected_channel()
+        assert shown == [['Sport'], ['News']]
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
     from tvhplayer.core.models import Channel, DvrEntry
 
     app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
     window.tasks_pane.update_timer.stop()
-    from PyQt6.QtTest import QTest
-    def drain():
-        for _ in range(100):
-            app.processEvents()
-            if not window._dvr_gate.busy:
-                break
-            QTest.qWait(10)
-        app.processEvents()
 
     class FakeBackend:
         def __init__(self):
             self.stopped = []
             self.cancelled = []
+            self.offline = False
             self.entries = [
                 DvrEntry(
                     uuid='soon', title='Later', channel_name='BBC', start=300, duration=60,
@@ -1312,6 +1840,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
             ]
 
         def list_dvr_entries(self):
+            if self.offline:
+                raise RuntimeError('offline')
             return list(self.entries)
 
         def stop_dvr_entry(self, entry):
@@ -1341,15 +1871,15 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
     backend = FakeBackend()
     recorder = FakeRecorder()
     window.get_backend = lambda: backend
+    window.tasks_pane.open_backend = lambda server: backend
     window.current_server = lambda: {'name': 'tv', 'url': 'http://tv'}
-    window.local_recorder = recorder
-    window._recording_channel = Channel(uuid='c', name='IRINN')
+    window.local_jobs = [ui.LocalJob(recorder, Channel(uuid='c', name='IRINN'))]
     try:
         window.show()
         app.processEvents()
         panel = window.tasks_pane
         panel.refresh()
-        drain()
+        _wait_for_tasks(app, panel)
 
         texts = _task_texts(panel)
         assert panel.status_combo.currentText() == 'Active'
@@ -1358,8 +1888,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.task_table.item(0, 0).text() == ''
         assert panel.task_table.item(0, 0).icon().isNull() is False
         assert panel.task_table.item(0, 0).toolTip() == 'Recording'
-        assert panel.task_table.item(1, 0).toolTip() == 'REC 1 — Scheduled'
-        assert panel.task_table.item(0, 0).icon().cacheKey() != panel.task_table.item(1, 0).icon().cacheKey()
+        assert panel.task_table.item(1, 0).toolTip() == 'Recording'
+        assert panel.task_table.item(0, 0).icon().cacheKey() == panel.task_table.item(1, 0).icon().cacheKey()
         assert panel.task_table.item(2, 0).toolTip() == 'Scheduled'
         assert panel.task_table.item(0, 0).icon().cacheKey() != panel.task_table.item(2, 0).icon().cacheKey()
         app.processEvents()
@@ -1429,19 +1959,19 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         panel.status_combo.setCurrentText('All')
         assert panel.task_table.rowCount() == 5
 
-        class Down:
-            def list_dvr_entries(self):
-                raise RuntimeError('offline')
-
-        window.get_backend = lambda: Down()
+        opened = []
+        panel.open_backend = lambda server: opened.append(server) or backend
+        backend.offline = True
         panel.refresh()
-        drain()
+        _wait_for_tasks(app, panel)
         assert panel.error_label.text() == "Couldn't refresh server recordings"
         assert panel.task_table.rowCount() == 5
         assert any('Old' in text for text in _task_texts(panel))
-        window.get_backend = lambda: backend
+        backend.offline = False
         panel.refresh()
-        drain()
+        _wait_for_tasks(app, panel)
+        # A failed read drops the connection, and the next one connects again.
+        assert len(opened) == 1
         assert panel.error_label.text() == ''
         assert panel.task_table.rowCount() == 5
 
@@ -1450,7 +1980,13 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.action_btn.isEnabled() is True
         assert panel.reveal_btn.isEnabled() is False
         panel.run_action()
-        drain()
+        assert window._dvr_operation is not None
+        deadline = time.monotonic() + 5
+        while window._dvr_operation is not None:
+            assert time.monotonic() < deadline, "stop operation did not finish"
+            app.processEvents()
+            time.sleep(0.01)
+        _wait_for_tasks(app, panel)
         assert backend.stopped == ['run']
         assert recorder.running is True
         assert window.is_recording is True
@@ -1463,7 +1999,7 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         recording.write_bytes(b'ts')
         recorder.file_path = str(recording)
         panel.refresh()
-        drain()
+        _wait_for_tasks(app, panel)
         _select_task(panel, 'Local')
         revealed = []
 
@@ -1474,7 +2010,7 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'show_in_file_manager', fake_show)
         panel.reveal_selected()
         assert revealed == [str(recording)]
-        assert window.status_notice_label.text() == 'Showing recording_irinn.ts in the file manager'
+        assert window.status_label.text() == 'Showing recording_irinn.ts in the file manager'
         revealed.clear()
 
         def show_folder(path, platform=None):
@@ -1484,7 +2020,7 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'show_in_file_manager', show_folder)
         recorder.file_path = str(tmp_path / 'not-written.ts')
         panel.refresh()
-        drain()
+        _wait_for_tasks(app, panel)
         _select_task(panel, 'Local')
         panel.reveal_selected()
         assert revealed == [
@@ -1494,22 +2030,30 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         revealed.clear()
         monkeypatch.setattr(ui, 'show_in_file_manager', lambda path, platform=None: False)
         panel.reveal_selected()
-        assert window.status_notice_label.text() == "Couldn't show the recording in the file manager"
+        assert window.status_label.text() == "Couldn't show the recording in the file manager"
         labels = []
 
         def capture_menu(menu, *_args, **_kwargs):
-            labels.extend(action.text() for action in menu.actions())
+            labels.extend((action.text(), action.isEnabled()) for action in menu.actions() if not action.isSeparator())
             return None
 
         monkeypatch.setattr(ui.QMenu, 'exec', capture_menu)
         panel._show_task_menu(panel.task_table.visualItemRect(panel.task_table.item(0, 0)).center())
-        assert labels == ['Reveal in File Manager']
+        # A recording still going cannot be converted yet.
+        assert labels == [
+            ('Stop Recording', True), ('Reveal in File Manager', True), ('Convert for Editing', False),
+            ('Go to Channel', True),
+        ]
+        labels.clear()
+        _select_task(panel, 'Scheduled')
+        row = panel.task_table.currentRow()
+        panel._show_task_menu(panel.task_table.visualItemRect(panel.task_table.item(row, 0)).center())
+        assert labels[0] == ('Cancel Scheduled Recording', True)
         recorder.file_path = str(recording)
         panel.refresh()
-        drain()
+        _wait_for_tasks(app, panel)
         _select_task(panel, 'Local')
         panel.run_action()
-        drain()
         assert recorder.stopped is True
         assert window.is_recording is False
         finished_local = [text for text in _task_texts(panel) if 'Local' in text]
@@ -1525,15 +2069,29 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert panel.action_btn.accessibleName() == 'Cancel'
         assert panel.action_btn.text() == 'Cancel'
         panel.run_action()
-        drain()
+        assert window._dvr_operation is not None
+        deadline = time.monotonic() + 5
+        while window._dvr_operation is not None:
+            assert time.monotonic() < deadline, "cancel operation did not finish"
+            app.processEvents()
+            time.sleep(0.01)
+        _wait_for_tasks(app, panel)
         assert backend.cancelled == ['soon']
-        assert window.is_recording is False
+        assert window.is_recording is True
         assert any('Old' in text for text in _task_texts(panel))
         assert panel.task_table.isVisible()
         _select_task(panel, 'Old')
         assert panel.reveal_btn.isEnabled() is False
         _select_task(panel, 'Local')
         assert panel.reveal_btn.isEnabled() is True
+
+        panel.close_btn.click()
+        app.processEvents()
+        assert not panel.isVisible()
+        assert window.tasks_action.isChecked() is False
+        window.tasks_action.trigger()
+        app.processEvents()
+        assert panel.isVisible()
 
         window.tasks_action.setChecked(False)
         window._toggle_tasks_pane(False)
@@ -1545,6 +2103,8 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
         assert not panel.isVisible()
         assert window.tasks_action.isChecked() is False
     finally:
+        # A failed check can leave the recording running; do not wait on the quit question.
+        window._confirm_quit = lambda: True
         window.close()
         app.processEvents()
 
@@ -1556,6 +2116,8 @@ def test_stalled_local_recording_is_left_running(monkeypatch, tmp_path):
     stopped = []
 
     class Recorder:
+        is_running = True
+
         def status(self):
             return RecorderStatus(
                 file_path='/tmp/a.ts',
@@ -1576,15 +2138,335 @@ def test_stalled_local_recording_is_left_running(monkeypatch, tmp_path):
     monkeypatch.setattr(ui.QMessageBox, 'warning', dialog)
     monkeypatch.setattr(ui.QMessageBox, 'critical', dialog)
     monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', dialog)
-    window.local_recorder = Recorder()
+    window.local_jobs = [ui.LocalJob(Recorder(), None)]
     try:
         window.check_recording_status()
         window.check_recording_status()
         assert stopped == []
-        assert window.status_notice_label.text() == 'Local recording stalled'
+        assert window.status_label.text() == 'Local recording stalled'
+    finally:
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+
+
+def test_local_recording_saves_to_the_settings_folder_and_stops_on_time(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    started, options = [], []
+
+    class Recorder:
+        is_running = False
+        file_path = None
+
+        def start(self, url, path, _user, _password, extra_options):
+            started.append(path)
+            options.append(extra_options)
+            self.is_running = True
+            self.file_path = path
+
+        def stop(self):
+            self.is_running = False
+
+    class Dialog:
+        def __init__(self, _parent, _channel, _event, save_dir=None):
+            assert save_dir == str(tmp_path / 'videos')
+
+        def exec(self):
+            return ui.QDialog.DialogCode.Accepted
+
+        def get_duration(self):
+            return 1800
+
+        def programme_event(self):
+            return None
+
+    monkeypatch.setattr(ui, 'RecordingDurationDialog', Dialog)
+    monkeypatch.setattr(ui.QFileDialog, 'getSaveFileName', lambda *_a, **_k: pytest.fail('asked for a file'))
+    window.get_backend = lambda: types.SimpleNamespace(stream_url=lambda _c, profile=None: 'http://tv/stream')
+    window._programme_on_now = lambda _c: None
+    window.new_local_recorder = Recorder
+    window.set_local_recording_dir(str(tmp_path / 'videos'))
+    try:
+        window.start_local_recording(Channel(uuid='c', name='BBC/News'))
+        assert len(started) == 1
+        path = Path(started[0])
+        assert path.parent == tmp_path / 'videos' and path.parent.is_dir()
+        assert path.name.startswith('recording_BBC_News_') and path.suffix == '.ts'
+        job = window.local_jobs[0]
+        assert job.timer.interval() == 1800 * 1000
+        job.timer.timeout.emit()
+        assert job.recorder.is_running is False
+        assert job.timer is None
+        assert options == [[]]
+
+        window.set_recording_format('mp4')
+        window.set_recording_ffmpeg_options('-b:a 128k -metadata "title=Evening news"')
+        window.start_local_recording(Channel(uuid='c', name='BBC/News'))
+        assert Path(started[1]).suffix == '.mp4'
+        assert options[1] == ['-b:a', '128k', '-metadata', 'title=Evening news']
+        window.stop_local_recording()
+
+        # Options that do not parse stop before anything starts.
+        warnings = []
+        monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *a: warnings.append(a[2]))
+        window.set_recording_ffmpeg_options('-metadata "title=unclosed')
+        window.start_local_recording(Channel(uuid='c', name='BBC/News'))
+        assert len(started) == 2 and 'cannot be read' in warnings[0]
     finally:
         window.close()
         app.processEvents()
+
+
+def test_several_channels_record_to_this_computer_at_once(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    started = []
+
+    class Recorder:
+        is_running = False
+        file_path = None
+
+        def start(self, url, path, *_rest):
+            started.append(url)
+            self.is_running = True
+            self.file_path = path
+
+        def stop(self):
+            self.is_running = False
+
+    class Dialog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def exec(self):
+            return ui.QDialog.DialogCode.Accepted
+
+        def get_duration(self):
+            return 600
+
+        def programme_event(self):
+            return None
+
+    monkeypatch.setattr(ui, 'RecordingDurationDialog', Dialog)
+    window.get_backend = lambda: types.SimpleNamespace(stream_url=lambda c, profile=None: f'http://tv/{c.uuid}')
+    window._programme_on_now = lambda _c: None
+    window.new_local_recorder = Recorder
+    window.set_local_recording_dir(str(tmp_path / 'videos'))
+    one, two = Channel(uuid='a', name='One'), Channel(uuid='b', name='Two')
+    try:
+        window.start_local_recording(one)
+        window.active_channel = lambda: two
+        window._sync_record_controls()
+        assert window.controls_bar.record_local_action.isEnabled() is True
+        window.start_local_recording(two)
+        assert started == ['http://tv/a', 'http://tv/b']
+        assert [job.is_running for job in window.local_jobs] == [True, True]
+        assert window.controls_bar.record_local_action.isEnabled() is False
+
+        # The same channel twice would only make a second copy.
+        window.start_local_recording(one)
+        assert len(started) == 2
+        assert 'already recording' in window.status_label.text()
+
+        # Stop ends the active channel's recording; the other keeps going.
+        window.stop_local_recording()
+        assert [job.is_running for job in window.local_jobs] == [True, False]
+        assert window.recording_monitor is not None
+        window.local_jobs[0].timer.timeout.emit()
+        assert window.local_recording_running() is False
+        assert window.recording_monitor is None
+    finally:
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+
+
+def test_local_recordings_default_to_the_videos_folder(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    window.config.pop('local_recording_dir', None)
+    assert window.local_recording_dir() == ui.default_recording_dir()
+    window.close()
+    app.processEvents()
+
+
+def test_flatpak_asks_for_the_recordings_folder_once(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    videos = tmp_path / 'Videos'
+    monkeypatch.setattr(ui.QStandardPaths, 'writableLocation', lambda _kind: str(videos))
+    monkeypatch.setattr(ui, 'in_flatpak', lambda: True)
+    # Without access, the Videos folder is not there; never make it in the sandbox.
+    assert ui.default_recording_dir() == ''
+    assert not ui.ensure_recording_dir(str(videos))
+    assert not videos.exists()
+
+    started, asked, prompts = [], [], []
+    chosen = tmp_path / 'portal'
+    chosen.mkdir()
+
+    class Recorder:
+        is_running = False
+        file_path = None
+
+        def start(self, _url, path, *_auth):
+            started.append(path)
+
+        def stop(self):
+            pass
+
+    class Box(ui.QMessageBox):
+        # Choose Folder… is the default button: "click" it without a modal loop.
+        def exec(self):
+            prompts.append(self.text())
+
+        def clickedButton(self):
+            return self.defaultButton()
+
+    class Dialog:
+        def __init__(self, _parent, _channel, _event, save_dir=None):
+            assert save_dir == str(chosen)
+
+        def exec(self):
+            return ui.QDialog.DialogCode.Accepted
+
+        def get_duration(self):
+            return 60
+
+        def programme_event(self):
+            return None
+
+    monkeypatch.setattr(ui, 'QMessageBox', Box)
+    monkeypatch.setattr(ui.QFileDialog, 'getExistingDirectory', lambda *_a: asked.append(1) or str(chosen))
+    monkeypatch.setattr(ui, 'RecordingDurationDialog', Dialog)
+    window.get_backend = lambda: types.SimpleNamespace(stream_url=lambda _c, profile=None: 'http://tv/stream')
+    window._programme_on_now = lambda _c: None
+    window.new_local_recorder = Recorder
+    window.config.pop('local_recording_dir', None)
+    try:
+        assert window.local_recording_dir() == ''
+        window.start_local_recording(Channel(uuid='c', name='One'))
+        window.stop_local_recording()
+        window.start_local_recording(Channel(uuid='c', name='One'))
+        window.stop_local_recording()
+        assert len(asked) == 1 and len(prompts) == 1
+        assert 'from now on' in prompts[0]
+        assert window.config_store.data['local_recording_dir'] == str(chosen)
+        assert [Path(path).parent for path in started] == [chosen, chosen]
+    finally:
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+
+
+def test_conversions_show_in_tasks_and_follow_a_recording(monkeypatch, tmp_path):
+    from tvhplayer.core import convert
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    started = []
+    monkeypatch.setattr(convert.Conversion, 'start', lambda self: started.append(self) or setattr(self, 'status', convert.CONVERTING))
+    monkeypatch.setattr(window, 'conversion_problem', lambda _text: '')
+    recording = tmp_path / 'recording_One.ts'
+    recording.write_bytes(b'ts data')
+
+    class Recorder:
+        is_running = True
+        file_path = str(recording)
+        started_at = time.time()
+        stall_count = 0
+
+        def stop(self):
+            self.is_running = False
+
+    window.local_jobs = [ui.LocalJob(Recorder(), None)]
+    window.set_converts_after_recording(True)
+    window.set_deletes_converted_original(True)
+    window.current_server = lambda: None
+    try:
+        window.show()
+        app.processEvents()
+        window.stop_local_recording()
+        assert len(window.conversions) == 1
+        job = window.conversions[0]
+        assert job.target == str(tmp_path / 'recording_One_edit.mp4')
+        assert job.delete_original is True
+        assert job.options == convert.parse_ffmpeg_options(convert.DEFAULT_CONVERT_OPTIONS)
+        assert started == [job]
+
+        # A second one waits for the first.
+        manual = window.convert_for_editing(str(recording))
+        assert manual.delete_original is False and manual.status == convert.WAITING
+        assert manual.target == str(tmp_path / 'recording_One_edit_2.mp4')
+
+        panel = window.tasks_pane
+        panel.status_combo.setCurrentText('Active')
+        panel.refresh(server=False)
+        rows = {panel.task_table.item(r, 4).text(): r for r in range(panel.task_table.rowCount())}
+        assert 'Converting' in rows and 'Waiting' in rows
+        job.progress = 0.42
+        panel.refresh(server=False)
+        row = next(r for r in range(panel.task_table.rowCount()) if panel.task_table.item(r, 4).text() == 'Converting')
+        assert panel.task_table.item(row, 6).text().endswith('42%')
+        panel.task_table.selectRow(row)
+        assert panel.action_btn.text() == 'Cancel' and panel.action_btn.isEnabled()
+
+        # The first is done: the next one starts and the finish is told.
+        job.status = convert.DONE
+        window._tick_conversions()
+        assert started == [job, manual]
+        assert 'Converted recording_One.ts for editing' in window.status_label.text()
+
+        # Cancel from Tasks.
+        panel.refresh(server=False)
+        row = next(r for r in range(panel.task_table.rowCount()) if panel.task_table.item(r, 4).text() == 'Converting')
+        panel.task_table.selectRow(row)
+        menus = []
+        monkeypatch.setattr(ui.QMenu, 'exec', lambda menu, *_a: menus.append(menu.actions()))
+        panel._show_task_menu(panel.task_table.visualItemRect(panel.task_table.item(row, 0)).center())
+        assert menus[0][0].text() == 'Cancel Conversion' and menus[0][0].isEnabled()
+        menus[0][0].trigger()
+        assert manual._cancelled
+        assert 'original is kept' in window.status_label.text()
+    finally:
+        for job in window.conversions:
+            job.status = convert.DONE
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+
+
+def test_conversion_is_refused_when_ffmpeg_cannot_encode(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    warnings = []
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *a: warnings.append(a[2]))
+    monkeypatch.setattr(window, 'conversion_problem', lambda _text: 'This ffmpeg has no libx264 encoder.')
+    try:
+        assert window.convert_for_editing(str(tmp_path / 'a.ts')) is None
+        assert window.conversions == []
+        assert 'no libx264 encoder' in warnings[0] and 'Settings' in warnings[0]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_quit_asks_while_recording_to_this_computer(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    window.builtin = None
+    recorder = types.SimpleNamespace(is_running=True, file_path='/tmp/rec_One.ts', stop=lambda: None)
+    window.local_jobs = [ui.LocalJob(recorder, types.SimpleNamespace(name='One'))]
+    messages = []
+    monkeypatch.setattr(
+        ui.QMessageBox, 'question',
+        lambda _parent, _title, text, *a: messages.append(text) or ui.QMessageBox.StandardButton.No,
+    )
+    assert window._confirm_quit() is False
+    assert 'One (rec_One.ts)' in messages[0]
+    recorder.is_running = False
+    assert window._confirm_quit() is True
+    app.processEvents()
 
 
 def test_quit_asks_the_builtin_server_even_when_another_is_selected(monkeypatch, tmp_path):
@@ -1594,7 +2476,7 @@ def test_quit_asks_the_builtin_server_even_when_another_is_selected(monkeypatch,
     window.servers = [
         {'name': 'NAS', 'url': 'http://nas:9981', 'protocol': 'http'},
         {
-            'name': 'Built-in Server', 'url': 'http://127.0.0.1:24111', 'protocol': 'http',
+            'name': 'Built-in Server', 'url': 'http://127.0.0.1:24111', 'protocol': 'htsp',
             'username': 'tvhplayer', 'password': 'secret-secret-secret', 'builtin': True,
         },
     ]
@@ -1629,8 +2511,9 @@ def test_quit_asks_the_builtin_server_even_when_another_is_selected(monkeypatch,
         ui.QMessageBox, 'question',
         lambda _parent, _title, text, *a: messages.append(text) or ui.QMessageBox.StandardButton.No,
     )
-    assert window._confirm_builtin_quit() is False
+    assert window._confirm_quit() is False
     assert [server['name'] for server in asked] == ['Built-in Server']
+    assert asked[0]['protocol'] == 'http'
     assert 'News Hour' in messages[0]
     app.processEvents()
 
@@ -1655,3 +2538,1643 @@ def test_status_is_repeated_on_the_picture_only_while_a_channel_shows(monkeypatc
     window.toggle_mute()
     assert shown[1:] == ['Volume 40', 'Muted', 'Sound on']
     app.processEvents()
+
+
+def test_channel_list_reloads_at_most_every_30_seconds_during_a_playlist_check(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        reloads = []
+        server = {'name': 'Built-in Server', 'url': 'http://127.0.0.1:1', 'builtin': True}
+        monkeypatch.setattr(window, 'is_current_server', lambda candidate: candidate is server)
+        monkeypatch.setattr(window, 'current_server', lambda: server)
+        # The reload keeps the selected row and scroll place.
+        monkeypatch.setattr(window, 'fetch_channels', lambda keep_place=False: keep_place and reloads.append(server))
+        clock = [1000.0]
+        monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+
+        window.playlist_channels_changed(server)
+        window._channel_reload_timer.timeout.emit()
+        window._channel_reload_timer.stop()
+        assert reloads == [server]
+
+        clock[0] += 10
+        window.playlist_channels_changed(server)
+        assert window._channel_reload_timer.remainingTime() > 19000
+        window.playlist_channels_changed(server)
+        window.playlist_channels_changed({'url': 'http://other'})
+        window._channel_reload_timer.stop()
+        assert reloads == [server]
+    finally:
+        window.close()
+
+
+def test_reload_channel_list_reads_the_channels_again_in_place(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        reloads = []
+        monkeypatch.setattr(window, 'fetch_channels', lambda keep_place=False: reloads.append(keep_place))
+        action = window.reload_channels_action
+        assert action.shortcut().toString() == 'F5'
+        assert action in window.menuBar().actions()[1].menu().actions()
+        action.trigger()
+        window.reload_channels_btn.click()
+        assert reloads == [True, True]
+    finally:
+        window.close()
+
+
+def test_spinner_sits_above_the_video_and_shows_the_server_status(monkeypatch, tmp_path):
+    import time
+
+    from tvhplayer.core.models import Channel, SubscriptionStatus
+    from tvhplayer.core.playback_status import RETRYING, STARTING, WAITING
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        spinner = window.playback_spinner
+        assert not spinner.testAttribute(ui.Qt.WidgetAttribute.WA_NativeWindow)
+        assert not window.player_container.testAttribute(ui.Qt.WidgetAttribute.WA_NativeWindow)
+
+        states = iter(['Testing', 'Bad', 'Testing'])
+
+        class FakeBackend:
+            def get_subscriptions(self):
+                state = next(states, 'Testing')
+                return [SubscriptionStatus(channel='TBN', title='HTTP', state=state, start=1, raw={'in': 0})]
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(ui, 'create_backend', lambda _server: FakeBackend())
+        monkeypatch.setattr(window, 'current_server', lambda: {'url': 'http://127.0.0.1:1'})
+        window._playback_channel = Channel.from_raw({'name': 'TBN', 'uuid': 'u1'})
+        window._show_playback_wait()
+        assert spinner._caption == STARTING
+        captions = []
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and RETRYING not in captions:
+            app.processEvents()
+            if not captions or captions[-1] != spinner._caption:
+                captions.append(spinner._caption)
+            time.sleep(0.02)
+        assert [text for text in captions if text != STARTING][:2] == [WAITING, RETRYING]
+        assert window.status_label.text() == f'TBN: {RETRYING}'
+
+        window._on_playback_started()
+        assert window._start_watch is None
+    finally:
+        window.close()
+
+
+def test_playlists_are_not_refreshed_when_the_builtin_server_starts(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        # The server keeps the channels; only the user's Refresh fetches the playlist again.
+        started = []
+        monkeypatch.setattr(ui, 'PlaylistJob', lambda *args, **kwargs: started.append(args))
+        monkeypatch.setattr(window, 'playlist_sources', lambda: [ui.PlaylistSource('eng', 'http://x/eng.m3u', 'builtin')])
+        monkeypatch.setattr(window, 'fetch_channels', lambda keep_place=False: None)
+        monkeypatch.setattr(window, '_load_guides_after_start', lambda _server: None)
+        window._on_builtin_ready(23702, 42918)
+        assert started == []
+    finally:
+        window.close()
+
+
+def _fake_playlist_jobs(monkeypatch, ui, window):
+    """Playlist jobs that run until the test ends them; returns those created."""
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    created = []
+
+    class Job(QObject):
+        SYNC, REMOVE, CHECK, SHOW = 'add', 'remove', 'check', 'show'
+        finished = pyqtSignal(str, object)
+        failed = pyqtSignal(str)
+
+        def __init__(self, host, source, server, action='add', parent=None):
+            super().__init__(parent)
+            self.host, self.source, self.server, self.action = host, source, server, action
+            self.running = self.disposed = False
+            created.append(self)
+
+        def start(self):
+            assert self.host.claim_playlist(self.source)
+            self.running = True
+
+        def is_running(self):
+            return self.running
+
+        def is_writing(self):
+            return self.running
+
+        def cancel(self):
+            pass
+
+        def shutdown(self, _timeout_ms):
+            return True
+
+        def dispose(self):
+            self.disposed = True
+
+        def end(self):
+            self.running = False
+            self.host.release_playlist(self.source)
+            self.finished.emit('done', [])
+
+    monkeypatch.setattr(ui, 'PlaylistJob', Job)
+    monkeypatch.setattr(window, 'save_config', lambda: None)
+    monkeypatch.setattr(window, 'fetch_channels', lambda keep_place=False: None)
+    window.servers = [{'name': 'A', 'url': 'http://a:9981'}, {'name': 'B', 'url': 'http://b:9981'}]
+    window.config['playlists'] = [
+        ui.PlaylistSource(name, f'http://x/{name}.m3u', server).to_dict()
+        for name, server in (('one', 'http://a:9981'), ('two', 'http://a:9981'), ('three', 'http://b:9981'))
+    ]
+    return created
+
+
+def _run_queued(app):
+    for _ in range(3):
+        app.processEvents()
+
+
+def test_check_now_checks_one_playlist_per_server_at_a_time(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        _fake_playlist_jobs(monkeypatch, ui, window)
+        one, two, three = window.check_playlist_channels()
+        assert (one.running, two.running, three.running) == (True, False, True)
+        assert window.playlist_checks() == [one, two, three]
+        one.end()
+        _run_queued(app)
+        assert two.running
+        # An ended job is let go.
+        assert one.disposed and window.playlist_checks() == [two, three]
+        two.end()
+        three.end()
+        _run_queued(app)
+        assert window.playlist_checks() == []
+    finally:
+        window.close()
+
+
+def test_turning_hiding_off_shows_a_busy_playlist_once_it_is_free(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        created = _fake_playlist_jobs(monkeypatch, ui, window)
+        check = window.check_playlist_channels()[0]
+        window.set_hides_dead_channels(False)
+        # One and three are being checked.
+        shows = [job for job in created if job.action == ui.PlaylistJob.SHOW]
+        assert [job.running for job in shows] == [False, True, False]
+        # Asked again, the waiting one is not doubled.
+        window.set_hides_dead_channels(True)
+        window.set_hides_dead_channels(False)
+        shows = [job for job in created if job.action == ui.PlaylistJob.SHOW and not job.disposed]
+        waiting = [job for job in shows if not job.running]
+        assert [job.source.name for job in waiting] == ['one', 'three']
+        check.end()
+        _run_queued(app)
+        assert [job.running for job in waiting] == [True, False]
+    finally:
+        window.close()
+
+
+def test_turning_hiding_back_on_drops_the_waiting_show(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        created = _fake_playlist_jobs(monkeypatch, ui, window)
+        check = window.check_playlist_channels()[0]
+        window.set_hides_dead_channels(False)
+        waiting = [job for job in created if job.action == ui.PlaylistJob.SHOW and not job.running]
+        window.set_hides_dead_channels(True)
+        assert waiting[0].disposed
+        check.end()
+        _run_queued(app)
+        assert not waiting[0].running
+    finally:
+        window.close()
+
+
+def test_last_channel_plays_at_start_when_asked(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        played = []
+        monkeypatch.setattr(window, 'save_config', lambda: None)
+        news, sport = Channel(uuid='u1', name='News'), Channel(uuid='u2', name='Sport')
+        window._channels = [news, sport]
+        window._channels_server = 'builtin'
+        window._remember_channel(sport)
+        assert window.config['last_channel'] == {'server': 'builtin', 'key': 'u2', 'name': 'Sport'}
+
+        monkeypatch.setattr(window, 'play_channel_by_data', played.append)
+        window._playback_channel = None
+        window._play_last_channel('http://other')
+        assert played == []
+        window._play_last_channel('builtin')
+        assert played == [sport]
+
+        window.set_plays_on_start(True)
+        assert window.plays_on_start()
+
+        assert not window.starts_channels_fast()
+        assert window.player.fast_start is False
+        window.set_starts_channels_fast(True)
+        assert window.config['fast_channel_start'] is True
+        assert window.player.fast_start is True
+
+        window.set_uses_live_resize(True)
+        assert window.uses_live_resize()
+        assert window.config['live_resize'] is True
+        assert window.splitter.opaqueResize() is True
+        window.set_uses_live_resize(False)
+        assert window.splitter.opaqueResize() is False
+
+        # Settings and View > Channel List share the logos option.
+        window.set_shows_channel_logos(False)
+        assert not window.shows_channel_logos()
+        assert not window._channel_option_actions['logos'].isChecked()
+        assert window.config['channel_list']['logos'] is False
+        window._channel_option_actions['logos'].setChecked(True)
+        assert window.shows_channel_logos()
+    finally:
+        window.close()
+
+
+def _channel_list_window(monkeypatch, tmp_path, backend):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    window.get_backend = lambda: backend
+    window._open_channel_backend = lambda server: backend
+    window.servers = [{'name': 'local', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'}]
+    window.server_combo.blockSignals(True)
+    window.server_combo.addItem('local')
+    window.server_combo.setCurrentIndex(0)
+    window.server_combo.blockSignals(False)
+    window.logo_loader = ui.LogoLoader(window, cache_dir=tmp_path / 'cache')
+    window.logo_loader.loaded.connect(window._on_logo_loaded)
+    monkeypatch.undo()
+    return app, ui, window
+
+
+class _ExtrasBackend:
+    def __init__(self, now):
+        from tvhplayer.core.channel_info import NowNext
+        from tvhplayer.core.models import Channel, ChannelTag, EpgEvent
+
+        self.news = Channel(uuid='news', name='News', number=1, tag_ids=['t-news'],
+                               raw={'icon_public_url': 'imagecache/1'})
+        self.sport = Channel(uuid='sport', name='Sport', number=2, tag_ids=['t-hd'])
+        self.off = Channel(uuid='off', name='Off', number=3, enabled=False)
+        self.tags = [ChannelTag(uuid='t-news', name='News'), ChannelTag(uuid='t-hd', name='HDTV')]
+        headline = EpgEvent(start=now - 600, stop=now + 600, title='Headlines', channel_uuid='news', event_id=1)
+        weather = EpgEvent(start=now + 600, stop=now + 1200, title='Weather', channel_uuid='news', event_id=2)
+        self.now_next = {'news': NowNext(headline, weather)}
+        self.now_next_calls = 0
+        self.service_calls = 0
+        self.image_requests = []
+
+    def get_channels(self):
+        return [self.news, self.sport, self.off]
+
+    def list_channel_tags(self):
+        return self.tags
+
+    def list_channel_services(self):
+        self.service_calls += 1
+        return [{'channel': ['news'], 'dvb_servicetype': 2, 'encrypted': True}]
+
+    def get_now_next(self, channels):
+        self.now_next_calls += 1
+        return self.now_next
+
+    def image_url(self, reference):
+        self.image_requests.append(reference)
+        return f'http://127.0.0.1:9981/{reference}'
+
+    def stream_url(self, channel, profile=None):
+        return f'http://tv.example/stream/{channel.uuid}'
+
+
+def test_logos_load_for_the_rows_on_screen(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    backend = _ExtrasBackend(int(time.time()))
+    requested = []
+    app, ui, window = _channel_list_window(monkeypatch, tmp_path, backend)
+    window.logo_loader.request = lambda server, reference, url: requested.append(reference)
+    try:
+        window.channel_options['logos'] = True
+        window._channels = [
+            Channel(uuid=f'c{n}', name=f'Channel {n:04d}', number=n + 1, raw={'icon_public_url': f'imagecache/{n}'})
+            for n in range(2000)
+        ]
+        window.resize(800, 600)
+        window.show()
+        window._show_channel_list()
+        window._fill_channel_rows()
+        app.processEvents()
+        table = window.channel_list
+        assert table.rowCount() == 2000
+        assert requested == []
+        window._visible_logo_timer.timeout.emit()
+        # The rows on screen and a screenful either side, not all 2000.
+        assert 'imagecache/0' in requested
+        assert 0 < len(requested) < 300
+        assert 'imagecache/1999' not in requested
+
+        table.verticalScrollBar().setValue(table.verticalScrollBar().maximum())
+        app.processEvents()
+        window._visible_logo_timer.timeout.emit()
+        assert 'imagecache/1999' in requested
+        assert len(requested) < 600
+    finally:
+        window.close()
+
+
+def test_channel_list_columns_and_options_are_user_settings(monkeypatch, tmp_path):
+    from PyQt6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+    from PyQt6.QtGui import QColor, QPixmap
+
+    from tvhplayer.channel_view import PROGRESS_ROLE, logo_image
+    from tvhplayer.core.models import DvrEntry
+
+    now = int(time.time())
+    backend = _ExtrasBackend(now)
+    requested = []
+    app, ui, window = _channel_list_window(monkeypatch, tmp_path, backend)
+    window.logo_loader.request = lambda server, reference, url: requested.append((reference, url))
+    try:
+        table = window.channel_list
+        header = table.horizontalHeader()
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        _wait_for_now_next(app, window)
+        assert header.textElideMode() == ui.Qt.TextElideMode.ElideRight
+
+        # Defaults: name, now, and status show; disabled channels are left out.
+        assert [_cell(table, row, ui.COL_NAME).text() for row in range(table.rowCount())] == ['News', 'Sport']
+        assert not header.isSectionHidden(ui.COL_NOW)
+        assert header.isSectionHidden(ui.COL_NUMBER)
+        assert header.isSectionHidden(ui.COL_NEXT) and header.isSectionHidden(ui.COL_TYPE)
+        news_row = _channel_row(table, 'News')
+        now_item = _cell(table, news_row, ui.COL_NOW)
+        assert now_item.text() == 'Headlines'
+        assert 'min left' in now_item.toolTip()
+        assert abs(now_item.data(PROGRESS_ROLE) - 0.5) < 0.01
+        assert _cell(table, news_row, ui.COL_NEXT).text().endswith('Weather')
+        assert 'Now: Headlines.' in _cell(table, news_row, ui.COL_NAME).data(Qt.ItemDataRole.AccessibleDescriptionRole)
+        assert backend.service_calls == 0
+        # Logos are asked for once the rows are on screen, not while the list fills.
+        assert requested == []
+        window._visible_logo_timer.timeout.emit()
+        assert requested == [('imagecache/1', 'http://127.0.0.1:9981/imagecache/1')]
+
+        # A logo that arrives later is drawn next to the name.
+        image = QPixmap(80, 40)
+        image.fill(Qt.GlobalColor.red)
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        image.save(buffer, 'PNG')
+        window._on_logo_loaded('imagecache/1', logo_image(bytes(data)))
+        window._logo_timer.timeout.emit()
+        icon = _cell(table, news_row, ui.COL_NAME).icon().pixmap(80, 40).toImage()
+        assert icon.pixelColor(icon.width() // 2, icon.height() // 2) == QColor(Qt.GlobalColor.red)
+
+        # Columns: the menu shows and hides them, and the choice is saved.
+        window._channel_column_actions['type'].setChecked(True)
+        assert not header.isSectionHidden(ui.COL_TYPE)
+        assert backend.service_calls == 1
+        assert _cell(table, _channel_row(table, 'News'), ui.COL_TYPE).text() == 'Radio, Encrypted'
+        assert _cell(table, _channel_row(table, 'Sport'), ui.COL_TYPE).text() == 'HD'
+        window._channel_column_actions['now'].setChecked(False)
+        assert header.isSectionHidden(ui.COL_NOW)
+        saved = window.config_store.load()['channel_list']
+        assert saved['columns']['type'] is True and saved['columns']['now'] is False
+
+        # Dragging a column saves the new order.
+        header.moveSection(header.visualIndex(ui.COL_STATUS), 0)
+        assert window.config_store.load()['channel_list']['order'][0] == 'status'
+
+        # Options: progress bar, disabled channels, and the group filter.
+        window._channel_option_actions['now_progress'].setChecked(False)
+        assert _cell(table, _channel_row(table, 'News'), ui.COL_NOW).data(PROGRESS_ROLE) is None
+        window._channel_option_actions['hide_disabled'].setChecked(False)
+        assert _channel_row(table, 'Off') >= 0
+        assert window.tag_row.isVisibleTo(window)
+        window.tag_combo.setCurrentIndex(window.tag_combo.findData('t-hd'))
+        visible = [_cell(table, row, ui.COL_NAME).text() for row in range(table.rowCount())]
+        assert visible == ['Sport']
+        assert window.config_store.load()['channel_list']['tag'] == 't-hd'
+        window._channel_option_actions['tag_filter'].setChecked(False)
+        assert not window.tag_row.isVisibleTo(window)
+        assert table.rowCount() == 3
+
+        # Recording marks come from the tasks pane's DVR read.
+        entry = DvrEntry(uuid='r', title='T', channel_name='Sport', start=now, duration=60,
+                         sched_status='recording', raw={'channel': 'sport'})
+        window.channel_recordings_changed([entry])
+        sport_row = _channel_row(table, 'Sport')
+        assert _cell(table, sport_row, ui.COL_STATUS).text() == 'Recording'
+        window.play_channel_by_data(backend.sport)
+        assert _cell(table, _channel_row(table, 'Sport'), ui.COL_STATUS).text() == 'Playing, Recording'
+        window._channel_option_actions['recording_status'].setChecked(False)
+        assert _cell(table, _channel_row(table, 'Sport'), ui.COL_STATUS).text() == 'Playing'
+
+        # Row size: the menu and the zoom steps change it, stopping at the ends, and it is saved.
+        comfortable = table.rowHeight(0)
+        window._channel_density_actions['spacious'].trigger()
+        assert table.rowHeight(0) > comfortable
+        assert window.config_store.load()['channel_list']['density'] == 'spacious'
+        table.density_step.emit(1)
+        assert window.channel_options['density'] == 'spacious'
+        table.density_step.emit(-1)
+        table.density_step.emit(-1)
+        assert window.channel_options['density'] == 'compact'
+        assert window._channel_density_actions['compact'].isChecked()
+        assert table.rowHeight(0) < comfortable
+        # A key bound twice is ambiguous and does nothing.
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtTest import QTest
+        keys = [key.toString() for action in window.findChildren(QAction) for key in action.shortcuts()]
+        assert sorted({key for key in keys if keys.count(key) > 1}) == []
+        window.show()
+        window.activateWindow()
+        assert QTest.qWaitForWindowActive(window)
+        table.setFocus()
+        QTest.keyClick(table, Qt.Key.Key_Equal, Qt.KeyboardModifier.ControlModifier)
+        assert window.channel_options['density'] == 'comfortable'
+        QTest.keyClick(table, Qt.Key.Key_Minus, Qt.KeyboardModifier.ControlModifier)
+        assert window.channel_options['density'] == 'compact'
+        window._channel_option_actions['stripes'].setChecked(True)
+        assert table.alternatingRowColors()
+        window._channel_option_actions['two_line'].setChecked(True)
+        assert window._channel_delegate.two_line
+        assert window.config_store.load()['channel_list']['two_line'] is True
+
+        # Reset brings the defaults back.
+        window._reset_channel_list_layout()
+        assert window._channel_density_actions['comfortable'].isChecked()
+        assert table.rowHeight(0) == comfortable
+        assert not table.alternatingRowColors() and not window._channel_delegate.two_line
+        assert header.visualIndex(ui.COL_NUMBER) == 0
+        assert not header.isSectionHidden(ui.COL_NOW) and header.isSectionHidden(ui.COL_TYPE)
+        assert _channel_row(table, 'Off') < 0
+        assert window._channel_option_actions['tag_filter'].isChecked()
+        assert window.config_store.load()['channel_list']['tag'] == ''
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_channel_list_columns_can_be_resized(monkeypatch, tmp_path):
+    from PyQt6.QtWidgets import QHeaderView
+
+    backend = _ExtrasBackend(int(time.time()))
+    app, ui, window = _channel_list_window(monkeypatch, tmp_path, backend)
+    window.logo_loader.request = lambda *args: None
+    try:
+        table = window.channel_list
+        header = table.horizontalHeader()
+        table.resize(600, 400)
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        window._fit_channel_columns(measure=True)
+        for column in range(header.count()):
+            assert header.sectionResizeMode(column) == QHeaderView.ResizeMode.Interactive
+
+        # Untouched columns fill the list: name and now share what number and status leave.
+        shown = [c for c in range(header.count()) if not header.isSectionHidden(c)]
+        assert sum(header.sectionSize(c) for c in shown) >= table.viewport().width() - 1
+
+        # A dragged width is kept and saved; now takes up the difference.
+        before_now = header.sectionSize(ui.COL_NOW)
+        header.resizeSection(ui.COL_NAME, header.sectionSize(ui.COL_NAME) - 40)
+        assert header.sectionSize(ui.COL_NOW) == before_now + 40
+        name_width = header.sectionSize(ui.COL_NAME)
+        window._channel_width_save_timer.timeout.emit()
+        assert window.config_store.load()['channel_list']['widths'] == {'name': name_width}
+
+        # A wider pane goes to the columns the user has not sized.
+        window.show()
+        app.processEvents()
+        now_width = header.sectionSize(ui.COL_NOW)
+        window.splitter.moveSplitter(window.splitter.sizes()[0] + 150, 1)
+        app.processEvents()
+        assert table.viewport().width() > 0
+        assert header.sectionSize(ui.COL_NAME) == name_width
+        assert header.sectionSize(ui.COL_NOW) > now_width
+
+        # With every column dragged, the last one runs on to the list's edge, so a
+        # selected row does too, without saving the extra as its width.
+        header.resizeSection(ui.COL_NOW, 120)
+        shown = sorted((c for c in range(header.count()) if not header.isSectionHidden(c)),
+                       key=header.visualIndex)
+        last = shown[-1]
+        last_width = window.channel_options['widths'].get(ui.COLUMN_KEYS[last])
+        if last_width is None:
+            header.resizeSection(last, 60)
+            last_width = 60
+        window._fit_channel_columns()
+        assert sum(header.sectionSize(c) for c in shown) == table.viewport().width()
+        assert window.channel_options['widths'][ui.COLUMN_KEYS[last]] == last_width
+        # A wider pane and back again: the extra follows the pane and does not pile up.
+        widths = [header.sectionSize(c) for c in shown]
+        original_left = window.splitter.sizes()[0]
+        window.splitter.moveSplitter(original_left + 80, 1)
+        app.processEvents()
+        assert sum(header.sectionSize(c) for c in shown) == table.viewport().width()
+        # The right pane may reach its minimum width before moving 80 px.
+        # Restore the actual original position, not an assumed delta.
+        window.splitter.moveSplitter(original_left, 1)
+        app.processEvents()
+        assert [header.sectionSize(c) for c in shown] == widths
+
+        # Reset forgets the widths.
+        window._reset_channel_list_layout()
+        assert window.config_store.load()['channel_list']['widths'] == {}
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_now_next_is_fetched_again_when_a_programme_ends(monkeypatch, tmp_path):
+    now = int(time.time())
+    backend = _ExtrasBackend(now)
+    app, ui, window = _channel_list_window(monkeypatch, tmp_path, backend)
+    window.logo_loader.request = lambda *args: None
+    try:
+        window.fetch_channels()
+        _wait_for_channels(app, window)
+        _wait_for_now_next(app, window)
+        assert backend.now_next_calls == 1
+        window._tick_now_next()
+        assert backend.now_next_calls == 1
+        backend.now_next['news'].now.stop = now - 1
+        window._now_next_fetched -= 61
+        window._tick_now_next()
+        # Fetched in the background: a tick never waits for the server.
+        _wait_for_now_next(app, window)
+        assert backend.now_next_calls == 2
+        news_row = _channel_row(window.channel_list, 'News')
+        assert _cell(window.channel_list, news_row, ui.COL_NOW).text() == ''
+        assert _cell(window.channel_list, news_row, ui.COL_NEXT).text().endswith('Weather')
+
+        # A channel that had no programme gets one, and one that drops out of the guide is cleared.
+        from tvhplayer.core.channel_info import NowNext
+        from tvhplayer.core.models import EpgEvent
+        match = EpgEvent(start=now - 60, stop=now + 3600, title='Match', channel_uuid='sport', event_id=3)
+        backend.now_next = {'sport': NowNext(match, None)}
+        window._now_next_fetched -= 700
+        window._tick_now_next()
+        _wait_for_now_next(app, window)
+        assert backend.now_next_calls == 3
+        table = window.channel_list
+        assert _cell(table, _channel_row(table, 'Sport'), ui.COL_NOW).text() == 'Match'
+        news_row = _channel_row(table, 'News')
+        assert _cell(table, news_row, ui.COL_NEXT).text() == ''
+        assert _cell(table, news_row, ui.COL_NEXT).toolTip() == ''
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_record_dialog_offers_the_programme_on_now(monkeypatch, tmp_path):
+    import time
+
+    from tvhplayer.core.models import Channel, EpgEvent
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    window.close()
+    now = int(time.time())
+    event = EpgEvent(start=now - 600, stop=now + 1800, title='Newsday', event_id=42)
+    dialog = ui.RecordingDurationDialog(channel=Channel(uuid='c', name='BBC News'), event=event)
+    try:
+        assert dialog.windowTitle() == "Record on Server"
+        assert list(dialog.preset_buttons) == ['prog', '30', '60', '120', '240', 'custom']
+        assert dialog.preset_buttons['prog'].isChecked()
+        assert dialog.programme_event() is event
+        assert 1790 <= dialog.get_duration() <= 1800
+        assert "stops when Newsday ends" in dialog.summary_label.text()
+        assert dialog.custom_row.isHidden()
+
+        dialog.preset_buttons['120'].setChecked(True)
+        assert dialog.programme_event() is None
+        assert dialog.get_duration() == 7200
+        assert "2 h" in dialog.summary_label.text()
+
+        dialog.preset_buttons['custom'].setChecked(True)
+        assert not dialog.custom_row.isHidden()
+        assert dialog.custom_spin.text() == "1 h 30 min"
+        dialog.more_btn.click()
+        assert dialog.get_duration() == 105 * 60
+        dialog.less_btn.click()
+        dialog.less_btn.click()
+        assert dialog.custom_spin.text() == "1 h 15 min"
+        dialog.set_duration(0, 30)
+        assert dialog.preset_buttons['30'].isChecked()
+    finally:
+        dialog.close()
+
+    # Without guide data, or once the programme is over, there is nothing to offer.
+    ended = EpgEvent(start=now - 3600, stop=now - 60, title='Old', event_id=7)
+    for given in (None, ended):
+        dialog = ui.RecordingDurationDialog(event=given)
+        assert 'prog' not in dialog.preset_buttons
+        assert dialog.preset_buttons['60'].isChecked()
+        assert dialog.get_duration() == 3600
+        dialog.close()
+    app.processEvents()
+
+
+def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
+    import time
+
+    from tvhplayer.core.models import Channel, DvrEntry
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+
+    class FakeRecorder:
+        is_running = False
+        file_path = ''
+
+        def stop(self):
+            self.is_running = False
+
+    try:
+        window.show()
+        app.processEvents()
+        bar = window.controls_bar
+        # The two alternative Record controls must not resize the player bar.
+        assert bar.record_btn.width() == bar.recording_group.width()
+        assert bar.record_btn.height() == bar.recording_group.height() == 36
+        record_pill_width = bar.record_btn.width()
+        assert bar.recording_group.sizeHint().width() <= record_pill_width
+        assert window.play_btn.accessibleName() == "Play"
+
+        played = []
+        stopped = []
+        window.play_channel_by_data = lambda channel: played.append(channel)
+        real_stop = window.stop_playback
+        window.stop_playback = lambda: (stopped.append(True), real_stop())
+        window.play_btn.click()
+        assert played and not stopped
+
+        window._show_playback_wait()
+        assert window.play_btn.accessibleName() == "Stop"
+        window._on_playback_started()
+        assert window.play_btn.accessibleName() == "Stop"
+        window.play_btn.click()
+        assert stopped == [True]
+        assert window.play_btn.accessibleName() == "Play"
+
+        recorder = FakeRecorder()
+        channel = Channel(uuid='c', name='BBC News')
+        window.local_jobs = [ui.LocalJob(recorder, channel)]
+        window.active_channel = lambda: channel
+        recording = DvrEntry(
+            uuid='r', title='Newsday', channel_name='BBC News', raw={'channel': 'c'},
+            start=int(time.time()) - 60, duration=600, status='Running', sched_status='recording',
+        )
+        assert recording.category() == 'recording'
+
+        # Recording on the server: the red pill stops it straight away.
+        window.channel_recordings_changed([recording])
+        app.processEvents()
+        assert bar.recording_group.width() == bar.record_btn.width() == record_pill_width
+        assert not window.record_btn.isVisible()
+        assert window.stop_record_btn.isVisible()
+        assert bar.record_server_action.isEnabled() is False
+        assert bar.record_local_action.isEnabled() is True
+        calls = []
+        window.stop_recording = lambda: calls.append('server')
+        window.stop_local_recording = lambda: calls.append('local')
+        window.stop_record_btn.click()
+        assert calls == ['server']
+
+        # Both kinds: Stop asks which, and the menu can stop both.
+        recorder.is_running = True
+        window._sync_record_controls()
+        assert bar.record_local_action.isEnabled() is False
+        assert "BBC News" in bar._stop_detail.text()
+        window.stop_record_btn.click()
+        app.processEvents()
+        assert bar.stop_menu.isVisible()
+        bar.stop_menu.hide()
+        assert calls == ['server']
+        bar.stop_both_action.trigger()
+        assert calls == ['server', 'server', 'local']
+
+        # Another channel: its own Record button, the recordings stay in Tasks.
+        other = Channel(uuid='o', name='Other')
+        window.active_channel = lambda: other
+        window._sync_record_controls()
+        assert window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
+        assert bar.record_server_action.isEnabled() is True
+        assert bar.record_local_action.isEnabled() is True
+        window.active_channel = lambda: channel
+
+        # Only this computer: Stop ends the local recording.
+        window.channel_recordings_changed([])
+        app.processEvents()
+        assert bar.record_btn.width() == bar.recording_group.width() == record_pill_width
+        window.stop_record_btn.click()
+        assert calls[-1] == 'local'
+
+        recorder.is_running = False
+        window._sync_record_controls()
+        assert window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
+        window.record_btn.click()
+        app.processEvents()
+        assert bar.record_menu.isVisible()
+        bar.record_menu.hide()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_player_bar_casts_the_selected_channel_and_routes_audio(monkeypatch, tmp_path):
+    from PyQt6.QtCore import QObject, pyqtSignal
+
+    class FakeCastManager(QObject):
+        devices_changed = pyqtSignal(object)
+        discovery_failed = pyqtSignal(str)
+        connected = pyqtSignal(str, str)
+        disconnected = pyqtSignal()
+        playing = pyqtSignal()
+        stopped = pyqtSignal()
+        failed = pyqtSignal(str)
+        operation_failed = pyqtSignal(str)
+        audio_changed = pyqtSignal(int, bool)
+        profiles_ready = pyqtSignal(str, object, str)
+        profile_selected = pyqtSignal(str)
+        automatic_profile_worked = pyqtSignal(str, str)
+
+        def __init__(self, parent=None, known_profiles=None):
+            super().__init__(parent)
+            self.available = True
+            self.unavailable_reason = ''
+            self.devices = []
+            self.discovering = False
+            self.is_connected = False
+            self.connected_name = ''
+            self.connected_uuid = ''
+            self.is_playing = False
+            self.is_muted = False
+            self.volume = 50
+            self.played = []
+            self.volumes = []
+            self.mutes = []
+            self.stops = 0
+
+        def play(self, url, title):
+            self.played.append((url, title))
+            return True
+
+        def play_channel(self, server, channel, profile='auto'):
+            url = window.get_backend().stream_url(channel, profile=None if profile == 'auto' else profile)
+            return self.play(url, channel.name)
+
+        def stop(self):
+            self.stops += 1
+
+        def set_volume(self, value):
+            self.volumes.append(value)
+
+        def set_muted(self, muted):
+            self.is_muted = muted
+            self.mutes.append(muted)
+
+        def close(self):
+            pass
+
+    def prepare(ui):
+        monkeypatch.setattr(ui, 'CastManager', FakeCastManager)
+        monkeypatch.setattr(ui.TVHeadendClient, 'fetch_channels', lambda self, keep_place=False: None)
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path, prepare)
+    try:
+        manager = window.cast_manager
+        manager.is_connected = True
+        manager.connected_name = 'Living room'
+        manager.connected_uuid = 'living'
+        manager.connected.emit('living', 'Living room')
+        assert window.cast_btn.isChecked()
+        assert window.cast_btn.accessibleName() == 'Casting to Living room'
+        assert window.idle_splash.caption.isHidden()
+
+        channel = ui.Channel(uuid='news', name='News')
+        window._remember_channel = lambda _channel: None
+        window._server_requests_ready = lambda: True
+        window.get_backend = lambda: types.SimpleNamespace(
+            stream_url=lambda _channel, profile=None: 'http://tv.local/live.ts?ticket=one'
+        )
+        window.play_channel_by_data(channel)
+        assert manager.played == [('http://tv.local/live.ts?ticket=one', 'News')]
+        window._on_playback_started()
+        assert window._awaiting_playback
+        manager.playing.emit()
+        assert not window._awaiting_playback
+        assert window._playback_active
+        assert window.idle_splash.caption.text() == 'Playing on Living room'
+        assert not window.idle_splash.caption.isHidden()
+        assert window.idle_splash.accessibleName() == 'Playing on Living room'
+        window.show()
+        app.processEvents()
+        assert window.idle_splash.caption.geometry().top() >= window.idle_splash.logo.geometry().bottom()
+
+        before = list(manager.volumes)
+        manager.audio_changed.emit(27, True)
+        assert window.volume_slider.value() == 27
+        assert window.mute_btn.isChecked()
+        assert manager.volumes == before
+
+        from tvhplayer.core.models import StreamProfile
+        profile = StreamProfile(uuid='cast-h264', name='Chromecast')
+        key = ui.server_key(window.current_server())
+        window._on_stream_profiles(key, [profile], '')
+        requested = []
+        window.get_backend = lambda: types.SimpleNamespace(
+            stream_url=lambda _channel, profile=None: requested.append(profile) or 'http://tv.local/live.ts'
+        )
+        window._set_stream_profile('cast_profiles', 'cast-h264')
+        assert requested == ['cast-h264']
+        assert manager.played[-1] == ('http://tv.local/live.ts', 'News')
+        manager.playing.emit()
+
+        learned = f'living|{key}'
+        writes = []
+        original_save = window.save_config
+
+        def counting_save():
+            writes.append(1)
+            original_save()
+
+        window.save_config = counting_save
+        window._on_cast_profile_worked(learned, 'webm-profile')
+        assert window.config['cast_auto_profiles'][learned] == 'webm-profile'
+        saved = json.loads((tmp_path / 'tvhplayer.conf').read_text(encoding='utf-8'))
+        assert saved['cast_auto_profiles'][learned] == 'webm-profile'
+        window._on_cast_profile_worked(learned, 'webm-profile')
+        assert writes == [1]
+        window._on_cast_profile_worked(learned, 'pass-profile')
+        saved = json.loads((tmp_path / 'tvhplayer.conf').read_text(encoding='utf-8'))
+        assert saved['cast_auto_profiles'][learned] == 'pass-profile'
+        assert writes == [1, 1]
+
+        window.on_volume_changed(37)
+        window.toggle_mute()
+        assert manager.volumes[-1] == 37
+        assert manager.mutes[-1] is True
+
+        window.stop_playback()
+        assert manager.stops == 1
+        assert window.idle_splash.caption.isHidden()
+        assert window.idle_splash.accessibleName() == 'Nothing playing'
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_cast_profile_request_finishes_after_switching_away_and_can_refresh_again(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    requests = []
+    current = [{'url': 'http://server-a:9981'}]
+    monkeypatch.setattr(window, 'current_server', lambda: current[0])
+    monkeypatch.setattr(window.cast_manager, 'request_profiles',
+                        lambda _server, key: requests.append(key))
+    try:
+        window._prefetch_stream_profiles()
+        current[0] = {'url': 'http://server-b:9981'}
+        window._on_stream_profiles('http://server-a:9981', [], '')
+        assert window._stream_profiles_loading is None
+        current[0] = {'url': 'http://server-a:9981'}
+        window._prefetch_stream_profiles(force=True)
+        assert requests == ['http://server-a:9981', 'http://server-a:9981']
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_stale_cast_profile_response_does_not_clear_newer_server_request(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    current = [{'url': 'http://server-a:9981'}]
+    monkeypatch.setattr(window, 'current_server', lambda: current[0])
+    monkeypatch.setattr(window.cast_manager, 'request_profiles', lambda *_args: None)
+    try:
+        window._prefetch_stream_profiles()
+        current[0] = {'url': 'http://server-b:9981'}
+        window._prefetch_stream_profiles()
+        window._on_stream_profiles('http://server-a:9981', [], '')
+        assert window._stream_profiles_loading == 'http://server-b:9981'
+        window._on_stream_profiles('http://server-b:9981', [], '')
+        assert window._stream_profiles_loading is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_next_and_previous_channel_follow_the_list_and_wrap(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    played = []
+    window.get_backend = lambda: types.SimpleNamespace(
+        stream_url=lambda channel, profile=None: played.append(channel.name) or 'http://tv/stream'
+    )
+    window._remember_channel = lambda _channel: None
+    window._server_requests_ready = lambda: True
+    try:
+        window.channel_model.set_channels([
+            ui.Channel(uuid='a', name='One', number=1),
+            ui.Channel(uuid='b', name='Two', number=2),
+            ui.Channel(uuid='c', name='Three', number=3),
+        ])
+        # Nothing playing: start next to the selected row.
+        window.channel_list.setCurrentCell(1, 1)
+        window.play_adjacent_channel(1)
+        window._on_playback_started()
+        assert played == ['Three']
+
+        # Playing: step from the playing channel, wrapping at both ends.
+        window.controls_bar.next_btn.click()
+        assert played[-1] == 'One'
+        window.controls_bar.prev_btn.click()
+        assert played[-1] == 'Three'
+        assert window.channel_list.currentRow() == 2
+
+        window.channel_model.set_channels([])
+        window.play_adjacent_channel(1)
+        assert played[-1] == 'Three'
+        assert window.status_label.text() == 'No channels to switch to'
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_timeshift_controls_follow_the_player(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    bar = window.controls_bar
+    try:
+        assert fake_player.store == (None, 4 * 1024 ** 3)
+        window.set_timeshift_on_disk(True)
+        folder, size = fake_player.store
+        assert folder.endswith('timeshift') and size == 4 * 1024 ** 3
+        window.set_timeshift_gb(2)
+        assert fake_player.store[1] == 2 * 1024 ** 3
+        assert window.config['timeshift_on_disk'] is True and window.config['timeshift_gb'] == 2
+
+        # Hidden until a channel plays here; shown even before mpv reports a buffer.
+        assert not bar.pause_btn.isVisibleTo(bar)
+        from tvhplayer.core.player import Timeshift
+        fake_player.timeshift_state = None
+        window._protect_video_surface(True)
+        assert bar.pause_btn.isVisibleTo(bar) and bar.seek_slider.isVisibleTo(bar)
+        fake_player.timeshift_state = Timeshift(False, 0.0, 120.0)
+        window._sync_timeshift()
+        assert window._timeshift_timer.isActive()
+        assert bar.pause_btn.isVisibleTo(bar)
+        assert bar.live_btn.text() == 'LIVE' and not bar.live_btn.isEnabled()
+        assert (bar.seek_slider.maximum(), bar.seek_slider.value()) == (120, 120)
+        window._fill_playback_menu(window.playback_menu)
+        assert all(action.isEnabled() for action in window.timeshift_actions)
+        assert all(action.shortcut().isEmpty() for action in window.timeshift_actions)
+
+        bar.pause_btn.click()
+        assert fake_player.timeshift_state.paused
+        assert bar.pause_btn.accessibleName() == 'Resume'
+        fake_player.timeshift_state = Timeshift(True, 75.4, 120.0)
+        window._sync_timeshift()
+        assert bar.seek_slider.value() == 45
+        # mpv dropping old packets must not yank the handle left.
+        fake_player.timeshift_state = Timeshift(True, 75.4, 90.0)
+        window._sync_timeshift()
+        assert (bar.seek_slider.maximum(), bar.seek_slider.value()) == (120, 45)
+        # Expired positions clamp before a seek request is sent.
+        requested = []
+        bar.seek_requested.connect(requested.append)
+        bar.seek_slider.setValue(0)
+        assert requested == [90]
+        assert fake_player.skips == [pytest.approx(75.4 - 90)]
+        fake_player.skips = []
+        # The player cannot say for a moment, as while a seek settles: the controls stay.
+        fake_player.timeshift_state = None
+        window._sync_timeshift()
+        assert bar.pause_btn.isVisibleTo(bar) and bar.live_btn.text() == '−1:15'
+        fake_player.timeshift_state = Timeshift(True, 75.4, 120.0)
+        bar.seek_slider.setValue(100)
+        assert fake_player.skips == [pytest.approx(55.4)]
+        fake_player.skips = []
+        assert bar.live_btn.text() == '−1:15' and bar.live_btn.isEnabled()
+        assert bar.live_btn.accessibleName() == 'Go to live'
+
+        bar.back_btn.click()
+        bar.forward_btn.click()
+        assert fake_player.skips == [-10, 10]
+        assert window.status_label.text() == 'Already live'
+        bar.live_btn.click()
+        assert bar.live_btn.text() == 'LIVE' and bar.pause_btn.accessibleName() == 'Pause'
+
+        window.stop_playback()
+        assert not window._timeshift_timer.isActive()
+        assert not bar.pause_btn.isVisibleTo(bar)
+        window._fill_playback_menu(window.playback_menu)
+        assert not any(action.isEnabled() for action in window.timeshift_actions)
+
+        fake_player.timeshift_state = Timeshift(False, 0.0, 30.0)
+        window._protect_video_surface(True)
+        assert window._timeshift_timer.isActive()
+        window.close()
+        assert not window._timeshift_timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_choosing_a_stream_profile_restarts_the_local_channel(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    server = {'url': 'http://server-a:9981'}
+    monkeypatch.setattr(window, 'current_server', lambda: server)
+    monkeypatch.setattr(window.cast_manager, 'request_profiles', lambda *_args: None)
+    requested = []
+    window.get_backend = lambda: types.SimpleNamespace(
+        stream_url=lambda _channel, profile=None: requested.append(profile) or 'http://tv/stream'
+    )
+    window._remember_channel = lambda _channel: None
+    window._server_requests_ready = lambda: True
+    try:
+        from tvhplayer.core.models import StreamProfile
+        window._on_stream_profiles('http://server-a:9981', [StreamProfile(uuid='low', name='Low & slow')], '')
+        submenus = [action.menu() for action in window._video_context_menu().actions() if action.menu()]
+        profile_menu = next(menu for menu in submenus if menu.title() == 'Stream Pro&file')
+        labels = [action.text() for action in profile_menu.actions()]
+        assert labels == ['Server default', 'Low && slow']
+        assert profile_menu.actions()[0].isChecked()
+
+        # Nothing playing: the choice is saved for the next channel.
+        profile_menu.actions()[1].trigger()
+        assert requested == []
+        assert window.config['stream_profiles'] == {'http://server-a:9981': 'low'}
+
+        window.play_channel_by_data(ui.Channel(uuid='news', name='News'))
+        assert requested == ['low']
+        window._on_playback_started()
+
+        # Playing: the channel restarts with the new profile at once.
+        window._set_stream_profile('stream_profiles', '')
+        assert requested == ['low', None]
+        assert window._playing_channel().uuid == 'news'
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_tv_guide_opens_from_the_view_menu_at_the_selected_channel(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        import tvhplayer.guide_view as guide_view
+
+        actions = {action.text(): action for menu in window.menuBar().findChildren(ui.QMenu) for action in menu.actions()}
+        guide_action = actions['TV &Guide']
+        assert guide_action.shortcut().toString() == 'Ctrl+G'
+        channels = [ui.Channel(uuid='a', name='Alpha', number=1), ui.Channel(uuid='b', name='Bravo', number=2)]
+        window._channels = channels
+        monkeypatch.setattr(window, 'selected_channel', lambda: channels[1])
+        monkeypatch.setattr(window, '_server_requests_ready', lambda: False)
+        guide_action.trigger()
+        guide = window._guide
+        assert isinstance(guide, guide_view.GuideWindow)
+        assert guide.isVisible()
+        assert [channel.name for channel in guide.grid.channels] == ['Alpha', 'Bravo']
+        assert guide.grid.current_channel().name == 'Bravo'
+        # Without a server there is nothing to read, and the grid says why.
+        assert 'server' in guide.grid.message
+        window.channel_recordings_changed([])
+        assert guide.grid.recordings == {}
+        assert window.guide_btn.accessibleName() == 'TV guide'
+        assert window.guide_btn.text() == 'TV Guide'
+        window.selected_channel = lambda: channels[0]
+        window.guide_btn.click()
+        assert window._guide is guide
+        assert guide.grid.current_channel().name == 'Alpha'
+        window.show_guide(channels[0])
+        assert window._guide is guide
+        assert guide.grid.current_channel().name == 'Alpha'
+    finally:
+        guide = getattr(window, '_guide', None)
+        if guide is not None:
+            guide.shutdown()
+            guide.close()
+        window.close()
+        app.processEvents()
+
+
+def test_playback_menu_lists_tracks_and_deinterlace(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        fake_player.audio = [(-1, b'Disable'), (1, b'Track 1 - [English]'), (2, b'Track 2 - [Deutsch]')]
+        fake_player.audio_id = 1
+        fake_player.spu = [(-1, b'Disable'), (5, b'DVB subtitles')]
+        menu = window.playback_menu
+        window._fill_playback_menu(menu)
+        submenus = {action.text(): action.menu() for action in menu.actions()}
+        audio = submenus['&Audio Track']
+        assert [a.text() for a in audio.actions()] == ['Track 1 - [English]', 'Track 2 - [Deutsch]']
+        assert audio.actions()[0].isChecked()
+        audio.actions()[1].trigger()
+        assert fake_player.audio_id == 2
+
+        subtitles = submenus['&Subtitles']
+        assert [a.text() for a in subtitles.actions()] == ['Off', 'DVB subtitles']
+        assert subtitles.actions()[0].isChecked()
+        subtitles.actions()[1].trigger()
+        assert fake_player.spu_id == 5
+
+        deinterlace = submenus['&Deinterlace']
+        assert [a.isChecked() for a in deinterlace.actions()] == [True, False, False]
+        deinterlace.actions()[1].trigger()
+        assert window.config['deinterlace'] == 'on'
+        assert fake_player.deinterlace() == 'on'
+        deinterlace.actions()[2].trigger()
+        assert fake_player.deinterlace() == 'off'
+        # Filled again when it opens, so the list follows the stream.
+        window._fill_playback_menu(menu)
+        assert len(menu.actions()) == len(window.playback_actions) + 4
+        assert menu.actions()[0] is window.playback_actions[0]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_server_dialog_exposes_default_subtitle_language(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        dialog = ui.ServerDialog(window)
+        dialog.load_servers([{
+            'name': 'TVH', 'url': 'http://127.0.0.1:9981',
+            'protocol': 'htsp', 'subtitle_language': 'ron',
+            'remember_subtitle_selection': True,
+        }])
+        assert dialog.subtitle_language_combo.currentData() == 'ron'
+        assert dialog.remember_subtitle_checkbox.isChecked()
+        dialog.subtitle_language_combo.setCurrentIndex(dialog.subtitle_language_combo.findData('eng'))
+        assert dialog.servers[0]['subtitle_language'] == 'eng'
+        dialog.remember_subtitle_checkbox.setChecked(False)
+        assert dialog.servers[0]['remember_subtitle_selection'] is False
+        assert dialog.apply_btn.isEnabled()
+        assert dialog.apply_changes()
+        dialog.close()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_server_subtitle_language_auto_applies_after_late_track_discovery(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    (tmp_path / 'tvhplayer.conf').write_text(json.dumps({
+        'servers': [{
+            'name': 'TVH', 'url': 'http://127.0.0.1:9981',
+            'protocol': 'htsp', 'subtitle_language': 'ron',
+            'remember_subtitle_selection': True,
+        }],
+    }), encoding='utf-8')
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    try:
+        window._playback_channel = Channel(uuid='one', name='One', number=1)
+        player._playing = True
+        player.spu = []
+        window._reset_subtitle_default(for_live_channel=True)
+        window._start_subtitle_default()
+        assert player.spu_id == ui.NO_TRACK
+        assert window._subtitle_default_timer.isActive()
+
+        # MPV returns the tracks after the first frame; never select English
+        # just because it was reported first.
+        player.spu = [(3, 'DVB Subtitles - eng'), (7, 'DVB Subtitles - rum')]
+        window._apply_subtitle_default()
+        assert player.spu_id == 7
+        assert not window._subtitle_default_timer.isActive()
+
+        # A manual selection can update the same server's saved language.
+        window._choose_subtitle_track(3)
+        assert player.spu_id == 3
+        assert window.current_server()['subtitle_language'] == 'eng'
+        with (tmp_path / 'tvhplayer.conf').open(encoding='utf-8') as handle:
+            assert json.load(handle)['servers'][0]['subtitle_language'] == 'eng'
+
+        # Switching channels restores the chosen language, not the previous
+        # stream's numerical track ID.
+        window._playback_channel = Channel(uuid='two', name='Two', number=2)
+        player.spu = [(9, 'DVB Subtitles - rum'), (2, 'DVB Subtitles - eng')]
+        player.spu_id = ui.NO_TRACK
+        window._reset_subtitle_default(for_live_channel=True)
+        window._start_subtitle_default()
+        assert player.spu_id == 2
+
+        # Explicit Off, with remember enabled, is just as persistent.
+        window._choose_subtitle_track(ui.NO_TRACK)
+        assert window.current_server()['subtitle_language'] == ''
+        window._playback_channel = Channel(uuid='one', name='One', number=1)
+        player.spu_id = 2
+        window._reset_subtitle_default(for_live_channel=True)
+        window._start_subtitle_default()
+        assert player.spu_id == ui.NO_TRACK
+        assert not window._subtitle_default_timer.isActive()
+    finally:
+        window._reset_subtitle_default()
+        window.close()
+        app.processEvents()
+
+
+def test_server_subtitle_language_does_not_choose_the_wrong_track(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel
+
+    (tmp_path / 'tvhplayer.conf').write_text(json.dumps({
+        'servers': [{
+            'name': 'TVH', 'url': 'http://127.0.0.1:9981',
+            'subtitle_language': 'ron',
+        }],
+    }), encoding='utf-8')
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    try:
+        window._playback_channel = Channel(uuid='one', name='One')
+        player._playing = True
+        player.spu = [(1, 'English'), (2, 'DVB Subtitles')]
+        player.spu_id = 1
+        window._reset_subtitle_default(for_live_channel=True)
+        window._start_subtitle_default()
+        assert player.spu_id == ui.NO_TRACK
+        assert window._subtitle_default_timer.isActive()
+        # The user can still select an unlabelled track manually, but an
+        # automatic later retry must not overwrite that choice.
+        window._choose_subtitle_track(2)
+        assert player.spu_id == 2
+        window._apply_subtitle_default()
+        assert player.spu_id == 2
+        assert window.current_server()['subtitle_language'] == 'ron'
+    finally:
+        window._reset_subtitle_default()
+        window.close()
+        app.processEvents()
+
+
+def test_spinner_shows_tuner_signal(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        spinner = ui.PlaybackSpinner()
+        spinner.resize(400, 300)
+        spinner.set_caption('Waiting for channel')
+        spinner.set_signal('poor', 'Signal too weak (SNR 5 dB): check the aerial, dish, or cable')
+        assert spinner.accessibleName() == (
+            'Waiting for channel Signal too weak (SNR 5 dB): check the aerial, dish, or cable'
+        )
+        assert not spinner.grab().isNull()
+        spinner.set_signal('', '')
+        assert spinner.accessibleName() == 'Waiting for channel'
+
+        window._awaiting_playback = True
+        watch = types.SimpleNamespace(stop=lambda: None)
+        window._start_watch = watch
+        window._on_start_signal(watch, 'none', 'No signal: check the aerial, dish, or cable')
+        window._on_start_given_up(watch)
+        assert window.status_label.text() == (
+            'This channel is not working right now. No signal: check the aerial, dish, or cable.'
+        )
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_conflict_dialog_makes_the_chosen_recording_important(monkeypatch, tmp_path):
+    from tvhplayer.core.models import DvrEntry
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        entries = [
+            DvrEntry(uuid='a', title='News', channel_name='BBC ONE', start=1_800_000_000, duration=3600),
+            DvrEntry(uuid='b', title='Film', channel_name='ITV', start=1_800_001_800, duration=7200),
+        ]
+        dialog = ui.RecordingConflictDialog(entries, 1, window)
+        assert dialog.list.count() == 2
+        assert dialog.list.item(1).text().startswith('Film on ITV, ')
+        dialog.list.setCurrentRow(1)
+        updates = []
+        backend = types.SimpleNamespace(update_dvr_entry=lambda entry, update: updates.append((entry, update)))
+        monkeypatch.setattr(window, 'get_backend', lambda: backend)
+        window._conflict_answered(dialog, ui.QDialog.DialogCode.Accepted)
+        assert updates[0][0] is entries[1]
+        assert updates[0][1].priority == 0
+        window._conflict_answered(dialog, ui.QDialog.DialogCode.Rejected)
+        assert len(updates) == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_picons_are_read_once_the_window_is_up(monkeypatch, tmp_path):
+    # Reading a pack beside the window being built held the window up by half a second.
+    (tmp_path / 'picons').mkdir()
+    (tmp_path / 'picons' / 'bbcone.png').write_bytes(b'png')
+    started = []
+
+    def prepare(ui):
+        monkeypatch.setattr(ui.TVHeadendClient, 'fetch_channels', lambda self, keep_place=False: None)
+        real_start = ui.PiconJob.start
+        monkeypatch.setattr(ui.PiconJob, 'start', lambda self: (started.append(self), real_start(self)))
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path, prepare)
+    try:
+        assert started == []
+        deadline = time.monotonic() + 5
+        while window.picons is None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert len(started) == 1
+        assert window.picon_count() == 1
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_channels_without_a_logo_use_a_picon(monkeypatch, tmp_path):
+    from PyQt6.QtCore import QBuffer, QIODevice
+    from PyQt6.QtGui import QColor, QPixmap
+
+    from tvhplayer.core.models import Channel
+    from tvhplayer.core.picons import PiconIndex
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        pixmap = QPixmap(10, 6)
+        pixmap.fill(QColor('red'))
+        buffer = QBuffer()
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        pixmap.save(buffer, 'PNG')
+        (tmp_path / 'bbcone.png').write_bytes(bytes(buffer.data()))
+        window.picons = PiconIndex(tmp_path)
+        plain = Channel(uuid='1', name='BBC One HD')
+        reference = window.channel_logo_reference(plain)
+        assert reference == f"picon:{tmp_path / 'bbcone.png'}"
+        # The file is read off the UI thread; the logo is there once it arrives.
+        assert window._logo_for(reference, None) is None
+        deadline = time.monotonic() + 5
+        while window._logo_for(reference, None) is None and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert window._logo_for(reference, None) is not None
+        served = Channel(uuid='2', name='BBC One', icon='imagecache/7')
+        assert window.channel_logo_reference(served) == 'imagecache/7'
+        assert window.channel_logo_reference(Channel(uuid='3', name='Nothing')) == ''
+        # A list with no server logos still shows the picon column.
+        window.channel_options['logos'] = True
+        window._channels = [plain, Channel(uuid='3', name='Nothing')]
+        window._fill_channel_rows()
+        assert window.channel_model._logos is True
+        assert window.channel_model.logo_reference_at(0) == reference
+        window.picons = None
+        assert window.channel_logo_reference(plain) == ''
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_mpv_engine_uses_plain_widgets_qt_keeps_painting(monkeypatch, tmp_path):
+    from PyQt6.QtCore import Qt
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        from tvhplayer.video_widget import MpvVideoWidget
+
+        assert isinstance(window.video_frame, MpvVideoWidget)
+        assert fake_player.attached is window.video_frame
+        assert not window.video_frame.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        assert not window.playback_spinner.testAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        assert not window.floating_bar.isWindow()
+        # A child shows with its window unless hidden on purpose. (The OpenGL
+        # widget cannot be shown on the offscreen platform, so check the flag.)
+        assert window.floating_bar.testAttribute(Qt.WidgetAttribute.WA_WState_ExplicitShowHide)
+        assert window.floating_bar.isHidden()
+        window._show_playback_wait()
+        assert window.video_frame.updatesEnabled()
+        window._on_playback_started()
+        assert window.video_frame.updatesEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_settings_leave_the_window_usable(monkeypatch, tmp_path):
+    # A modal dialog makes GNOME keep the pointer off the window on Wayland,
+    # where it then keeps the resize arrow of the dialog's edge.
+    from PyQt6.QtCore import Qt
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        dialog = window.show_settings()
+        app.processEvents()
+        assert dialog.isVisible()
+        assert dialog.windowModality() == Qt.WindowModality.NonModal
+        assert window.show_settings() is dialog
+        # The folder chosen when recording first goes to this computer shows in Settings.
+        window.set_local_recording_dir(str(tmp_path))
+        assert dialog.folder_edit.text() == str(tmp_path)
+        # Quitting closes Settings first, which saves an edit still being typed.
+        dialog.convert_edit.setText('-c:v libx264')
+        monkeypatch.setattr(window, '_confirm_quit', lambda: True)
+        window.close()
+        app.processEvents()
+        assert window.config['convert_options'] == '-c:v libx264'
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def _dvr_entry(category, htsp_id):
+    return types.SimpleNamespace(
+        category=lambda: category,
+        start=int(time.time()) - 7200,
+        duration=3600,
+        htsp_id=htsp_id,
+        uuid=None,
+        channel_name='One',
+        title=f'Show {htsp_id}',
+        raw={},
+    )
+
+
+def test_tasks_stay_hidden_when_the_server_starts_with_only_completed_recordings(monkeypatch, tmp_path):
+    # The built-in server is not ready on the first refresh, so the pane sees no
+    # recordings; its first real answer lists old recordings, which are not new.
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        ready = [False]
+        monkeypatch.setattr(window, 'current_server', lambda: {'name': 'Built-in'})
+        monkeypatch.setattr(window, '_server_requests_ready', lambda: ready[0])
+        pane = window.tasks_pane
+        pane.refresh()
+        ready[0] = True
+        pane._on_server_fetched(pane._generation, [_dvr_entry('finished', 1), _dvr_entry('finished', 2)], None)
+        app.processEvents()
+        assert not window.tasks_action.isChecked()
+        assert not pane.isVisibleTo(window)
+
+        # A recording scheduled later is new and opens the pane.
+        pane._on_server_fetched(
+            pane._generation,
+            [_dvr_entry('finished', 1), _dvr_entry('finished', 2), _dvr_entry('upcoming', 3)],
+            None,
+        )
+        app.processEvents()
+        assert window.tasks_action.isChecked()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_tasks_open_when_the_server_starts_with_a_scheduled_recording(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        ready = [False]
+        monkeypatch.setattr(window, 'current_server', lambda: {'name': 'Built-in'})
+        monkeypatch.setattr(window, '_server_requests_ready', lambda: ready[0])
+        pane = window.tasks_pane
+        pane.refresh()
+        ready[0] = True
+        pane._on_server_fetched(pane._generation, [_dvr_entry('upcoming', 1)], None)
+        app.processEvents()
+        assert window.tasks_action.isChecked()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_the_window_carries_the_app_icon(monkeypatch, tmp_path):
+    # Windows and macOS take the title bar, taskbar and Dock icon from the window.
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        assert not window.windowIcon().isNull()
+        assert not app.windowIcon().isNull()
+        assert window.windowIcon().cacheKey() == app.windowIcon().cacheKey()
+    finally:
+        window.close()
+
+
+@pytest.mark.parametrize('choice', ['buffer', 'live', 'cancel', 'expired', 'other_channel'])
+def test_recording_from_timeshift_uses_the_captured_position(monkeypatch, tmp_path, choice):
+    from concurrent.futures import Future
+    from tvhplayer.core.buffer_recorder import BufferRecorder
+    from tvhplayer.core.models import Channel
+    from tvhplayer.core.player import BufferRecordingPoint, Timeshift
+
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    channel = Channel(uuid='one', name='One')
+    point = BufferRecordingPoint(1, 10.0, 20.0)
+    player.timeshift_state = Timeshift(True, 20.0, 30.0)
+    player.buffer_recording_point = lambda: point
+    window._playback_channel = channel
+    window._playback_active = True
+    window._programme_on_now = lambda _channel: None
+    window.set_local_recording_dir(str(tmp_path))
+    window.set_recording_format('mp4')
+    window.set_recording_ffmpeg_options('-b:a 128k')
+    calls, warnings = [], []
+    future = Future()
+
+    def record_buffer(path, start):
+        assert start is point
+        if choice == 'expired':
+            raise RuntimeError('The selected start is no longer buffered.')
+        calls.append(('buffer', path))
+        Path(path).write_bytes(b'recorded packets')
+        return BufferRecorder(path, future, lambda: future.set_result(None))
+
+    player.record_buffer = record_buffer
+
+    class LiveRecorder:
+        is_running = False
+        file_path = None
+
+        def start(self, url, path, user, password, options):
+            calls.append(('live', path))
+            assert options == ['-b:a', '128k']
+            self.file_path = path
+            self.is_running = True
+
+        def stop(self):
+            self.is_running = False
+
+    window.new_local_recorder = LiveRecorder
+    window.get_backend = lambda: types.SimpleNamespace(stream_url=lambda _c: 'http://tv/live')
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: warnings.append(args[2]))
+
+    def confirm(dialog):
+        assert dialog.records_from_buffer() == (choice != 'other_channel')
+        if choice != 'other_channel':
+            assert 'plus buffered footage' in dialog.summary_label.text()
+        if choice == 'live':
+            dialog.buffer_check.setChecked(False)
+            assert 'plus buffered footage' not in dialog.summary_label.text()
+        # Opening the dialog captures the point, even if playback moves meanwhile.
+        player.timeshift_state = Timeshift(False, 10.0, 30.0)
+        return ui.QDialog.DialogCode.Rejected if choice == 'cancel' else ui.QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(ui.RecordingDurationDialog, 'exec', confirm)
+    try:
+        selected = Channel(uuid='two', name='Two') if choice == 'other_channel' else channel
+        window.start_local_recording(selected)
+        if choice in ('cancel', 'expired'):
+            assert not calls and not window.local_jobs
+            assert bool(warnings) == (choice == 'expired')
+        else:
+            job = window.local_jobs[0]
+            buffered = choice == 'buffer'
+            assert calls[0][0] == ('buffer' if buffered else 'live')
+            assert Path(calls[0][1]).suffix == ('.ts' if buffered else '.mp4')
+            assert job.timer.interval() == 3600 * 1000
+            job.timer.timeout.emit()
+            assert not job.is_running and job.timer is None
+    finally:
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('failed', [False, True])
+def test_finished_buffer_recording_is_finalized_by_monitor(monkeypatch, tmp_path, failed):
+    from concurrent.futures import Future
+    from tvhplayer.core.buffer_recorder import BufferRecorder
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    future = Future()
+    path = tmp_path / 'buffer.ts'
+    if failed:
+        future.set_exception(RuntimeError('Cannot write recording'))
+    else:
+        path.write_bytes(b'footage')
+        future.set_result(None)
+    recorder = BufferRecorder(path, future, lambda: pytest.fail('stopped a finished dump'))
+    job = ui.LocalJob(recorder, Channel(uuid='one', name='One'))
+    job.end = time.time() + 3600
+    job.timer = ui.QTimer(window)
+    job.timer.start(3600000)
+    window.local_jobs = [job]
+    window.recording_monitor = ui.QTimer(window)
+    window.recording_monitor.start(2000)
+    errors = []
+    monkeypatch.setattr(ui.QMessageBox, 'critical', lambda *args: errors.append(args[2]))
+    try:
+        window.check_recording_status()
+        assert job.timer is None and job.end is None
+        assert window.recording_monitor is None
+        assert bool(errors) == failed
+        if failed:
+            assert 'Cannot write recording' in errors[0]
+        window.check_recording_status()
+        assert len(errors) == int(failed)
+    finally:
+        window.close()
+        app.processEvents()

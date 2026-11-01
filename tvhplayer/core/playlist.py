@@ -12,8 +12,8 @@ import posixpath
 import re
 import shlex
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import unquote, urlsplit
+from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -23,10 +23,13 @@ from .proxy import configure_session
 NOT_A_PLAYLIST = 'This file is not a TV playlist.'
 NO_CHANNELS = 'This playlist has no channels TVHplayer can add.'
 DOWNLOAD_FAILED = 'Could not download the playlist. Check the address and your internet connection.'
+XTREAM_AUTH_FAILED = 'The Xtream Codes server did not accept the username or password.'
 FILE_FAILED = 'Could not open the playlist file.'
 TOO_LARGE = 'This playlist is too large to import.'
+STOPPED = 'Import stopped.'
+ONLY_FILMS = 'This playlist has only films and series, and TVHplayer imports only TV channels.'
 
-MAX_PLAYLIST_BYTES = 50 * 1024 * 1024
+MAX_PLAYLIST_BYTES = 256 * 1024 * 1024
 DOWNLOAD_TIMEOUT = 30
 # File and path stems that say nothing about the playlist; the host names it instead.
 _GENERIC_STEMS = {'', 'playlist', 'index', 'get', 'channels', 'list', 'tv', 'iptv', 'live', 'm3u', 'm3u8', 'playlist_m3u'}
@@ -36,6 +39,11 @@ MAX_PIPE_ARGS = 63
 
 _ATTRIBUTE = re.compile(r'''([A-Za-z0-9_-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"',]+))''')
 _CHANNEL_NUMBER = re.compile(r'^\d+(\.\d+)?$')
+# Xtream Codes servers list films and series episodes as /movie/<user>/<pass>/<id>.<ext>.
+# As a channel a film always starts from the beginning and Tvheadend restarts it when
+# it ends, and a large server lists hundreds of thousands of them: each would be a mux,
+# service, and channel the server opens once to scan.
+_VOD_PATH = re.compile(r'^/(movie|series)/[^/]+/[^/]+/[^/]+$')
 _HEADER_NAMES = {
     'user-agent': 'User-Agent',
     'referer': 'Referer',
@@ -67,6 +75,10 @@ class PlaylistEntry:
 class Playlist:
     entries: List[PlaylistEntry]
     guide_url: str = ''
+    # Films and series episodes left out; see _VOD_PATH.
+    films: int = 0
+    # Provider account limit, when its API reports one. Zero means unknown.
+    max_connections: int = 0
 
 
 @dataclass
@@ -102,11 +114,19 @@ def is_web_address(location: str) -> bool:
     return (location or '').strip().lower().startswith(('http://', 'https://'))
 
 
-def load_playlist(location: str) -> Playlist:
-    """Download or read a playlist and parse it. Raises ``PlaylistError``."""
+def load_playlist(
+    location: str,
+    cancelled: Optional[Callable[[], bool]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Playlist:
+    """Download or read a playlist and parse it. Raises ``PlaylistError``.
+
+    ``cancelled`` is asked between downloaded chunks; a large playlist can take
+    minutes to download, and the app waits for this when it quits.
+    """
     location = (location or '').strip()
     if is_web_address(location):
-        data = _download(location)
+        data = _download(location, cancelled or (lambda: False), headers)
     else:
         path = unquote(location[7:]) if location.startswith('file://') else location
         try:
@@ -116,7 +136,136 @@ def load_playlist(location: str) -> Playlist:
             raise PlaylistError(FILE_FAILED) from exc
         if len(data) > MAX_PLAYLIST_BYTES:
             raise PlaylistError(TOO_LARGE)
-    return parse_playlist(decode_playlist(data))
+    playlist = parse_playlist(decode_playlist(data))
+    _apply_provider_headers(playlist, headers)
+    return playlist
+
+
+def load_xtream(
+    location: str,
+    cancelled: Optional[Callable[[], bool]] = None,
+    headers: Optional[Dict[str, str]] = None,
+) -> Playlist:
+    """Read live channels from an Xtream Codes ``player_api.php`` endpoint."""
+    base, username, password = xtream_account(location)
+    if not base or not username or not password:
+        raise PlaylistError('Enter a valid Xtream Codes server, username, and password.')
+    cancelled = cancelled or (lambda: False)
+    auth = {'username': username, 'password': password}
+    api_url = f'{base}/player_api.php'
+    with requests.Session() as session:
+        configure_session(session, api_url)
+        session.headers.update(dict(headers or {}))
+        account = _xtream_json(session, api_url, auth, cancelled)
+        user_info = account.get('user_info') if isinstance(account, dict) else None
+        if isinstance(user_info, dict) and 'auth' in user_info and str(user_info.get('auth')).lower() in ('0', 'false'):
+            raise PlaylistError(XTREAM_AUTH_FAILED)
+        categories = _xtream_json(session, api_url, dict(auth, action='get_live_categories'), cancelled)
+        streams = _xtream_json(session, api_url, dict(auth, action='get_live_streams'), cancelled)
+
+    if not isinstance(streams, list):
+        raise PlaylistError(DOWNLOAD_FAILED)
+    category_rows = categories if isinstance(categories, list) else []
+    category_names = {
+        str(row.get('category_id')): str(row.get('category_name') or '').strip()
+        for row in category_rows if isinstance(row, dict)
+    }
+    entries = []
+    for row in streams:
+        if cancelled():
+            raise PlaylistError(STOPPED)
+        if not isinstance(row, dict) or not row.get('stream_id'):
+            continue
+        stream_id = str(row['stream_id'])
+        name = str(row.get('name') or stream_id).strip()
+        extension = re.sub(r'[^A-Za-z0-9]', '', str(row.get('container_extension') or 'ts')) or 'ts'
+        url = f'{base}/live/{quote(username, safe="")}/{quote(password, safe="")}/{quote(stream_id, safe="")}.{extension}'
+        attrs = {
+            'tvg-id': str(row.get('epg_channel_id') or '').strip(),
+            'tvg-logo': str(row.get('stream_icon') or '').strip(),
+            'tvg-chno': str(row.get('num') or '').strip(),
+        }
+        group = category_names.get(str(row.get('category_id')), '')
+        entries.append(PlaylistEntry(name, url, dict(headers or {}), [group] if group else [], attrs))
+    if not entries:
+        raise PlaylistError(NO_CHANNELS)
+    connections = 0
+    try:
+        connections = max(0, int((account.get('user_info') or {}).get('max_connections') or 0))
+    except (AttributeError, TypeError, ValueError):
+        pass
+    guide_url = f'{base}/xmltv.php?{urlencode(auth)}'
+    return Playlist(entries, guide_url=guide_url, max_connections=connections)
+
+
+def xtream_playlist_url(server: str, username: str, password: str) -> str:
+    """Canonical saved XC account address, compatible with older ``get.php`` handling."""
+    text = (server or '').strip().rstrip('/')
+    if '://' not in text:
+        text = f'http://{text}'
+    parts = urlsplit(text)
+    if parts.scheme not in ('http', 'https') or not parts.netloc:
+        return ''
+    base_path = parts.path.rstrip('/')
+    for suffix in ('/get.php', '/player_api.php'):
+        if base_path.endswith(suffix):
+            base_path = base_path[:-len(suffix)]
+    path = f'{base_path}/get.php'
+    return urlunsplit((parts.scheme, parts.netloc, path, urlencode({
+        'username': (username or '').strip(), 'password': password or '',
+    }), ''))
+
+
+def xtream_account(location: str) -> Tuple[str, str, str]:
+    """``(server base, username, password)`` from a saved XC playlist URL."""
+    parts = urlsplit((location or '').strip())
+    if parts.scheme not in ('http', 'https') or not parts.netloc:
+        return '', '', ''
+    query = parse_qs(parts.query)
+    username = query.get('username', [''])[0]
+    password = query.get('password', [''])[0]
+    path = parts.path.rstrip('/')
+    for suffix in ('/get.php', '/player_api.php'):
+        if path.endswith(suffix):
+            path = path[:-len(suffix)]
+    base = urlunsplit((parts.scheme, parts.netloc, path, '', '')).rstrip('/')
+    return base, username, password
+
+
+def xtream_identity(location: str) -> Tuple[str, str]:
+    """Password-independent XC identity: normalized server plus username."""
+    base, username, _password = xtream_account(location)
+    parts = urlsplit(base)
+    normalized = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip('/'), '', ''))
+    return normalized, username
+
+
+def xtream_connections(location: str, headers: Optional[Dict[str, str]] = None) -> Optional[int]:
+    """How many streams at once the Xtream Codes account of a playlist allows, or None.
+
+    ``location`` is the server's ``get.php?username=…&password=…`` address.
+    Such a server drops the account's oldest stream when it opens one more.
+    """
+    parts = urlsplit((location or '').strip())
+    if parts.scheme not in ('http', 'https') or posixpath.basename(parts.path) != 'get.php':
+        return None
+    query = parse_qs(parts.query)
+    username = query.get('username', [''])[0]
+    password = query.get('password', [''])[0]
+    if not username or not password:
+        return None
+    path = posixpath.join(posixpath.dirname(parts.path), 'player_api.php')
+    url = urlunsplit((parts.scheme, parts.netloc, path, urlencode({'username': username, 'password': password}), ''))
+    with requests.Session() as session:
+        configure_session(session, url)
+        session.headers.update(dict(headers or {}))
+        try:
+            response = session.get(url, timeout=DOWNLOAD_TIMEOUT)
+            connections = int(response.json()['user_info']['max_connections'])
+        except (requests.RequestException, ValueError, KeyError, TypeError):
+            return None
+    # Some panels report 0 for no limit.
+    return connections if connections > 0 else None
 
 
 def playlist_name(location: str) -> str:
@@ -135,7 +284,7 @@ def playlist_name(location: str) -> str:
 
 
 def parse_playlist(text: str) -> Playlist:
-    """Raise ``PlaylistError`` when the text is not an M3U playlist."""
+    """Raise ``PlaylistError`` when the text is not an M3U playlist or has only films."""
     lines = (text or '').lstrip('﻿').splitlines()
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -153,6 +302,7 @@ def parse_playlist(text: str) -> Playlist:
             break
 
     entries = []
+    films = 0
     pending = None
     extgrp: List[str] = []
     for raw in lines[1:]:
@@ -161,8 +311,8 @@ def parse_playlist(text: str) -> Playlist:
             continue
         upper = line.upper()
         if upper.startswith('#EXTINF:'):
-            attrs, name = _extinf(line[8:])
-            pending = {'attrs': attrs, 'name': name, 'headers': {}}
+            # Read only once its address shows it is a channel, not a film.
+            pending = {'extinf': line[8:], 'headers': {}}
         elif upper.startswith('#EXTGRP:'):
             extgrp = _split_groups(line[8:], ';')
         elif upper.startswith('#EXTVLCOPT:'):
@@ -170,26 +320,38 @@ def parse_playlist(text: str) -> Playlist:
             header = _VLC_HEADERS.get(key.strip().lower())
             if header and value.strip():
                 if pending is None:
-                    pending = {'attrs': {}, 'name': '', 'headers': {}}
+                    pending = {'extinf': None, 'headers': {}}
                 pending['headers'][header] = value.strip()
         elif line.startswith('#'):
             continue
         else:
-            info = pending or {'attrs': {}, 'name': '', 'headers': {}}
+            info = pending or {'extinf': None, 'headers': {}}
             pending = None
             url, url_headers = _split_url(line)
+            if _is_vod(url):
+                films += 1
+                continue
             headers = dict(info['headers'])
             headers.update(url_headers)
-            attrs = info['attrs']
+            attrs, name = _extinf(info['extinf']) if info['extinf'] is not None else ({}, '')
             if 'group-title' in attrs:
                 groups = _split_groups(attrs['group-title'], ';')
             elif 'tvh-tags' in attrs:
                 groups = _split_groups(attrs['tvh-tags'], '|')
             else:
                 groups = list(extgrp)
-            name = info['name'] or attrs.get('tvg-name', '').strip() or _name_from_url(url)
+            name = name or attrs.get('tvg-name', '').strip() or _name_from_url(url)
             entries.append(PlaylistEntry(name=name, url=url, headers=headers, groups=groups, attrs=attrs))
-    return Playlist(entries=entries, guide_url=guide_url)
+    if films and not entries:
+        raise PlaylistError(ONLY_FILMS)
+    return Playlist(entries=entries, guide_url=guide_url, films=films)
+
+
+def _is_vod(url: str) -> bool:
+    try:
+        return bool(_VOD_PATH.match(urlsplit(url).path))
+    except ValueError:
+        return False
 
 
 def playlist_commands(playlist: Playlist) -> List[PlaylistEntry]:
@@ -324,9 +486,10 @@ def tvh_split(command: str) -> List[str]:
     return args
 
 
-def _download(url: str) -> bytes:
+def _download(url: str, cancelled: Callable[[], bool], headers=None) -> bytes:
     with requests.Session() as session:
         configure_session(session, url)
+        session.headers.update(dict(headers or {}))
         try:
             with session.get(url, timeout=DOWNLOAD_TIMEOUT, stream=True) as response:
                 if response.status_code >= 400:
@@ -334,6 +497,8 @@ def _download(url: str) -> bytes:
                 chunks = []
                 size = 0
                 for chunk in response.iter_content(64 * 1024):
+                    if cancelled():
+                        raise PlaylistError(STOPPED)
                     size += len(chunk)
                     if size > MAX_PLAYLIST_BYTES:
                         raise PlaylistError(TOO_LARGE)
@@ -341,6 +506,28 @@ def _download(url: str) -> bytes:
         except requests.RequestException as exc:
             raise PlaylistError(DOWNLOAD_FAILED) from exc
     return b''.join(chunks)
+
+
+def _apply_provider_headers(playlist: Playlist, headers) -> None:
+    defaults = dict(headers or {})
+    if not defaults:
+        return
+    for entry in playlist.entries:
+        merged = dict(defaults)
+        merged.update(entry.headers)
+        entry.headers = merged
+
+
+def _xtream_json(session, url, params, cancelled):
+    if cancelled():
+        raise PlaylistError(STOPPED)
+    try:
+        response = session.get(url, params=params, timeout=DOWNLOAD_TIMEOUT)
+        if response.status_code >= 400:
+            raise PlaylistError(DOWNLOAD_FAILED)
+        return response.json()
+    except (requests.RequestException, ValueError) as exc:
+        raise PlaylistError(DOWNLOAD_FAILED) from exc
 
 
 def _stream_command(entry, ffmpeg, provider, allow_commands):

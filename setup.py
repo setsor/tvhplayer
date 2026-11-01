@@ -2,14 +2,16 @@ from setuptools import setup, find_packages
 
 setup(
     name="tvhplayer",
-    version="3.4",
+    version="4.5.0",
     description="Desktop client for TVHeadend",
     author="mFat",
     author_email="mah.fat@gmail.com",
     url="https://github.com/mfat/tvhplayer",
     install_requires=[
         'PyQt6>=6.4.0',
-        'python-vlc>=3.0.12122',
+        'mpv>=1.0.4',
+        'PyChromecast>=14.1.0; python_version >= "3.11"',
+        'PyChromecast>=13.1.0,<14; python_version < "3.11"',
         'requests>=2.25.1',
         'python-dateutil>=2.8.2',
     ],

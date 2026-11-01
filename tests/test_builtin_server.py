@@ -7,6 +7,8 @@ import sys
 import threading
 import time
 
+from datetime import datetime
+
 from pathlib import Path
 
 import pytest
@@ -25,6 +27,8 @@ from tvhplayer.core.builtin_server import (
     pick_port_pair,
     quit_confirmation,
     recording_titles,
+    upcoming_recordings,
+    when_text,
     serverinfo_ok,
     startup_result,
     builtin_requests_ready,
@@ -103,6 +107,7 @@ def test_builtin_entry_is_permanent_and_separate_from_a_local_instance(monkeypat
     assert servers[0]['builtin'] is False
     assert servers[1]['builtin'] is True
     assert servers[1]['name'] == 'Built-in Server'
+    assert servers[1]['protocol'] == 'htsp'
     again = ensure_builtin_server(servers)
     assert len(again) == 2
 
@@ -135,6 +140,51 @@ def test_quit_warning_names_the_active_recording():
     assert 'Later' not in message
     assert quit_confirmation([], False) is None
     assert 'could not be read' in quit_confirmation([], True)
+
+
+def _entry(uuid, title, start, sched_status='scheduled', status='Scheduled', raw=None):
+    return DvrEntry(
+        uuid=uuid, title=title, channel_name='One', start=start, duration=600,
+        status=status, sched_status=sched_status, raw=raw or {},
+    )
+
+
+def test_upcoming_recordings_skip_past_disabled_and_running_rows():
+    now = 1_000_000
+    later = _entry('1', 'Later', now + 7200)
+    soon = _entry('2', 'Soon', now + 60)
+    past = _entry('3', 'Past', now - 3600)
+    off = _entry('4', 'Off', now + 60, raw={'enabled': False})
+    running = _entry('5', 'Now', now - 60, 'recording', 'Running')
+    found = upcoming_recordings([later, past, off, running, soon], now)
+    assert [entry.title for entry in found] == ['Soon', 'Later']
+
+
+def test_when_text_names_the_day():
+    now = datetime(2026, 10, 25, 12, 0).timestamp()
+    assert when_text(datetime(2026, 10, 25, 21, 0).timestamp(), now) == 'today at 21:00'
+    assert when_text(datetime(2026, 10, 26, 6, 30).timestamp(), now) == 'tomorrow at 06:30'
+    assert when_text(datetime(2026, 10, 31, 20, 15).timestamp(), now) == 'Sat 31 Oct at 20:15'
+
+
+def test_quit_warning_names_the_next_scheduled_recording():
+    now = datetime(2026, 10, 25, 12, 0).timestamp()
+    first = _entry('1', 'News', datetime(2026, 10, 25, 21, 0).timestamp())
+    second = _entry('2', 'Film', datetime(2026, 10, 26, 21, 0).timestamp())
+    message = quit_confirmation([], False, [first, second], now=now)
+    assert 'Next: News today at 21:00 (and 1 more)' in message
+    assert 'could not be read' not in quit_confirmation([], True, [first], now=now)
+
+
+def test_quit_warning_covers_local_recording_on_any_server():
+    message = quit_confirmation([], False, local_recording='One (rec.ts)')
+    assert 'One (rec.ts)' in message
+
+
+def test_playlist_update_alone_does_not_ask():
+    assert quit_confirmation([], False, playlist_updates=['IPTV']) is None
+    message = quit_confirmation([], False, local_recording='One (rec.ts)', playlist_updates=['IPTV'])
+    assert 'IPTV' in message
 
 
 def test_builtin_requests_wait_until_the_child_has_a_url():
@@ -278,7 +328,6 @@ def test_finds_servers_on_the_builtin_config_folder(tmp_path):
     assert owned_by_other_app(103, str(proc))
 
 
-@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Relies on Linux /proc and exec -a')
 def test_leftover_server_is_stopped_but_another_window_keeps_its_own(tmp_path, monkeypatch):
     import subprocess
 
@@ -374,9 +423,99 @@ def test_builtin_server_gets_its_ready_to_use_defaults():
     assert apply_builtin_defaults(_free_port_for_test()) == ['plain login', 'setup wizard off']
 
 
+def test_builtin_server_records_into_the_app_folder():
+    from urllib.parse import parse_qs
+
+    from tvhplayer.core.builtin_server import apply_builtin_defaults
+
+    received = []
+    grid = {'entries': [
+        {'uuid': 'other', 'name': 'Archive', 'storage': '/srv/archive'},
+        {'uuid': 'default', 'name': '', 'storage': '/app/share/tvhplayer'},
+    ]}
+
+    class Api(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers['Content-Length'])
+            received.append((self.path, parse_qs(self.rfile.read(length).decode())))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(grid if self.path == '/api/dvr/config/grid' else {}).encode())
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.HTTPServer(('127.0.0.1', 0), Api)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert apply_builtin_defaults(
+            server.server_address[1], recordings_dir='/home/me/Videos', padding=(2, 5),
+        ) == []
+        # Margins the profile already has are not saved again.
+        grid['entries'][1].update({'pre-extra-time': 2, 'post-extra-time': 5, 'storage': '/home/me/Videos'})
+        assert apply_builtin_defaults(server.server_address[1], recordings_dir='/home/me/Videos', padding=(2, 5)) == []
+    finally:
+        server.shutdown()
+    saved = [form for path, form in received if path == '/api/idnode/save']
+    assert [json.loads(form['node'][0]) for form in saved] == [
+        {'uuid': 'default', 'storage': '/home/me/Videos'},
+        {'uuid': 'default', 'pre-extra-time': 2, 'post-extra-time': 5},
+    ]
+    assert apply_builtin_defaults(_free_port_for_test(), recordings_dir='/x')[-1] == 'recordings folder'
+
+
+def test_no_builtin_entry_without_a_packaged_tvheadend():
+    servers = ensure_builtin_server([{'name': 'NAS', 'url': 'http://nas:9981'}], available=False)
+    assert servers == [{'name': 'NAS', 'url': 'http://nas:9981'}]
+
+
 def _free_port_for_test():
     import socket
 
     with socket.socket() as sock:
         sock.bind(('127.0.0.1', 0))
         return sock.getsockname()[1]
+
+
+def test_server_cannot_start_again_once_the_app_quits(tmp_path):
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt6.QtCore import QCoreApplication
+
+    from tvhplayer.builtin_supervisor import BuiltinSupervisor
+
+    app = QCoreApplication.instance() or QCoreApplication([])
+    binary = tmp_path / 'tvheadend'
+    binary.write_text('#!/bin/sh\nexec sleep 30\n')
+    binary.chmod(0o755)
+    supervisor = BuiltinSupervisor(binary, tmp_path / 'config', 24113, 24114)
+    supervisor.shut_down()
+    # A playlist refresh that finishes during quit reloads channels, which asks for the server.
+    supervisor.start()
+    assert supervisor.status == 'stopped'
+    assert not supervisor._child_alive()
+    assert app is not None
+
+
+def test_a_server_stopped_while_playlist_commands_update_gives_no_warning(qapp, tmp_path, monkeypatch, caplog):
+    from tvhplayer import builtin_supervisor
+    from tvhplayer.builtin_supervisor import BuiltinSupervisor
+
+    supervisor = BuiltinSupervisor(tmp_path / 'tvheadend', tmp_path / 'config', 24115, 24116)
+    monkeypatch.setattr(builtin_supervisor, 'serverinfo_ok', lambda *a, **k: True)
+    monkeypatch.setattr(builtin_supervisor, 'apply_builtin_defaults', lambda *a, **k: [])
+
+    def quit_meanwhile(*_args, **_kwargs):
+        # The app quits: the server stops and no longer answers.
+        supervisor._stop_requested = True
+        return -1
+
+    monkeypatch.setattr(builtin_supervisor, 'use_ffmpeg_starter', quit_meanwhile)
+    supervisor._check_ready(supervisor._check_attempt, 24115, 'u', 'p', '', None)
+    assert 'ffmpeg command' not in caplog.text
+
+    # A server that keeps running and does not answer is still reported.
+    supervisor._stop_requested = False
+    monkeypatch.setattr(builtin_supervisor, 'use_ffmpeg_starter', lambda *a, **k: -1)
+    supervisor._check_ready(supervisor._check_attempt, 24115, 'u', 'p', '', None)
+    assert 'Could not update the ffmpeg command' in caplog.text

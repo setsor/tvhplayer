@@ -1,64 +1,84 @@
-
 <a href='https://flathub.org/apps/io.github.mfat.tvhplayer'>
     <img width='240' alt='Get it on Flathub' src='https://flathub.org/api/badge?locale=en'/>
   </a>
+
+
 
 # TVHplayer
-A TVheadend client for watching and recording live TV on PC
+Watch and record your favorite shows right on your PC or laptop. Supports IPTV, HDHomerun, USB TV tuners and more. 
 
-![Screenshot_6](Screenshots/Screenshot_6.png)
-
-
+<img width="1418" height="894" alt="main" src="https://github.com/user-attachments/assets/95471032-de4f-4778-a984-722bd2d10dbf" />
 
 
-## Features:
+## About
+TVHplayer is a cross-platform desktop app for watching and recording live TV using [Tvheadend](https://tvheadend.org/), a mature and feature-rich streaming server and recorder for Linux. It supports IPTV, satellite receivers, USB tuners and HDHomerun. This application is a client for Tvheadend.
 
-With TVHplayer you can:
-- Play live TV & radio channels
+<img width="1965" height="1055" alt="image" src="https://github.com/user-attachments/assets/fe5fae0a-90df-45f0-9bcd-a272cefd76ba" />
+
+
+## Who is this for
+This is for people who already have a Tvheadend server.
+
+But if you use linux, you can use this as a normal TV and PVR app, even without a server. You just need an IPTV playlist, or a TV tuner. 
+
+## Features
+
+**Watch**
+- Live TV and radio from one or more Tvheadend servers
+- Cast live channels to Chromecast and Cast-enabled televisions from the player bar
+- Timeshif
+
+**Built-in server (Linux only)**
+- Comes with its own optional Tvheadend out of the box (optional, you can use any server), no need to set up a server to watch IPTV or use a USB tuner
+
+**TV guide**
 - Browse EPG
-- Schedule recordings
-- Initiate instant recordings with custom duration 
-- Record live TV locally on your computer 
-- Monitor your server status, signal strength and DVR
-- TVHplayer is cross-platform - runs on linux, macOS and Windows
+- Fetch missing program guides from online sources
+- Pause, rewind, and replay live TV in real time (timeshift)
+
+**Record**
+- Instant and scheduled recordings
+- Record directly on local computer
+- Convert recordings into edit-friendly MP4 files
 
 ## Download
-- Head to [releases](https://github.com/mfat/tvhplayer/releases) section to download the app for your operating system (Linux, MacOS or Windows)
-- Linux users can also install the app from [Flathub](https://flathub.org/apps/io.github.mfat.tvhplayer)
+- **Flatpak:** [Flathub](https://flathub.org/apps/io.github.mfat.tvhplayer)
+- **AppImage:** [x86_64](https://mfat.github.io/tvhplayer/download.html?format=appimage-x86_64)
+- **deb** (Debian, Ubuntu): [x86_64](https://mfat.github.io/tvhplayer/download.html?format=deb-amd64) · [arm64](https://mfat.github.io/tvhplayer/download.html?format=deb-arm64)
+- **rpm** (Fedora): [x86_64](https://mfat.github.io/tvhplayer/download.html?format=rpm-x86_64) · [arm64](https://mfat.github.io/tvhplayer/download.html?format=rpm-aarch64)
+- **macOS:** [Apple silicon](https://mfat.github.io/tvhplayer/download.html?format=macos-arm64) · [Intel](https://mfat.github.io/tvhplayer/download.html?format=macos-x86_64)
+- **Windows:** [installer](https://mfat.github.io/tvhplayer/download.html?format=windows-setup) · [portable zip](https://mfat.github.io/tvhplayer/download.html?format=windows-zip)
 
-<a href='https://flathub.org/apps/io.github.mfat.tvhplayer'>
-    <img width='240' alt='Get it on Flathub' src='https://flathub.org/api/badge?locale=en'/>
-  </a>
+The download links automatically get the latest version. The Flatpak, AppImage, deb and rpm include the built-in server, mpv and ffmpeg, or pull them in as dependencies. The macOS and Windows builds connect to an existing Tvheadend server; the built-in server is a Linux-only feature.
 
+You can also [browse all releases](https://github.com/mfat/tvhplayer/releases).
 
-## Requirements
-- Make sure both digest and plain authentication are enabled in your server
-- See requirements.txt for required python modules (python3 -m pip install python-vlc
-- python3 -m pip install python-vlc
-- VLC 
-- FFMPEG (used for local recording feature if you need it)
-  - On Windows follow [this guide](https://phoenixnap.com/kb/ffmpeg-windows) to add ffmpeg to windows PATH. You can also put ffmpeg.exe in the same directory as tvhplayer.
- 
-## Help and Support
-- Refer to the [User Guide](https://github.com/mfat/tvhplayer/wiki/User-Guide) for more information about using the app. 
-- If you encounter any problems [open a bug report](https://github.com/user/repository/issues/new)
+See the [User Guide](https://github.com/mfat/tvhplayer/wiki/User-Guide) (Help → User Guide) for everything else.
 
-## Run the app from source 
-- You can run the code directly with python. You may want to do this if you don't want to download an executable.
-To do this:
-- install python
-- download the [requirements.txt](https://github.com/mfat/tvhplayer/blob/main/requirements.txt) and run this command:
-  `pip install -r requirements.txt`
-- Download the tvhplayer zip file from the latest release and extract to a folder or clone using git:
-  `git clone https://github.com/mfat/tvhplayer.git`
-- cd into the folder
-- Run the app with:
-  `python3 tvhplayer/tvhplayer.py`
+## Help and support
+- [Open a bug report](https://github.com/mfat/tvhplayer/issues/new)
+- Help → Open Log Folder shows the app's log (`app.log`) and the built-in server's log (`tvheadend.log`). Please attach them to bug reports.
 
-## Technical information 
-- TVHplayer uses Tvheadend's http API (no htsp support yet)
-- For playback, it uses libvlc 
-  
+## Run from source
+You need Python 3, libmpv and ffmpeg.
+
+```bash
+git clone https://github.com/mfat/tvhplayer.git
+cd tvhplayer
+python3 -m pip install -r requirements.txt
+python3 tvhplayer/tvhplayer.py
+```
+
+To use the built-in server from a checkout, build Tvheadend in a checkout next to this one, so the binary is at `../tvheadend/build.linux/tvheadend`, or copy it to `build/tvheadend`. See [docs/tvheadend-source.md](docs/tvheadend-source.md) for the Tvheadend version the packages use.
+
+Run the tests with `python3 -m pytest tests`.
+
+## Technical information
+- Talks to Tvheadend over HTSP or its HTTP JSON API
+- Plays with libmpv (OpenGL into the window on Wayland and X11)
+- Records and converts with ffmpeg
+- Built with PyQt6
+
 ## Support development
 Bitcoin: `bc1qqtsyf0ft85zshsnw25jgsxnqy45rfa867zqk4t`
 

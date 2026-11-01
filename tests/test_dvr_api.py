@@ -110,6 +110,37 @@ def _http():
     return backend
 
 
+def test_http_grid_reads_every_page(monkeypatch):
+    import tvhplayer.core.dvr as dvr
+
+    monkeypatch.setattr(dvr, 'GRID_LIMIT', 2)
+    backend = _http()
+    rows = [{'uuid': str(n), 'name': f'C{n}', 'number': n + 1} for n in range(5)]
+    backend._session.queue = [
+        {'total': 5, 'entries': rows[0:2]},
+        {'total': 5, 'entries': rows[2:4]},
+        {'total': 5, 'entries': rows[4:5]},
+    ]
+    assert [channel.name for channel in backend.get_channels()] == ['C0', 'C1', 'C2', 'C3', 'C4']
+    pages = [(call[2]['params']['start'], call[2]['params']['limit']) for call in backend._session.calls]
+    assert pages == [(0, 2), (2, 2), (4, 2)]
+
+
+def test_grid_stops_without_total_or_with_own_limit(monkeypatch):
+    import tvhplayer.core.dvr as dvr
+
+    monkeypatch.setattr(dvr, 'GRID_LIMIT', 2)
+    calls = []
+
+    def fetch(params):
+        calls.append(params)
+        return {'entries': [{}, {}]}
+
+    assert len(dvr.grid_rows(fetch)) == 2
+    assert len(dvr.grid_rows(fetch, {'limit': 7})) == 2
+    assert calls == [{'start': 0, 'limit': 2}, {'limit': 7}]
+
+
 def _entry():
     return DvrEntry(
         uuid='abc',
@@ -321,6 +352,7 @@ def _htsp():
     conn = _Conn()
     backend._conn = conn
     backend._ready = True
+    backend._metadata = True
     return backend, conn
 
 
@@ -355,7 +387,7 @@ def test_htsp_native_and_proxied_dvr_calls():
     assert args['startExtra'] == 2
 
     conn.replies['getTicket'] = {'path': '/dvrfile/7', 'ticket': 'tok en'}
-    assert backend.recording_url(entry) == 'http://u:p@127.0.0.1:9981/dvrfile/7?ticket=tok%20en'
+    assert backend.recording_url(entry) == 'http://127.0.0.1:9981/dvrfile/7?ticket=tok%20en'
 
     conn.replies['fileOpen'] = {'id': 3, 'size': 9, 'mtime': 5}
     conn.replies['fileRead'] = {'data': b'xyz'}

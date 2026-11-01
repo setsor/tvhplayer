@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from .subtitle_preferences import normalize_subtitle_language
-from typing import Any, Dict, List, Optional
 
 
 PROTOCOL_HTTP = 'http'
@@ -14,7 +14,7 @@ class ServerConfig:
     url: str
     username: str = ''
     password: str = ''
-    protocol: str = PROTOCOL_HTTP
+    protocol: str = PROTOCOL_HTSP
     htsp_port: int = 9982
     builtin: bool = False
     subtitle_language: str = ''
@@ -23,6 +23,7 @@ class ServerConfig:
     @classmethod
     def from_dict(cls, data):
         data = data or {}
+        # A saved server with no protocol is from before HTSP support: it used HTTP.
         protocol = (data.get('protocol') or PROTOCOL_HTTP).lower()
         if protocol not in (PROTOCOL_HTTP, PROTOCOL_HTSP):
             protocol = PROTOCOL_HTTP
@@ -201,7 +202,9 @@ class EpgQuery:
     ``channel`` is a ``Channel``. ``channel_tag`` is a ``ChannelTag``.
     ``mode`` is ``now`` or omitted. ``limit`` is a row count and ``offset``
     is the grid start index (HTTP ``start``), not a programme time.
-    ``fulltext`` asks HTTP for an exact title match.
+    ``fulltext`` asks HTTP for an exact title match. ``ends_after`` and
+    ``starts_before`` are Unix seconds that keep programmes overlapping
+    that span; they go to the HTTP grid as start/stop filters.
     """
 
     title: Optional[str] = None
@@ -215,6 +218,8 @@ class EpgQuery:
     limit: Optional[int] = None
     offset: Optional[int] = None
     lang: Optional[str] = None
+    ends_after: Optional[int] = None
+    starts_before: Optional[int] = None
 
 
 @dataclass
