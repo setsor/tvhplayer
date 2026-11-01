@@ -791,7 +791,11 @@ class DvrOperation(QObject):
                 entries = backend.list_dvr_entries()
                 running = [entry for entry in entries if entry.category() == 'recording']
                 result['running_count'] = len(running)
-                targets = recordings_to_stop(entries, self.channel)
+                # Never stop an unrelated recording just because it is the only one.
+                targets = [
+                    entry for entry in running
+                    if self.channel is not None and entry.matches_channel(self.channel)
+                ]
                 for target in targets:
                     print(f"Debug: DVR stop RPC: {target.title!r} on {target.channel_name!r}")
                     backend.stop_dvr_entry(target)
@@ -7395,7 +7399,7 @@ class TVHeadendClient(QMainWindow):
     def stop_recording(self):
         """Stop the playing channel's server recording, never an unrelated DVR entry."""
         channel = self.active_channel()
-        if channel is not None and self._server_recordings_for(channel):
+        if channel is not None:
             self._request_dvr_operation('stop_channel', channel=channel)
 
     def start_recording_indicator(self):
