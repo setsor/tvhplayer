@@ -5779,6 +5779,7 @@ class TVHeadendClient(QMainWindow):
             bool(self._server_recordings_for(channel)), local,
             channel.name if channel is not None else '',
             local_here=local,
+            starting=bool(getattr(self, '_awaiting_playback', False)),
         )
 
     def local_recording_running(self):
@@ -5890,6 +5891,7 @@ class TVHeadendClient(QMainWindow):
             spinner.set_caption(STARTING)
         self._set_playback_spinner(True)
         self._sync_play_button()
+        self._sync_record_controls()
         self._watch_start()
 
     def _watch_start(self):
@@ -5954,6 +5956,7 @@ class TVHeadendClient(QMainWindow):
         self._playback_active = playing
         self._sync_play_button()
         self._sync_timeshift()
+        self._sync_record_controls()
         if hasattr(self, '_splash_idle_timer'):
             self._splash_idle_timer.stop()
         waiting = bool(getattr(self, '_awaiting_playback', False))

@@ -534,17 +534,17 @@ class PlayerBar(QWidget):
         self.live_btn.setText(f"−{_clock(behind)}" if behind > 0 else "LIVE")
         self.live_btn.setEnabled(behind > 0)
 
-    def set_recording(self, server, local, channel_name='', local_here=None):
-        """Swap Record for Stop recording while either kind runs.
+    def set_recording(self, server, local, channel_name='', local_here=None, starting=False):
+        """Keep Stop recording available; hide Record until a new channel starts.
 
-        ``local_here`` says this channel records to this computer; another
-        channel can still start one. It defaults to ``local``.
+        ``local_here`` identifies a local recording of this channel.
         """
         local_here = bool(local) if local_here is None else bool(local_here)
         self._server, self._local = bool(server), bool(local)
         recording = self._server or self._local
-        self.record_btn.setVisible(not recording)
+        self.record_btn.setVisible(not recording and not starting)
         self.recording_group.setVisible(recording)
+        self.record_more_btn.setEnabled(not starting)
         both = self._server and self._local
         if both:
             self.stop_record_btn.setToolTip("Stop recording… (asks which)")
@@ -569,12 +569,12 @@ class PlayerBar(QWidget):
             self.record_server_action.setText("Record on server\tRecording")
         else:
             self.record_server_action.setText(with_keys("Record on server…", "Ctrl+R"))
-        self.record_server_action.setEnabled(not self._server)
+        self.record_server_action.setEnabled(not self._server and not starting)
         if local_here:
             self.record_local_action.setText("Record on this computer\tRecording")
         else:
             self.record_local_action.setText(with_keys("Record on this computer", "Ctrl+Shift+R"))
-        self.record_local_action.setEnabled(not local_here)
+        self.record_local_action.setEnabled(not local_here and not starting)
 
     def set_muted(self, muted):
         self._muted = bool(muted)
