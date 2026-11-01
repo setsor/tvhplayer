@@ -473,6 +473,54 @@ def test_playback_surface_ignores_transient_stop_and_qt_paints(monkeypatch, tmp_
         app.processEvents()
 
 
+def test_selected_channel_logo_replaces_idle_splash_and_survives_stop(monkeypatch, tmp_path):
+    from PyQt6.QtGui import QColor, QImage
+    from PyQt6.QtCore import Qt
+    from tvhplayer.core.models import Channel
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window.show()
+        app.processEvents()
+        assert window.idle_splash._channel_name == ''
+        assert window.idle_splash.logo.pixmap().isNull()
+
+        news = Channel(uuid='news', name='News', icon='imagecache/12')
+        sport = Channel(uuid='sport', name='Sport')
+        window.channel_model.set_channels([news, sport], ['imagecache/12', ''])
+        window.channel_list.setCurrentCell(0, ui.COL_NAME)
+        app.processEvents()
+        assert window.idle_splash._channel_name == 'News'
+        assert window.idle_splash.logo.text() == 'News'
+
+        image = QImage(56, 32, QImage.Format.Format_ARGB32_Premultiplied)
+        image.fill(QColor('#ff5533'))
+        window._on_logo_loaded('imagecache/12', image)
+        assert window.idle_splash.logo.pixmap() is not None
+        assert window.idle_splash.logo.pixmap().size().width() == 220
+
+        window.servers = []
+        window._playback_channel = news
+        window._show_playback_wait()
+        app.processEvents()
+        assert window.idle_splash.isVisible()
+        assert window.playback_spinner.isVisible()
+        assert window.idle_splash.logo.pixmap() is not None
+        window._on_playback_started()
+        assert not window.idle_splash.isVisible()
+        window.stop_playback()
+        assert window.idle_splash.isVisible()
+        assert window.idle_splash._channel_name == 'News'
+
+        window.channel_list.setCurrentCell(1, ui.COL_NAME)
+        app.processEvents()
+        assert window.idle_splash._channel_name == 'Sport'
+        assert window.idle_splash.logo.text() == 'Sport'
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
     try:
@@ -507,8 +555,9 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         image = window.playback_spinner.grab().toImage()
         assert image.width() > 0
         assert any(
-            image.pixelColor(x, image.height() // 2).red() > 200
-            for x in range(image.width())
+            image.pixelColor(x, y).red() > 200
+            for y in range(image.height() // 2, image.height(), 3)
+            for x in range(0, image.width(), 3)
         )
 
         fake_player._events.handlers['playing'](None)
@@ -3600,7 +3649,7 @@ def test_player_bar_casts_the_selected_channel_and_routes_audio(monkeypatch, tmp
         window.stop_playback()
         assert manager.stops == 1
         assert window.idle_splash.caption.isHidden()
-        assert window.idle_splash.accessibleName() == 'Nothing playing'
+        assert window.idle_splash.accessibleName() == 'News'
     finally:
         window.close()
         app.processEvents()

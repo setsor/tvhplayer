@@ -268,7 +268,7 @@ def test_no_epg_is_displayed_only_after_successful_now_next_fetch():
     view.close()
 
 
-def test_channel_logo_frame_tracks_the_active_palette():
+def test_embossed_channel_logo_follows_the_active_palette():
     from PyQt6.QtCore import QRect, Qt
     from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
 
@@ -311,8 +311,8 @@ def test_channel_logo_frame_tracks_the_active_palette():
         dark_icon = icon_index.data(Qt.ItemDataRole.DecorationRole)
         dark_key = dark_icon.cacheKey()
         dark = dark_icon.pixmap(LOGO_SIZE).toImage()
-        assert dark.pixelColor(5, 16).alpha() == 255
-        assert dark.pixelColor(5, 16).lightness() < 128
+        assert dark.pixelColor(5, 16).alpha() == 0  # No filled grey badge.
+        assert dark.pixelColor(0, 0).alpha() == 0
         assert dark.pixelColor(28, 16) == QColor('white')
         assert icon_index.data(Qt.ItemDataRole.DecorationRole).cacheKey() == dark_key
 
@@ -323,7 +323,9 @@ def test_channel_logo_frame_tracks_the_active_palette():
         light_icon = icon_index.data(Qt.ItemDataRole.DecorationRole)
         light = light_icon.pixmap(LOGO_SIZE).toImage()
         assert light_icon.cacheKey() != dark_key
-        assert light.pixelColor(5, 16).lightness() > dark.pixelColor(5, 16).lightness()
+        assert light.pixelColor(5, 16).alpha() == 0
+        assert any(dark.pixelColor(x, 16).alpha() > 0 for x in range(18, 23))
+        assert any(light.pixelColor(x, 16).alpha() > 0 for x in range(18, 23))
         assert light.pixelColor(28, 16) == QColor('white')
         assert empty_index.data(Qt.ItemDataRole.DecorationRole).cacheKey() == empty.cacheKey()
         assert image.cacheKey() == original_key
