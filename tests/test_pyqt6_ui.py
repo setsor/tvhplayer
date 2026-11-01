@@ -521,6 +521,96 @@ def test_selected_channel_logo_replaces_idle_splash_and_survives_stop(monkeypatc
         app.processEvents()
 
 
+def test_epg_overlay_starts_with_picture_and_expires_after_five_seconds(monkeypatch, tmp_path):
+    from tvhplayer.core.channel_info import NowNext
+    from tvhplayer.core.models import Channel, EpgEvent
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window.show()
+        app.processEvents()
+        news = Channel(uuid='news', name='News')
+        other = Channel(uuid='other', name='Other')
+        now = int(time.time())
+        programme = EpgEvent(
+            start=now - 600, stop=now + 1800, title='Evening News',
+            description='Weather, local updates and international headlines.',
+            channel_uuid='news',
+        )
+        window._channels_server = 'home'
+        window._playback_server = 'home'
+        window._now_next = {'news': NowNext(programme, None)}
+        window._now_next_loaded = True
+        overlay = window.programme_overlay
+        assert not overlay.isVisible()
+
+        window._playback_channel = news
+        window._show_playback_wait()
+        assert not overlay.isVisible()
+        window._on_playback_started()
+        assert overlay.isVisible()
+        assert overlay._timer.isActive()
+        assert overlay._timer.interval() == 5000
+        assert overlay.channel_label.text() == 'News'
+        assert overlay.title_label.text() == 'Evening News'
+        assert '40 min' in overlay.time_label.text()
+        assert 'headlines' in overlay.description_label.text()
+        assert overlay.geometry().bottom() <= window.player_container.height() - 58
+
+        # The independent now/next request can update the panel while it is shown.
+        updated = EpgEvent(
+            start=now - 300, stop=now + 600, title='News Update',
+            summary='Late EPG reply.', channel_uuid='news',
+        )
+        window._now_next = {'news': NowNext(updated, None)}
+        window._refresh_programme_overlay()
+        assert overlay.title_label.text() == 'News Update'
+        assert overlay._timer.isActive()
+
+        # On a channel switch the old panel and timer must disappear immediately.
+        window._playback_channel = other
+        window._show_playback_wait()
+        assert not overlay.isVisible()
+        assert not overlay._timer.isActive()
+        window._on_playback_started()
+        assert overlay.channel_label.text() == 'Other'
+        assert overlay.title_label.text() == 'EPG unavailable'
+        assert not overlay.time_label.isVisible()
+        overlay._timer.timeout.emit()
+        assert not overlay.isVisible()
+
+        window.stop_playback()
+        assert not overlay.isVisible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_epg_overlay_uses_plain_text_and_keeps_subtitle_space(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel, EpgEvent
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window.show()
+        app.processEvents()
+        event = EpgEvent(
+            start=100, stop=3700, title='<Evening Edition>',
+            description='<b>' + ('Details ' * 80) + '</b>',
+        )
+        overlay = window.programme_overlay
+        overlay.start('channel', Channel(uuid='channel', name='News'), event)
+        assert overlay.isVisible()
+        assert overlay.title_label.text() == '<Evening Edition>'
+        assert overlay.description_label.text().startswith('<b>')
+        assert len(overlay.description_label.text()) <= 235
+        assert overlay.geometry().bottom() <= window.player_container.height() - 58
+        overlay.dismiss()
+        assert not overlay._timer.isActive()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
     try:

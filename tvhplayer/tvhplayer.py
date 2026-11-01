@@ -3139,6 +3139,102 @@ class PlaybackSpinner(QWidget):
         painter.drawText(QRectF(left + dot + gap, top, width + 1, metrics.height()), Qt.AlignmentFlag.AlignLeft, text)
 
 
+class ProgrammeOverlay(QFrame):
+    """Five-second programme details, clear of the subtitle area."""
+
+    DURATION_MS = 5000
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("programme_overlay")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setStyleSheet(
+            "#programme_overlay { background: rgba(12, 15, 20, 210); "
+            "border: 1px solid rgba(255, 255, 255, 32); border-radius: 10px; }"
+            "#programme_overlay QLabel { background: transparent; border: none; color: white; }"
+            "#programme_channel { font-size: 11px; color: #d2dbe7; }"
+            "#programme_title { font-size: 16px; font-weight: 600; }"
+            "#programme_time { font-size: 12px; color: #d2dbe7; }"
+            "#programme_description { font-size: 12px; color: #e4e8ef; }"
+        )
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 9, 14, 9)
+        layout.setSpacing(2)
+        self.channel_label = QLabel(self)
+        self.title_label = QLabel(self)
+        self.time_label = QLabel(self)
+        self.description_label = QLabel(self)
+        for label, name in (
+            (self.channel_label, "programme_channel"),
+            (self.title_label, "programme_title"),
+            (self.time_label, "programme_time"),
+            (self.description_label, "programme_description"),
+        ):
+            label.setObjectName(name)
+            label.setTextFormat(Qt.TextFormat.PlainText)
+            layout.addWidget(label)
+        self.description_label.setWordWrap(True)
+        self.description_label.setMaximumHeight(34)
+        self._channel_key = None
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.dismiss)
+        self.hide()
+
+    def place(self):
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        width = max(1, min(760, parent.width() - 32))
+        height = min(125, max(88, parent.height() // 3))
+        bottom_room = max(58, parent.height() // 6)
+        left = (parent.width() - width) // 2
+        top = max(0, parent.height() - height - bottom_room)
+        self.setGeometry(left, top, width, height)
+
+    def _fill(self, channel, event):
+        self.channel_label.setText(channel.name)
+        self.title_label.setText(event.title if event is not None else "EPG unavailable")
+        times = []
+        if event is not None:
+            if event.start:
+                times.append(datetime.fromtimestamp(event.start).strftime("%H:%M"))
+            if event.stop:
+                times.append(datetime.fromtimestamp(event.stop).strftime("%H:%M"))
+        when = "–".join(times)
+        if event is not None and event.stop > event.start > 0:
+            minutes = max(1, (event.stop - event.start + 59) // 60)
+            when = f"{when} · {minutes} min"
+        self.time_label.setText(when)
+        self.time_label.setVisible(bool(when))
+        description = (event.description or event.summary or event.subtitle or '') if event is not None else ''
+        description = " ".join(description.split())
+        if len(description) > 235:
+            description = description[:234].rstrip() + "…"
+        self.description_label.setText(description)
+        self.description_label.setVisible(bool(description))
+        self.setAccessibleName(f"{channel.name}: {self.title_label.text()}. {when}. {description}")
+
+    def start(self, key, channel, event):
+        self._channel_key = key
+        self._fill(channel, event)
+        self.place()
+        self.show()
+        self.raise_()
+        self._timer.start(self.DURATION_MS)
+
+    def refresh(self, key, channel, event):
+        if self.isVisible() and self._channel_key == key:
+            self._fill(channel, event)
+
+    def dismiss(self):
+        self._timer.stop()
+        self._channel_key = None
+        self.hide()
+
+
 class IconToolButton(QToolButton):
     """A tool button that draws an icon file in its text color, again when the palette changes."""
 
@@ -4352,6 +4448,7 @@ class TVHeadendClient(QMainWindow):
         self.idle_splash = IdleSplash(splash_path, self.player_container)
 
         self.playback_spinner = PlaybackSpinner(self.player_container)
+        self.programme_overlay = ProgrammeOverlay(self.player_container)
         describe(
             self.playback_spinner,
             "Starting playback",
@@ -4887,12 +4984,39 @@ class TVHeadendClient(QMainWindow):
             self._now_next = result
             self._now_next_loaded = True
             self._update_programme_cells()
+            self._refresh_programme_overlay()
 
     def _update_programme_cells(self):
         """Redraw now and next, and the progress bars, from the last fetch."""
         self.channel_model.set_programmes(
             self._now_next, self.channel_options['now_progress'], self._now_next_loaded
         )
+
+    def _current_programme(self, channel):
+        if channel is None or self._playback_server != self._channels_server:
+            return None
+        entry = self._now_next.get(channel_key(channel))
+        event = entry.now if entry is not None else None
+        if event is None:
+            return None
+        now = int(time.time())
+        if (event.stop and event.stop <= now) or (event.start and event.start > now):
+            return None
+        return event
+
+    def _start_programme_overlay(self):
+        channel = getattr(self, '_playback_channel', None)
+        overlay = getattr(self, 'programme_overlay', None)
+        if (overlay is None or channel is None or not self._playback_active
+                or self._awaiting_playback or self.cast_manager.is_connected):
+            return
+        overlay.start(channel_key(channel), channel, self._current_programme(channel))
+
+    def _refresh_programme_overlay(self):
+        channel = getattr(self, '_playback_channel', None)
+        overlay = getattr(self, 'programme_overlay', None)
+        if overlay is not None and channel is not None and self._playback_active:
+            overlay.refresh(channel_key(channel), channel, self._current_programme(channel))
 
     def _fill_channel_rows(self):
         """Rebuild the table from the fetched channels and the current settings."""
@@ -5938,6 +6062,7 @@ class TVHeadendClient(QMainWindow):
 
     def _show_playback_wait(self):
         """Cover the player until mpv reports that playback has started."""
+        self.programme_overlay.dismiss()
         self._awaiting_playback = True
         if hasattr(self, '_splash_idle_timer'):
             self._splash_idle_timer.stop()
@@ -6013,6 +6138,8 @@ class TVHeadendClient(QMainWindow):
         self._sync_play_button()
         self._sync_timeshift()
         self._sync_record_controls()
+        if not playing:
+            self.programme_overlay.dismiss()
         if hasattr(self, '_splash_idle_timer'):
             self._splash_idle_timer.stop()
         waiting = bool(getattr(self, '_awaiting_playback', False))
@@ -6161,6 +6288,7 @@ class TVHeadendClient(QMainWindow):
         if channel is not None:
             self.statusbar.showMessage(f"Playing: {channel.name}")
             self._show_on_picture(f"{channel.number}  {channel.name}" if channel.number else channel.name)
+            self._start_programme_overlay()
         if not casting and not self.cast_manager.is_connected:
             self._start_subtitle_default()
 
@@ -7121,6 +7249,9 @@ class TVHeadendClient(QMainWindow):
                 spinner.setGeometry(player_container.rect())
                 if spinner.isVisible():
                     spinner.raise_()
+            programme = getattr(self, 'programme_overlay', None)
+            if programme is not None:
+                programme.place()
             return False
         video_frame = getattr(self, 'video_frame', None)
         if video_frame is not None and obj is video_frame:
