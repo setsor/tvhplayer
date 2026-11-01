@@ -1,0 +1,45 @@
+name: Check Record pill while changing channels
+
+on:
+  push:
+    branches:
+      - ci/check-record-tuning-20261101
+    paths:
+      - .github/workflows/check-record-tuning-20261101.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_OPENGL: software
+    steps:
+      - name: Checkout proposed UI change
+        uses: actions/checkout@v7
+        with:
+          ref: 05560777bd36b6777cccb9a0d009e7cf5f548be9
+          persist-credentials: false
+      - name: Use Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install Qt and application requirements
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
+          python -m pip install -e . pytest
+          python -m pip check
+      - name: Test channel tuning, Record visibility and active recording stop
+        run: |
+          python -m pytest -q tests/test_pyqt6_ui.py \
+            -k 'test_spinner_shows_until_playback_starts or test_stop_recording_remains_available_while_another_channel_starts or test_player_bar_play_stop_and_record_controls or test_playback_surface_ignores_transient_stop_and_qt_paints or test_server_subtitle_language_auto_applies_after_late_track_discovery'
+      - name: Test playback model and compile changed Python modules
+        run: |
+          python -m pytest -q tests/test_mpv_player.py
+          python -m py_compile tvhplayer/tvhplayer.py tvhplayer/player_bar.py tests/test_pyqt6_ui.py
