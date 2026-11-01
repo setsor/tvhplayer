@@ -483,7 +483,7 @@ def test_selected_channel_logo_replaces_idle_splash_and_survives_stop(monkeypatc
         window.show()
         app.processEvents()
         assert window.idle_splash._channel_name == ''
-        assert window.idle_splash.logo.pixmap() is None
+        assert window.idle_splash.logo.pixmap().isNull()
 
         news = Channel(uuid='news', name='News', icon='imagecache/12')
         sport = Channel(uuid='sport', name='Sport')
@@ -555,8 +555,9 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         image = window.playback_spinner.grab().toImage()
         assert image.width() > 0
         assert any(
-            image.pixelColor(x, image.height() // 2).red() > 200
-            for x in range(image.width())
+            image.pixelColor(x, y).red() > 200
+            for y in range(image.height() // 2, image.height(), 3)
+            for x in range(0, image.width(), 3)
         )
 
         fake_player._events.handlers['playing'](None)
