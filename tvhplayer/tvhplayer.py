@@ -6965,7 +6965,7 @@ class TVHeadendClient(QMainWindow):
             if server_connection_key(self.current_server()) != previous_key:
                 self.close_backend()
                 self.fetch_channels()
-            elif (self._playback_channel is not None and not self.cast_manager.is_connected
+            elif (getattr(self, '_playback_channel', None) is not None and not self.cast_manager.is_connected
                   and normalize_subtitle_language(
                       (self.current_server() or {}).get('subtitle_language')
                   ) != previous_subtitles
