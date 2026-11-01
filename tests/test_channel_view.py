@@ -266,3 +266,74 @@ def test_no_epg_is_displayed_only_after_successful_now_next_fetch():
     model.set_programmes({}, True, fetched=False)
     assert now.data() == ''
     view.close()
+
+
+def test_channel_logo_frame_tracks_the_active_palette():
+    from PyQt6.QtCore import QRect, Qt
+    from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+
+    from tvhplayer.channel_view import COL_NAME, LOGO_SIZE, padded_pixmap
+    from tvhplayer.core.models import Channel
+
+    app, model, view = _model([
+        Channel(uuid='has-logo', name='Channel with logo'),
+        Channel(uuid='no-logo', name='Channel without logo'),
+    ])
+    original_palette = app.palette()
+    original_row_height = view.verticalHeader().defaultSectionSize()
+    original_icon_size = view.iconSize()
+
+    image = QPixmap(LOGO_SIZE)
+    image.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(image)
+    painter.fillRect(QRect(22, 10, 12, 12), QColor('white'))
+    painter.end()
+    original_key = image.cacheKey()
+
+    model.set_channels(
+        [Channel(uuid='has-logo', name='Channel with logo'),
+         Channel(uuid='no-logo', name='Channel without logo')],
+        ['present', 'missing'],
+    )
+    empty = QIcon(padded_pixmap())
+    model.set_logos(True, {'present': image}, empty)
+    icon_index = model.index(0, COL_NAME)
+    empty_index = model.index(1, COL_NAME)
+
+    def palette(base, text):
+        pal = QPalette(original_palette)
+        pal.setColor(QPalette.ColorRole.Base, QColor(base))
+        pal.setColor(QPalette.ColorRole.Text, QColor(text))
+        return pal
+
+    try:
+        app.setPalette(palette('#202020', '#ffffff'))
+        dark_icon = icon_index.data(Qt.ItemDataRole.DecorationRole)
+        dark_key = dark_icon.cacheKey()
+        dark = dark_icon.pixmap(LOGO_SIZE).toImage()
+        assert dark.pixelColor(5, 16).alpha() == 255
+        assert dark.pixelColor(5, 16).lightness() < 128
+        assert dark.pixelColor(28, 16) == QColor('white')
+        assert icon_index.data(Qt.ItemDataRole.DecorationRole).cacheKey() == dark_key
+
+        # Switch the application's actual palette while the model and its
+        # downloaded logos stay in place.
+        app.setPalette(palette('#ffffff', '#111111'))
+        app.processEvents()
+        light_icon = icon_index.data(Qt.ItemDataRole.DecorationRole)
+        light = light_icon.pixmap(LOGO_SIZE).toImage()
+        assert light_icon.cacheKey() != dark_key
+        assert light.pixelColor(5, 16).lightness() > dark.pixelColor(5, 16).lightness()
+        assert light.pixelColor(28, 16) == QColor('white')
+        assert empty_index.data(Qt.ItemDataRole.DecorationRole).cacheKey() == empty.cacheKey()
+        assert image.cacheKey() == original_key
+        assert image.toImage().pixelColor(5, 16).alpha() == 0
+        assert view.iconSize() == original_icon_size
+        assert view.verticalHeader().defaultSectionSize() == original_row_height
+
+        # Selection should not tint the badge or hide the channel artwork.
+        selected = light_icon.pixmap(LOGO_SIZE, QIcon.Mode.Selected).toImage()
+        assert selected.pixelColor(5, 16) == light.pixelColor(5, 16)
+    finally:
+        app.setPalette(original_palette)
+        view.close()
