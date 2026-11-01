@@ -481,6 +481,7 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
 
         assert window.idle_splash.isVisible()
         assert not window.playback_spinner.isVisible()
+        assert window.record_btn.isVisible()
 
         class Backend:
             def stream_url(self, channel, profile=None):
@@ -494,6 +495,12 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert window._awaiting_playback
         assert window.playback_spinner.isVisible()
         assert window.playback_spinner._timer.isActive()
+        assert not window.record_btn.isVisible()
+        assert not window.controls_bar.record_server_action.isEnabled()
+        assert not window.controls_bar.record_local_action.isEnabled()
+        # A DVR refresh during tuning must not bring Record back.
+        window._sync_record_controls()
+        assert not window.record_btn.isVisible()
         assert window.idle_splash.isVisible()
         assert window.status_label.text() == 'Starting: News'
         image = window.playback_spinner.grab().toImage()
@@ -510,11 +517,15 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert not window.playback_spinner.isVisible()
         assert not window.playback_spinner._timer.isActive()
         assert not window.idle_splash.isVisible()
+        assert window.record_btn.isVisible()
+        assert window.controls_bar.record_server_action.isEnabled()
+        assert window.controls_bar.record_local_action.isEnabled()
         assert window.status_label.text() == 'Playing: News'
 
         window.play_channel_by_data(ui.Channel(uuid='news', name='News'))
         app.processEvents()
         assert window.playback_spinner.isVisible()
+        assert not window.record_btn.isVisible()
         fake_player._events.handlers['error'](None)
         app.processEvents()
 
@@ -523,11 +534,50 @@ def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
         assert not window.playback_spinner._timer.isActive()
         assert window.playback_spinner.accessibleName() == 'Playback failed'
         assert window.status_label.text() == 'Playback failed'
+        assert window.record_btn.isVisible()
 
         window.stop_playback()
         app.processEvents()
         assert not window.playback_spinner.isVisible()
         assert window.idle_splash.isVisible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_stop_recording_remains_available_while_another_channel_starts(monkeypatch, tmp_path):
+    from tvhplayer.core.models import Channel, DvrEntry
+
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        window.show()
+        app.processEvents()
+        channel = Channel(uuid='news', name='News')
+        window.active_channel = lambda: channel
+        recording = DvrEntry(
+            uuid='rec', title='News at Six', channel_name='News',
+            raw={'channel': 'news'}, start=int(time.time()) - 30,
+            duration=900, status='Running', sched_status='recording',
+        )
+        window.channel_recordings_changed([recording])
+        assert window.stop_record_btn.isVisible()
+
+        window._show_playback_wait()
+        assert window._awaiting_playback
+        assert not window.record_btn.isVisible()
+        assert window.stop_record_btn.isVisible()
+        assert window.stop_record_btn.isEnabled()
+        assert not window.record_more_btn.isEnabled()
+        assert not window.controls_bar.record_local_action.isEnabled()
+
+        window._sync_record_controls()
+        assert window.stop_record_btn.isVisible()
+        window._on_playback_started()
+        assert window.stop_record_btn.isVisible()
+        assert window.record_more_btn.isEnabled()
+
+        window.stop_playback()
+        assert window.stop_record_btn.isVisible()
     finally:
         window.close()
         app.processEvents()
