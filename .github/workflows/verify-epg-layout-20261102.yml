@@ -1,0 +1,49 @@
+name: Verify full EPG overlay layout
+
+on:
+  push:
+    branches:
+      - ci/verify-epg-layout-20261102
+    paths:
+      - .github/workflows/verify-epg-layout-20261102.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ui:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      QT_OPENGL: software
+    steps:
+      - name: Checkout exact EPG layout fix
+        uses: actions/checkout@v7
+        with:
+          ref: 596a57ae734e703553445a5fcaec9dcc0573140b
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+          cache: pip
+      - name: Install Qt runtime and dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0
+          python -m pip install -e . pytest
+          python -m pip check
+      - name: Test late EPG text, panel layout and five-second timer
+        run: |
+          python -m pytest -q tests/test_pyqt6_ui.py \
+            -k 'test_late_epg_expands_panel_and_matches_channel_now or test_epg_overlay_starts_with_picture_and_expires_after_five_seconds or test_epg_overlay_uses_plain_text_and_keeps_subtitle_space'
+      - name: Run broader EPG, player and UI regressions
+        run: |
+          python -m pytest -q tests/test_pyqt6_ui.py \
+            -k 'not test_video_context_menu_and_double_click and not test_accessibility_names_keyboard_and_contrast and not test_player_bar_casts_the_selected_channel_and_routes_audio'
+          python -m pytest -q tests/test_channel_view.py -k 'not test_tab_leaves_the_channel_list'
+          python -m pytest -q tests/test_mpv_player.py
+      - name: Compile changes
+        run: python -m py_compile tvhplayer/tvhplayer.py tests/test_pyqt6_ui.py
