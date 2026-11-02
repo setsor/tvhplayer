@@ -3169,8 +3169,10 @@ class ProgrammeOverlay(QFrame):
             label.setObjectName(name)
             label.setTextFormat(Qt.TextFormat.PlainText)
             layout.addWidget(label)
+        self.title_label.setWordWrap(True)
         self.description_label.setWordWrap(True)
-        self.description_label.setMaximumHeight(34)
+        for label in (self.channel_label, self.title_label, self.time_label, self.description_label):
+            label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._channel_key = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -3181,12 +3183,65 @@ class ProgrammeOverlay(QFrame):
         parent = self.parentWidget()
         if parent is None:
             return
+
         width = max(1, min(760, parent.width() - 32))
-        height = min(125, max(88, parent.height() // 3))
+        inner_width = max(1, width - 28)
         bottom_room = max(58, parent.height() // 6)
+        available_height = max(0, parent.height() - bottom_room - 16)
+        margins = 18
+        spacing = self.layout().spacing()
+
+        # The panel must be tall enough for its labels. The previous fixed
+        # 125px height clipped the title/time and 34px description.
+        labels = (
+            (self.channel_label, 1),
+            (self.title_label, 3),
+            (self.time_label, 1),
+            (self.description_label, 5),
+        )
+        heights = {}
+        shown = []
+        for label, max_lines in labels:
+            if not label.text():
+                label.hide()
+                continue
+            label.show()
+            font = label.fontMetrics()
+            if label.wordWrap():
+                rect = font.boundingRect(
+                    QRect(0, 0, inner_width, 4096),
+                    Qt.TextFlag.TextWordWrap, label.text(),
+                )
+                line_height = min(
+                    max(font.lineSpacing(), rect.height()),
+                    font.lineSpacing() * max_lines,
+                )
+            else:
+                line_height = font.lineSpacing()
+            heights[label] = max(1, line_height)
+            shown.append(label)
+
+        def required_height():
+            return margins + sum(heights[label] for label in shown) + spacing * max(0, len(shown) - 1)
+
+        # When the video area is tiny, drop description lines first. Keep
+        # the programme title and times rather than clipping them off-screen.
+        if self.description_label in shown:
+            excess = max(0, required_height() - available_height)
+            heights[self.description_label] -= excess
+            if heights[self.description_label] < self.description_label.fontMetrics().lineSpacing():
+                shown.remove(self.description_label)
+                self.description_label.hide()
+                heights.pop(self.description_label)
+
+        for label in shown:
+            label.setFixedHeight(heights[label])
+
+        height = min(available_height, required_height())
         left = (parent.width() - width) // 2
         top = max(0, parent.height() - height - bottom_room)
         self.setGeometry(left, top, width, height)
+        self.layout().activate()
 
     def _fill(self, channel, event):
         self.channel_label.setText(channel.name)
