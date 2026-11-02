@@ -3277,6 +3277,10 @@ class ProgrammeOverlay(QFrame):
     def refresh(self, key, channel, event):
         if self.isVisible() and self._channel_key == key:
             self._fill(channel, event)
+            # A late Now/Next response can add several rows to a panel that
+            # initially showed only "EPG unavailable". Resize it, without
+            # restarting the original five-second timer.
+            self.place()
 
     def dismiss(self):
         self._timer.stop()
