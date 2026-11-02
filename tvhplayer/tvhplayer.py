@@ -3258,13 +3258,22 @@ class ProgrammeOverlay(QFrame):
             when = f"{when} · {minutes} min"
         self.time_label.setText(when)
         self.time_label.setVisible(bool(when))
-        description = (event.description or event.summary or event.subtitle or '') if event is not None else ''
-        description = " ".join(description.split())
-        if len(description) > 235:
-            description = description[:234].rstrip() + "…"
-        self.description_label.setText(description)
-        self.description_label.setVisible(bool(description))
-        self.setAccessibleName(f"{channel.name}: {self.title_label.text()}. {when}. {description}")
+        # The guide displays the subtitle before the description. Start the
+        # five-second excerpt at the same point; the full text remains in Guide.
+        parts = (
+            (event.subtitle, event.description or event.summary)
+            if event is not None else ()
+        )
+        full_text = " ".join(" ".join(part.split()) for part in parts if part)
+        excerpt = full_text
+        if len(excerpt) > 235:
+            prefix = excerpt[:234]
+            excerpt = (prefix.rsplit(" ", 1)[0] or prefix).rstrip() + "…"
+        self.description_label.setText(excerpt)
+        self.description_label.setVisible(bool(excerpt))
+        self.setAccessibleName(
+            f"{channel.name}: {self.title_label.text()}. {when}. {full_text}"
+        )
 
     def start(self, key, channel, event):
         self._channel_key = key

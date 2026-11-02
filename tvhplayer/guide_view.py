@@ -898,6 +898,7 @@ class GuideWindow(QDialog):
         self.description_text.setFixedHeight(QFontMetrics(self.font()).lineSpacing() * 6 + 12)
         self.description_text.setAccessibleName("Programme description")
         self.description_text.setAccessibleDescription("Full programme description; scroll for additional text.")
+        self._description_event_key = None
         for label, name in (
             (self.channel_label, "Channel"),
             (self.title_label, "Programme"),
@@ -1179,11 +1180,15 @@ class GuideWindow(QDialog):
             return self._overrides[event.event_id]
         return self.grid.state_of(event)
 
-    def _set_description(self, text):
-        # The guide refreshes its details every 30 seconds. Updating only on
-        # actual changes preserves the user's scroll position while reading.
+    def _set_description(self, text, event_key=None):
+        # Preserve the reading position during periodic refreshes of the same
+        # programme, but start at the beginning when the selection changes.
+        switched = event_key != self._description_event_key
+        self._description_event_key = event_key
         if self.description_text.toPlainText() != text:
             self.description_text.setPlainText(text)
+            switched = True
+        if switched:
             self.description_text.verticalScrollBar().setValue(0)
 
     def _show_details(self):
@@ -1218,8 +1223,16 @@ class GuideWindow(QDialog):
             timing += " · Recording scheduled"
         self.title_label.setText(event.title or "No title")
         self.timing_label.setText(timing)
-        text = "\n\n".join(part for part in (event.subtitle, event.description) if part)
-        self._set_description(text or "No description.")
+        text = "\n\n".join(
+            part for part in (event.subtitle, event.description or event.summary) if part
+        )
+        event_id = event.event_id if event.event_id is not None else (
+            event.start, event.stop, event.title,
+        )
+        self._set_description(
+            text or "No description.",
+            event_key=(channel.uuid or channel.htsp_id, event_id),
+        )
         ended = event.stop <= now
         if state == RECORDING:
             self.record_btn.setText("Stop Re&cording")

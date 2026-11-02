@@ -599,14 +599,17 @@ def test_epg_overlay_uses_plain_text_and_keeps_subtitle_space(monkeypatch, tmp_p
         app.processEvents()
         event = EpgEvent(
             start=100, stop=3700, title='<Evening Edition>',
+            subtitle='Episode introduction',
             description='<b>' + ('Details ' * 80) + '</b>',
         )
         overlay = window.programme_overlay
         overlay.start('channel', Channel(uuid='channel', name='News'), event)
         assert overlay.isVisible()
         assert overlay.title_label.text() == '<Evening Edition>'
-        assert overlay.description_label.text().startswith('<b>')
+        assert overlay.description_label.text().startswith('Episode introduction <b>')
+        assert overlay.description_label.text().endswith('…')
         assert len(overlay.description_label.text()) <= 235
+        assert '<b>' in overlay.accessibleName()
         assert overlay.geometry().bottom() <= window.player_container.height() - 58
         overlay.dismiss()
         assert not overlay._timer.isActive()
@@ -659,7 +662,8 @@ def test_late_epg_expands_panel_and_matches_channel_now(monkeypatch, tmp_path):
         assert panel.description_label.isVisible()
         assert panel.description_label.text()
         assert panel.height() > initial_height
-        assert panel.height() > 125
+        # macOS offscreen tests can have a shorter video surface; test that
+        # the visible rows fit, not a fixed minimum pixel height.
         for label in (panel.channel_label, panel.title_label,
                       panel.time_label, panel.description_label):
             assert label.geometry().top() >= 0
