@@ -265,6 +265,14 @@ def test_guide_description_scrolls_and_survives_periodic_refresh(monkeypatch):
         window._on_tick()  # 30-second refresh must not jump back to the top
         assert window.description_text.toPlainText() == details
         assert scroll.value() == bottom
+
+        # A different programme with identical description text must begin at
+        # the top, not inherit the previous programme's scroll position.
+        window._set_description(details, event_key=('bbc', 22))
+        assert scroll.value() == 0
+        scroll.setValue(scroll.maximum())
+        window._set_description(details, event_key=('bbc', 22))
+        assert scroll.value() == scroll.maximum()
     finally:
         window.shutdown()
         window.close()
