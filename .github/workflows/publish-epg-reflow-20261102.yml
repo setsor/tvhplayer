@@ -1,0 +1,108 @@
+name: Publish Ventura EPG layout preview
+
+on:
+  push:
+    branches:
+      - maintenance/publish-epg-reflow-20261102
+    paths:
+      - .github/workflows/publish-epg-reflow-20261102.yml
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Verify and await successful Ventura build
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          run='41389687030'
+          test "$repo" = 'setsor/tvhplayer'
+          test "$(gh api "repos/$repo/actions/runs/$run" --jq .head_sha)" = '5d4917a33e765cdfbd8c92e8fc65d809ef4a2a09'
+          gh run watch "$run" --repo "$repo" --exit-status
+          test "$(gh api "repos/$repo/actions/runs/$run" --jq .conclusion)" = success
+
+      - name: Verify protected sources and merged PR
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          test "$(gh api "repos/$repo/branches/main" --jq .commit.sha)" = 'a83aa30b9f05d55cc7a2ee3936920bbf330eb558'
+          test "$(gh api "repos/$repo/pulls/24" --jq .merged)" = true
+          test "$(gh api "repos/$repo/branches/release/ventura-4.5.0-intel" --jq .commit.sha)" = '5833e7667731f79e076f8151d698b10b4e38b9ab'
+          test "$(gh api "repos/$repo/branches/release/ventura-4.5.0-intel" --jq .protected)" = true
+
+      - name: Retrieve tested DMG and verify checksum
+        run: |
+          set -euo pipefail
+          name='TVHplayer-4.5.0-macOS13-Intel-EPG-Reflow-Preview'
+          gh run download 41389687030 --repo "$GITHUB_REPOSITORY" \
+            --name "$name-DMG" --dir "$RUNNER_TEMP/dmg"
+          cd "$RUNNER_TEMP/dmg"
+          test -s "$name.dmg"
+          test -s "$name.dmg.sha256"
+          sha256sum -c "$name.dmg.sha256"
+
+      - name: Publish separate preview
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          tag='ventura-4.5.0-intel-epg-reflow-preview-20261102'
+          name='TVHplayer-4.5.0-macOS13-Intel-EPG-Reflow-Preview'
+          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+            echo "::error::Preview already exists; not replacing the published files"
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/notes.md" <<'NOTES'
+          TVHplayer 4.5.0 for macOS Ventura 13 Intel; source commit a83aa30b (PR #24).
+
+          EPG overlays now resize to show the programme title, broadcast times and wrapped description. If TVHeadend supplies the EPG after video has started, the panel resizes without restarting its five-second timer. The programme in the overlay comes from the same Now/Next data as the channel list.
+
+          The channel-list icons retain subtle transparent embossing; the idle player displays the selected channel name instead of stretching a low-resolution thumbnail. Player Record and Stop remain scoped to the playing channel.
+
+          This preview uses the tested MPV 0.41 without Cocoa and the existing pinned Python/Qt libraries. Its CI build and macOS 13 native audit must succeed before publication. The preview has not yet been visually verified on a physical Ventura Mac. Keep a copy of the current TVHplayer.app before replacing it.
+          NOTES
+          gh release create "$tag" \
+            "$RUNNER_TEMP/dmg/$name.dmg" \
+            "$RUNNER_TEMP/dmg/$name.dmg.sha256" \
+            --repo "$repo" \
+            --target 'a83aa30b9f05d55cc7a2ee3936920bbf330eb558' \
+            --title 'TVHplayer 4.5.0 - Ventura Intel EPG layout preview' \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --prerelease --latest=false
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq .draft)" = false
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq .prerelease)" = true
+          gh release view "$tag" --repo "$repo" --json assets --jq '[.assets[].name] | sort | join(", ")'
+
+      - name: Remove only temporary EPG layout branches
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          while IFS='|' read -r branch expected; do
+            test -n "$branch" || continue
+            if ! gh api "repos/$repo/branches/$branch" >/dev/null 2>&1; then
+              echo "Already absent: $branch"
+              continue
+            fi
+            test "$(gh api "repos/$repo/branches/$branch" --jq .commit.sha)" = "$expected"
+            gh api -X DELETE "repos/$repo/git/refs/heads/$branch" >/dev/null
+            echo "Removed $branch"
+          done <<'HEADS'
+          fix/epg-overlay-layout-20261102|596a57ae734e703553445a5fcaec9dcc0573140b
+          ci/verify-epg-layout-20261102|9ba9cdff1ca86aa5ebfcecea7b005d2287643985
+          ci/ventura-epg-reflow-preview-20261102|5d4917a33e765cdfbd8c92e8fc65d809ef4a2a09
+          HEADS
+
+      - name: Remove one-time publisher branch
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_REPOSITORY"
+          test "$GITHUB_REF_NAME" = 'maintenance/publish-epg-reflow-20261102'
+          test "$(gh api "repos/$repo/branches/$GITHUB_REF_NAME" --jq .commit.sha)" = "$GITHUB_SHA"
+          gh api -X DELETE "repos/$repo/git/refs/heads/$GITHUB_REF_NAME" >/dev/null
+          echo 'Publisher branch removed'
