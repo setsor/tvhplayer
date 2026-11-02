@@ -662,7 +662,8 @@ def test_late_epg_expands_panel_and_matches_channel_now(monkeypatch, tmp_path):
         assert panel.description_label.isVisible()
         assert panel.description_label.text()
         assert panel.height() > initial_height
-        assert panel.height() > 125
+        # macOS offscreen tests can have a shorter video surface; test that
+        # the visible rows fit, not a fixed minimum pixel height.
         for label in (panel.channel_label, panel.title_label,
                       panel.time_label, panel.description_label):
             assert label.geometry().top() >= 0
