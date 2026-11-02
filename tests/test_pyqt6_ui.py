@@ -615,6 +615,66 @@ def test_epg_overlay_uses_plain_text_and_keeps_subtitle_space(monkeypatch, tmp_p
         app.processEvents()
 
 
+def test_late_epg_expands_panel_and_matches_channel_now(monkeypatch, tmp_path):
+    from PyQt6.QtCore import Qt
+    from tvhplayer.core.channel_info import NowNext
+    from tvhplayer.core.models import Channel, EpgEvent
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    try:
+        window.show()
+        window.player_container.resize(650, 450)
+        app.processEvents()
+        news = Channel(uuid='news', name='News')
+        window.channel_model.set_channels([news])
+        window._channels_server = window._playback_server = 'home'
+        window._playback_channel = news
+
+        # Picture starts before the background EPG request finishes.
+        window._show_playback_wait()
+        window._on_playback_started()
+        panel = window.programme_overlay
+        assert panel.title_label.text() == 'EPG unavailable'
+        initial_height = panel.height()
+        assert panel._timer.isActive()
+
+        now = int(time.time())
+        event = EpgEvent(
+            start=now - 600, stop=now + 1800,
+            title='Documentary: An unusually long programme title that needs more than one line',
+            description='A detailed look at the programme with interviews, reports and '
+                        'background information that continues for several lines. ' * 3,
+            channel_uuid='news',
+        )
+        window._now_next = {'news': NowNext(event, None)}
+        window._now_next_loaded = True
+        window._update_programme_cells()
+        window._refresh_programme_overlay()
+        app.processEvents()
+
+        assert panel.title_label.text() == event.title
+        assert window.channel_model.index(0, ui.COL_NOW).data(Qt.ItemDataRole.DisplayRole) == event.title
+        assert panel.time_label.isVisible()
+        assert '40 min' in panel.time_label.text()
+        assert panel.description_label.isVisible()
+        assert panel.description_label.text()
+        assert panel.height() > initial_height
+        assert panel.height() > 125
+        for label in (panel.channel_label, panel.title_label,
+                      panel.time_label, panel.description_label):
+            assert label.geometry().top() >= 0
+            assert label.geometry().bottom() <= panel.height() - 8
+        assert panel.geometry().bottom() <= window.player_container.height() - 58
+        assert panel._timer.isActive()
+        assert panel._timer.interval() == 5000
+
+        panel._timer.timeout.emit()
+        assert not panel.isVisible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_spinner_shows_until_playback_starts(monkeypatch, tmp_path):
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
     try:
