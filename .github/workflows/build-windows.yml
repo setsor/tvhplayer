@@ -18,7 +18,9 @@ on:
       - 'tvhplayer/tvhplayer.py'
       - 'tvhplayer/setup_wizard.py'
       - 'tests/test_windows_wslc.py'
+      - 'tests/test_windows_backend_storage.py'
       - 'tests/test_hdhomerun.py'
+      - 'tests/test_builtin_server.py'
       - 'tests/test_tuner_setup.py'
       - 'tests/test_backend_bundle.py'
       - 'tests/test_backend_fingerprint.py'
@@ -29,6 +31,10 @@ on:
       - '.github/workflows/backend-bundle.yml'
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: Existing release to repair using this workflow ref (app version must match; empty builds a CI artifact)
+        type: string
+        default: ''
       run_wslc_acceptance:
         description: Run real WSLc tests on a managed Windows host with the wslc runner label
         type: boolean
@@ -54,7 +60,10 @@ jobs:
       contents: write
 
   windows:
-    needs: backend
+    needs: [backend, acceptance]
+    if: >-
+      ${{ !cancelled() && needs.backend.result == 'success' &&
+          (!inputs.run_wslc_acceptance || needs.acceptance.result == 'success') }}
     runs-on: windows-2025
     timeout-minutes: 30
     permissions:
@@ -69,8 +78,16 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+          if [ -n "$RELEASE_TAG" ]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo 'Invalid release tag'; exit 1; }
+            gh release view "$RELEASE_TAG" >/dev/null
+            python -c 'import ast, os; from pathlib import Path; tree = ast.parse(Path("tvhplayer/tvhplayer.py").read_text(encoding="utf-8")); version = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "APP_VERSION" for t in n.targets)); assert version == os.environ["RELEASE_TAG"][1:], "App version does not match the target release"'
+            echo "label=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          elif [ "${GITHUB_REF_TYPE}" = tag ]; then
             echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           else
             echo "label=ci${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
@@ -82,7 +99,7 @@ jobs:
       - name: Test WSLc contracts without virtualization
         run: |
           python -m pip install pytest requests PyQt6 psutil
-          python -m pytest tests/test_windows_wslc.py tests/test_hdhomerun.py tests/test_tuner_setup.py tests/test_backend_bundle.py tests/test_backend_fingerprint.py tests/test_wslc_lifecycle.py -q
+          python -m pytest tests/test_windows_wslc.py tests/test_windows_backend_storage.py tests/test_hdhomerun.py tests/test_builtin_server.py tests/test_tuner_setup.py tests/test_backend_bundle.py tests/test_backend_fingerprint.py tests/test_wslc_lifecycle.py -q
 
       - name: Download the offline backend bundle
         uses: actions/download-artifact@v8
@@ -130,11 +147,12 @@ jobs:
           retention-days: 14
 
       - name: Upload to release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.version.outputs.label }}
           files: windows/dist/*
+          fail_on_unmatched_files: true
 
   acceptance:
     if: github.event_name == 'workflow_dispatch' && inputs.run_wslc_acceptance

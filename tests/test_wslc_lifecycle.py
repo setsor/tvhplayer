@@ -1,6 +1,9 @@
 import contextlib
+import csv
+import io
 import json
-import zipfile
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -13,19 +16,30 @@ IMAGE = 'sha256:' + 'b' * 64
 
 
 class Runtime:
+    config_generation = 'c' * 32
     def __init__(self, collisions=0):
         self.collisions = collisions
         self.starts = []
         self.stops = []
+        self.backups = []
     def check(self):
         pass
     def provision(self, folder):
         return IMAGE
-    def launch(self, image, name, owner, config, recordings, ports):
-        self.starts.append((name, owner, ports))
+    def prepare_config(self, image, config):
+        pass
+    def hdhomerun_device(self):
+        return ''
+    def configure_hdhomerun(self, transport):
+        pass
+    def backup_config(self, *, upgrade=False):
+        self.backups.append(upgrade)
+        return Path('native-backup.tar.gz')
+    def launch(self, image, name, owner, config, recordings, ports, udp_ports=()):
+        self.starts.append((name, owner, ports, udp_ports))
         if len(self.starts) <= self.collisions:
             raise WslcError('bind: Address already in use')
-    def verify_running(self, name, owner, ports):
+    def verify_running(self, name, owner, ports, udp_ports=()):
         pass
     def logs_owned(self, name, owner):
         return ''
@@ -38,6 +52,9 @@ def supervisor(tmp_path, monkeypatch, runtime):
     monkeypatch.setattr(module, 'protect_config', lambda path: path.mkdir(parents=True, exist_ok=True))
     monkeypatch.setattr(module, 'serverinfo_ok', lambda *args, **kwargs: True)
     monkeypatch.setattr(module, 'apply_builtin_defaults', lambda *args, **kwargs: [])
+    monkeypatch.setattr(module, 'probe_host_device', lambda *args, **kwargs: None)
+    monkeypatch.setattr(module, 'plan_transport', lambda devices, **kwargs: None)
+    monkeypatch.setattr(module, 'apply_hdhomerun_transport', lambda *args, **kwargs: True)
     monkeypatch.setattr(module, 'use_guest_ffmpeg', lambda *args: 0)
     monkeypatch.setattr(module.socket, 'create_connection', lambda *args, **kwargs: contextlib.nullcontext())
     s = module.WslcBuiltinSupervisor(tmp_path / 'config', tmp_path, 24111, 24112, runtime=runtime)
@@ -58,6 +75,62 @@ def test_port_collision_recreates_only_owned_container(tmp_path, monkeypatch):
     assert s.status == 'stopped'
 
 
+def test_hdhomerun_udp_range_is_published_and_configured(tmp_path, monkeypatch):
+    from tvhplayer.core.hdhomerun import HdHomeRunTransport
+    runtime = Runtime()
+    s = supervisor(tmp_path, monkeypatch, runtime)
+    transport = HdHomeRunTransport('192.168.8.211', 30000, 2, device_ip='192.168.8.148')
+    monkeypatch.setattr(module, 'plan_transport', lambda devices, **kwargs: transport)
+    applied = []
+    monkeypatch.setattr(module, 'apply_hdhomerun_transport',
+                        lambda *args, **kwargs: applied.append(args) or True)
+    s._run()
+    expected = (('192.168.8.211', 30000), ('192.168.8.211', 30001))
+    assert runtime.starts[0][3] == expected
+    assert applied and applied[0][1:3] == ('192.168.8.211', 30000)
+    assert 'udp://192.168.8.211:30000-30001' in s.log_text()
+
+
+def test_transport_planning_uses_configured_device_without_broadcast(tmp_path, monkeypatch):
+    from tvhplayer.core.hdhomerun import HostTuner, HdHomeRunTransport
+    runtime = Runtime()
+    runtime.hdhomerun_device = lambda: '192.168.1.9'
+    s = supervisor(tmp_path, monkeypatch, runtime)
+    device = HostTuner('192.168.1.9', '192.168.1.5', 4)
+    def probe(address, **kwargs):
+        assert address == '192.168.1.9'
+        return device
+    def plan(devices, **kwargs):
+        assert devices == [device] and kwargs['device_ip'] == device.ip
+        return HdHomeRunTransport(device.local_ip, 30000, device.tuner_count, device.ip)
+    monkeypatch.setattr(module, 'probe_host_device', probe)
+    monkeypatch.setattr(module, 'plan_transport', plan)
+    assert s._plan_hdhomerun_transport().device_ip == device.ip
+
+
+def test_unreadable_live_config_does_not_launch_or_overwrite_it(tmp_path, monkeypatch):
+    runtime = Runtime()
+    def fail():
+        raise WslcError('Cannot read live settings')
+    runtime.hdhomerun_device = fail
+    runtime.configure_hdhomerun = lambda *a: pytest.fail('Must not overwrite unreadable settings')
+    s = supervisor(tmp_path, monkeypatch, runtime)
+    s._run()
+    assert not runtime.starts and s.status == 'failed'
+
+
+def test_hdhomerun_udp_ports_move_when_a_publish_conflicts(tmp_path, monkeypatch):
+    from tvhplayer.core.hdhomerun import HdHomeRunTransport
+    runtime = Runtime(collisions=1)
+    s = supervisor(tmp_path, monkeypatch, runtime)
+    transport = HdHomeRunTransport('192.168.8.211', 30000, 2)
+    monkeypatch.setattr(module, 'plan_transport', lambda devices, **kwargs: transport)
+    monkeypatch.setattr(module, 'pick_udp_base', lambda *args, **kwargs: 31000)
+    s._run()
+    assert runtime.starts[0][3] == (('192.168.8.211', 30000), ('192.168.8.211', 30001))
+    assert runtime.starts[1][3] == (('192.168.8.211', 31000), ('192.168.8.211', 31001))
+
+
 def test_image_upgrade_backs_up_config_without_recordings(tmp_path, monkeypatch):
     runtime = Runtime()
     s = supervisor(tmp_path, monkeypatch, runtime)
@@ -67,11 +140,8 @@ def test_image_upgrade_backs_up_config_without_recordings(tmp_path, monkeypatch)
     Path(s.recordings_dir).mkdir()
     (Path(s.recordings_dir) / 'recording.ts').write_bytes(b'keep media')
     s._run()
-    snapshots = list((tmp_path / 'backend-backups').glob('*.zip'))
-    assert len(snapshots) == 1
-    with zipfile.ZipFile(snapshots[0]) as archive:
-        assert archive.read('channels.json') == b'keep channels'
-        assert not any('recording.ts' in name for name in archive.namelist())
+    assert runtime.backups == [True, False]
+    assert (s.config_dir / 'channels.json').read_text() == 'keep channels'
     assert (Path(s.recordings_dir) / 'recording.ts').read_bytes() == b'keep media'
     assert json.loads((s.config_dir / '.tvhplayer-runtime.json').read_text())['image'] == IMAGE
 
@@ -90,7 +160,6 @@ def test_stale_owned_record_is_recovered_before_launch(tmp_path, monkeypatch):
 def test_missing_orphan_does_not_block_restart():
     calls = []
     def runner(args, **kwargs):
-        import subprocess
         calls.append(args)
         return subprocess.CompletedProcess(args, 0, 'Object not found: tvhplayer-' + 'a' * 32, '')
     runtime = WslcRuntimeAdapter('wslc.exe', runner)
@@ -127,3 +196,105 @@ def test_backend_log_redacts_credentials_and_stream_tickets(tmp_path):
     s._emit_log('login private-superuser-password stream http://localhost/stream?ticket=secret-ticket\n')
     assert 'private-superuser-password' not in lines[0]
     assert 'secret-ticket' not in lines[0]
+
+
+@pytest.mark.parametrize('private', [True, False])
+def test_permissions_are_only_reapplied_when_current_acl_needs_it(tmp_path, monkeypatch, private):
+    calls = []
+    def run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, 'user,S-1-5-21-123\n', '')
+    monkeypatch.setattr(module.subprocess, 'run', run)
+    states = iter([private, True])
+    monkeypatch.setattr(module, '_folder_is_private', lambda *args: next(states))
+    applied = []
+    monkeypatch.setattr(module, '_set_private_acl', lambda *args: applied.append(args))
+    module.protect_config(tmp_path / 'config')
+    assert [args[0] for args in calls] == ['whoami.exe']
+    assert bool(applied) is not private
+
+
+def test_protect_config_fails_closed_when_acl_is_still_not_private(tmp_path, monkeypatch):
+    monkeypatch.setattr(module.subprocess, 'run',
+                        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, 'user,S-1-5-21-123\n', ''))
+    monkeypatch.setattr(module, '_folder_is_private', lambda *args: False)
+    monkeypatch.setattr(module, '_set_private_acl', lambda *args: None)
+    with pytest.raises(WslcError, match='secure'):
+        module.protect_config(tmp_path / 'config')
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows ACLs')
+def test_protect_config_removes_unexpected_explicit_grant(tmp_path):
+    folder = tmp_path / 'config'
+    folder.mkdir()
+    result = subprocess.run(['whoami.exe', '/user', '/fo', 'csv', '/nh'],
+                            capture_output=True, text=True, check=True)
+    sid = next(csv.reader(io.StringIO(result.stdout)))[1]
+    try:
+        subprocess.run(['icacls.exe', str(folder), '/grant', '*S-1-1-0:(OI)(CI)R'],
+                       capture_output=True, text=True, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        pytest.skip(f'cannot set a test ACL in this environment: {exc}')
+    assert not module._folder_is_private(folder, sid)
+    module.protect_config(folder)
+    assert module._folder_is_private(folder, sid)
+
+
+@pytest.mark.parametrize('sddl,private', [
+    ('D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-123)', True),
+    ('D:P(A;OICI;FA;;;S-1-5-21-123)(A;OICI;FA;;;SY)', True),
+    ('D:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-123)', False),
+    ('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-123)(A;OICI;FR;;;WD)', False),
+    ('D:P(A;;FA;;;SY)(A;OICI;FA;;;S-1-5-21-123)', False),
+    ('D:P(A;OICI;FR;;;SY)(A;OICI;FA;;;S-1-5-21-123)', False),
+    ('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;S-1-5-21-456)', False),
+])
+def test_acl_fast_path_requires_private_inheritable_permissions(sddl, private):
+    assert module._private_acl(sddl, 'S-1-5-21-123') is private
+
+
+@pytest.mark.parametrize('actual,private', [
+    ('D:PAI(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)', True),
+    ('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;LG)', False),
+    ('D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)(A;OICI;FR;;;WD)', False),
+    ('D:AI(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)', False),
+])
+def test_acl_comparison_uses_native_canonical_account_identity(actual, private):
+    sid = 'S-1-5-21-123-456-789-500'
+    expected = 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)'
+    assert module._private_acl(actual, sid, expected) is private
+    assert not module._private_acl(actual, sid)
+
+
+def test_playlist_migration_runs_once_and_rechecks_changed_settings(tmp_path, monkeypatch):
+    runtime = Runtime()
+    s = supervisor(tmp_path, monkeypatch, runtime)
+    calls = []
+    monkeypatch.setattr(module, 'use_guest_ffmpeg', lambda *a: calls.append('migration') or 0)
+    s._run()
+    assert calls == ['migration']
+    s._cancel.clear()
+    s._run()
+    assert calls == ['migration']
+    runtime.config_generation = 'd' * 32
+    s._cancel.clear()
+    s._run()
+    assert calls == ['migration', 'migration']
+    state_path = s.config_dir / '.tvhplayer-runtime.json'
+    state = json.loads(state_path.read_text())
+    state['image'] = 'sha256:' + 'a' * 64
+    state_path.write_text(json.dumps(state))
+    s._cancel.clear()
+    s._run()
+    assert len(calls) == 3
+
+
+def test_failed_playlist_migration_is_retried(tmp_path, monkeypatch):
+    s = supervisor(tmp_path, monkeypatch, Runtime())
+    monkeypatch.setattr(module, 'use_guest_ffmpeg', lambda *a: -1)
+    s._run()
+    assert not (s.config_dir / '.tvhplayer-runtime.json').exists()
+    assert s.status == 'failed'
+    monkeypatch.setattr(module, 'use_guest_ffmpeg', lambda *a: 0)
+    s._run()
+    assert json.loads((s.config_dir / '.tvhplayer-runtime.json').read_text())['guest_ffmpeg'] == module.GUEST_FFMPEG_MIGRATION
