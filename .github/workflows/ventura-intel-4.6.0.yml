@@ -157,7 +157,14 @@ jobs:
           print("MPV 0.41: embedded Qt OpenGL render profile")
           PY
           export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
-          export CFLAGS="-mmacosx-version-min=13.0"
+          # pkg-config can report the FFmpeg library but omit the prefix's
+          # top-level include directory on some Conda/clang runner combinations.
+          # Verify the headers and pass the prefix explicitly to the compiler.
+          ls -l "$CONDA_PREFIX/include/libavutil/channel_layout.h" \
+                "$CONDA_PREFIX/include/libavcodec/avcodec.h" \
+                "$CONDA_PREFIX/include/libavformat/avformat.h"
+          pkg-config --cflags libavcodec libavformat libavutil
+          export CFLAGS="-I$CONDA_PREFIX/include -mmacosx-version-min=13.0"
           export LDFLAGS="-mmacosx-version-min=13.0 -framework CoreFoundation"
           pkg-config --modversion expat
           pkg-config --modversion libavcodec
