@@ -302,12 +302,13 @@ class TvhBackend(ABC):
         """
 
     @abstractmethod
-    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '') -> str:
+    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '', comment: str = '') -> str:
         """Schedule a timer from an EPG event id.
 
         HTTP ``dvr/entry/create_by_event`` (``event_id``, optional
-        ``config_uuid``). HTSP ``addDvrEntry`` with ``eventId`` and optional
-        ``configName``. Returns the server id when the response includes one.
+        ``config_uuid`` and ``comment``). HTSP ``addDvrEntry`` with
+        ``eventId`` and optional ``configName``/``comment``.
+        Returns the server id when the response includes one.
         """
 
     @abstractmethod

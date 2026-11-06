@@ -439,10 +439,12 @@ class HtspBackend(TvhBackend):
     def list_removed_dvr_entries(self) -> List[DvrEntry]:
         return [parse_dvr_entry(raw) for raw in self._grid('dvr/entry/grid_removed')]
 
-    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '') -> str:
+    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '', comment: str = '') -> str:
         args = {'eventId': int(event_id), 'enabled': 1}
         if config_uuid:
             args['configName'] = config_uuid
+        if comment:
+            args['comment'] = comment
         reply = self._rpc_ok('addDvrEntry', args, 'addDvrEntry')
         if reply.get('id') is None:
             return ''

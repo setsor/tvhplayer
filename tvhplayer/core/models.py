@@ -387,6 +387,30 @@ class DvrEntry:
         return False
 
 
+QUICK_RECORD_COMMENT = 'Instant recording via TVHplayer'
+
+
+def is_quick_recording(entry):
+    """Only Quick Record jobs initiated by the player have this explicit marker.
+
+    Never infer recording type from channel or title: an EPG-scheduled
+    recording can share both.
+    """
+    return (entry.raw or {}).get('comment') == QUICK_RECORD_COMMENT
+
+
+def quick_recordings_for_channel(entries, channel):
+    """Running Quick Record jobs on this channel, excluding EPG schedules."""
+    if channel is None:
+        return []
+    return [
+        entry for entry in entries
+        if entry.category() == 'recording'
+        and entry.matches_channel(channel)
+        and is_quick_recording(entry)
+    ]
+
+
 def recordings_to_stop(entries, channel=None):
     """Running jobs the Stop button should end.
 

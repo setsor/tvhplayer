@@ -78,10 +78,10 @@ def test_complete_windows_package_is_available_before_wsl_setup(monkeypatch, tmp
 def test_corrupt_archive_never_reaches_runtime(tmp_path):
     bundle(tmp_path)
     (tmp_path / 'tvheadend.tar').write_bytes(b'tampered')
-    cli = Cli()
+    cli = Cli('Object not found: ' + IMAGE)
     with pytest.raises(WslcError, match='checksum'):
         WslcRuntimeAdapter('wslc.exe', cli).provision(tmp_path)
-    assert not cli.calls
+    assert cli.calls == [['wslc.exe', 'inspect', '--type', 'image', IMAGE]]
 
 
 def test_offline_provision_uses_immutable_image(tmp_path):
@@ -89,6 +89,30 @@ def test_offline_provision_uses_immutable_image(tmp_path):
     cli = Cli(json.dumps([{'Id': IMAGE, 'Architecture': 'amd64'}]))
     assert WslcRuntimeAdapter('wslc.exe', cli).provision(tmp_path) == IMAGE
     assert cli.calls == [['wslc.exe', 'inspect', '--type', 'image', IMAGE]]
+
+
+def test_cached_image_does_not_read_unused_archive(tmp_path, monkeypatch):
+    bundle(tmp_path)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Cached image startup must not hash the offline archive')
+    monkeypatch.setattr('tvhplayer.core.backend_bundle.file_digest', forbidden)
+    (tmp_path / 'tvheadend.tar').unlink()
+    cli = Cli(json.dumps([{'Id': IMAGE, 'Architecture': 'amd64'}]))
+    assert WslcRuntimeAdapter('wslc.exe', cli).provision(tmp_path) == IMAGE
+    assert len(cli.calls) == 1
+
+
+@pytest.mark.parametrize('field,value', [('image', 'latest'), ('tvheadend_commit', 'wrong'), ('schema', 99)])
+def test_invalid_manifest_rejected_before_cached_image_lookup(tmp_path, field, value):
+    bundle(tmp_path)
+    path = tmp_path / 'manifest.json'
+    manifest = json.loads(path.read_text())
+    manifest[field] = value
+    path.write_text(json.dumps(manifest))
+    cli = Cli(json.dumps([{'Id': IMAGE, 'Architecture': 'amd64'}]))
+    with pytest.raises(WslcError):
+        WslcRuntimeAdapter('wslc.exe', cli).provision(tmp_path)
+    assert not cli.calls
 
 
 def test_offline_load_on_cache_miss(tmp_path):
@@ -112,22 +136,58 @@ def test_provision_rejects_unexpected_cached_image_identity(tmp_path):
 
 
 def test_launch_publishes_only_two_loopback_ports_without_credentials():
+    from types import SimpleNamespace
     cli = Cli()
-    WslcRuntimeAdapter('wslc.exe', cli).launch(IMAGE, NAME, OWNER, r'C:\Config',
-                                             r'D:\TV recordings', (24111, 24112))
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    runtime.config_storage = SimpleNamespace(volume='tvhplayer-config-' + OWNER)
+    runtime.launch(IMAGE, NAME, OWNER, r'C:\Config', r'D:\TV recordings', (24111, 24112))
     args = cli.calls[0]
     assert args.count('--publish') == 2
     assert '127.0.0.1:24111:9981/tcp' in args
     assert '127.0.0.1:24112:9982/tcp' in args
     assert args[args.index('--pull') + 1] == 'never'
     assert not any('password' in arg or 'noacl' in arg for arg in args)
+    assert r'C:\Config' not in str(args)
+    assert 'type=volume,source=tvhplayer-config-' + OWNER + ',target=/config' in args
+    assert '-c /config/data' in args[-1]
 
 
-def state():
+def test_container_healthcheck_and_entrypoint_use_live_settings_path():
+    root = Path(__file__).resolve().parents[1]
+    containerfile = (root / 'windows' / 'backend' / 'Containerfile').read_text(encoding='utf-8')
+    entrypoint = (root / 'windows' / 'backend' / 'entrypoint.sh').read_text(encoding='utf-8')
+    assert 'test -s /config/data/superuser' in containerfile
+    assert 'test -s /config/data/superuser' in entrypoint
+    assert 'test -s /config/superuser' not in containerfile
+    assert 'test -s /config/superuser' not in entrypoint
+    assert '-c /config/data' in entrypoint
+
+
+def test_launch_publishes_hdhomerun_udp_ports_on_one_lan_address():
+    from types import SimpleNamespace
+    cli = Cli()
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    runtime.config_storage = SimpleNamespace(volume='tvhplayer-config-' + OWNER)
+    udp = [('192.168.8.211', 30000), ('192.168.8.211', 30001)]
+    runtime.launch(IMAGE, NAME, OWNER, r'C:\Config', r'D:\TV recordings', (24111, 24112), udp)
+    args = cli.calls[0]
+    assert args.count('--publish') == 4
+    assert '127.0.0.1:24111:9981/tcp' in args
+    assert '127.0.0.1:24112:9982/tcp' in args
+    assert '192.168.8.211:30000:30000/udp' in args
+    assert '192.168.8.211:30001:30001/udp' in args
+    assert '0.0.0.0:30000:30000/udp' not in args
+
+
+def state(udp=()):
+    ports = {
+        '9981/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '24111'}],
+        '9982/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '24112'}],
+    }
+    for host_ip, port in udp:
+        ports[f'{port}/udp'] = [{'HostIp': host_ip, 'HostPort': str(port)}]
     return {'Name': '/' + NAME, 'Config': {'Labels': {'tvhplayer.owner': OWNER}},
-            'State': {'Running': True}, 'NetworkSettings': {'Ports': {
-                '9981/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '24111'}],
-                '9982/tcp': [{'HostIp': '127.0.0.1', 'HostPort': '24112'}]}}}
+            'State': {'Running': True}, 'NetworkSettings': {'Ports': ports}}
 
 
 def test_foreign_container_is_never_stopped():
@@ -159,6 +219,35 @@ def test_wslc_3_top_level_ports():
     data = state()
     data['Ports'] = data['NetworkSettings'].pop('Ports')
     WslcRuntimeAdapter('wslc.exe', Cli(json.dumps(data))).verify_running(NAME, OWNER, (24111, 24112))
+
+
+def test_readiness_accepts_the_hdhomerun_udp_range():
+    udp = [('192.168.8.211', 30000), ('192.168.8.211', 30001)]
+    WslcRuntimeAdapter('wslc.exe', Cli(json.dumps(state(udp)))).verify_running(
+        NAME, OWNER, (24111, 24112), udp)
+
+
+def test_readiness_rejects_a_missing_hdhomerun_udp_port():
+    with pytest.raises(WslcError, match='port publication'):
+        WslcRuntimeAdapter('wslc.exe', Cli(json.dumps(state()))).verify_running(
+            NAME, OWNER, (24111, 24112), [('192.168.8.211', 30000)])
+
+
+@pytest.mark.parametrize('host_ip', ['0.0.0.0', '::', '127.0.0.1'])
+def test_readiness_rejects_wildcard_or_loopback_udp_publication(host_ip):
+    udp = [(host_ip, 30000)]
+    data = state(udp)
+    with pytest.raises(WslcError, match='LAN address'):
+        WslcRuntimeAdapter('wslc.exe', Cli(json.dumps(data))).verify_running(
+            NAME, OWNER, (24111, 24112), udp)
+
+
+def test_readiness_rejects_udp_published_on_another_host():
+    udp = [('192.168.8.211', 30000)]
+    data = state([('192.168.8.212', 30000)])
+    with pytest.raises(WslcError, match='stream port'):
+        WslcRuntimeAdapter('wslc.exe', Cli(json.dumps(data))).verify_running(
+            NAME, OWNER, (24111, 24112), udp)
 
 
 def test_cleanup_runs_despite_cancellation():

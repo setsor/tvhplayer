@@ -772,7 +772,7 @@ def test_record_controls_follow_the_playing_channel_not_the_selected_row(monkeyp
 
         news_recording = DvrEntry(
             uuid='rec', title='News at Six', channel_name='News',
-            raw={'channel': 'news'}, start=int(time.time()) - 30,
+            raw={'channel': 'news', 'comment': 'Instant recording via TVHplayer'}, start=int(time.time()) - 30,
             duration=900, status='Running', sched_status='recording',
         )
         window.channel_recordings_changed([news_recording])
@@ -2006,7 +2006,7 @@ def test_server_stop_timeout_does_not_repeat_an_uncertain_rpc(monkeypatch, tmp_p
         uuid='one', title='Movie', channel_name='FILMBOX+ one',
         start=int(time.time()) - 20, duration=90,
         status='Running', sched_status='recording', htsp_id=42,
-        raw={'channelName': 'FILMBOX+ one'},
+        raw={'channelName': 'FILMBOX+ one', 'comment': 'Instant recording via TVHplayer'},
     )
     extra = DvrEntry(
         uuid='two', title='Other', channel_name='TVR 1',
@@ -3752,7 +3752,7 @@ def test_player_bar_play_stop_and_record_controls(monkeypatch, tmp_path):
         window._playback_channel = channel
         window._protect_video_surface(True)
         recording = DvrEntry(
-            uuid='r', title='Newsday', channel_name='BBC News', raw={'channel': 'c'},
+            uuid='r', title='Newsday', channel_name='BBC News', raw={'channel': 'c', 'comment': 'Instant recording via TVHplayer'},
             start=int(time.time()) - 60, duration=600, status='Running', sched_status='recording',
         )
         assert recording.category() == 'recording'
@@ -4796,6 +4796,80 @@ def test_cancelling_backend_start_disconnects_queued_actions(monkeypatch, tmp_pa
         assert failed and 'cancelled' in failed[0]
         supervisor.ready.emit(24111, 24112)
         assert ready == []
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_player_stop_only_stops_quick_record_not_scheduled_on_same_channel(monkeypatch, tmp_path):
+    """The player Stop must preserve a concurrent EPG-scheduled recording."""
+    import time
+    from tvhplayer.core.models import Channel, DvrEntry
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    channel = Channel(uuid='warner', name='Warner TV HD')
+    quick = DvrEntry(
+        uuid='quick', title='Warner TV HD 2026-11-06 19:28:14',
+        channel_name='Warner TV HD', start=int(time.time()) - 30, duration=900,
+        status='Running', sched_status='recording', htsp_id=15,
+        raw={'channel': 'warner', 'comment': 'Instant recording via TVHplayer'},
+    )
+    scheduled = DvrEntry(
+        uuid='scheduled', title='Tanarul Sheldon', channel_name='Warner TV HD',
+        start=int(time.time()) - 30, duration=900,
+        status='Running', sched_status='recording', htsp_id=16,
+        raw={'channel': 'warner', 'comment': 'Scheduled via TVHplayer'},
+    )
+    calls, results = [], []
+
+    class Backend:
+        def list_dvr_entries(self):
+            return [scheduled, quick]
+        def stop_dvr_entry(self, entry):
+            calls.append(entry.uuid)
+        def close(self):
+            pass
+
+    window.current_server = lambda: {'name': 'tvheadend', 'url': 'http://127.0.0.1:9981'}
+    window._dvr_backend_factory = lambda _server: Backend()
+    try:
+        window.show()
+        app.processEvents()
+        window._playback_channel = channel
+        window._protect_video_surface(True)
+        window.channel_recordings_changed([scheduled, quick])
+        assert window.stop_record_btn.isVisible()
+        window.stop_record_btn.click()
+        deadline = time.monotonic() + 5
+        while window._dvr_operation is not None:
+            assert time.monotonic() < deadline
+            app.processEvents()
+            time.sleep(0.01)
+        assert calls == ['quick']
+
+        # A scheduled-only recording must show Record, not an indiscriminate Stop.
+        window.channel_recordings_changed([scheduled])
+        window._sync_record_controls()
+        assert window.record_btn.isVisible()
+        assert not window.stop_record_btn.isVisible()
+
+        # Multiple Quick Records require an explicit selection in Tasks.
+        other_quick = DvrEntry(
+            uuid='quick2', title='Another quick', channel_name='Warner TV HD',
+            start=int(time.time()) - 10, duration=900, status='Running',
+            sched_status='recording', htsp_id=17,
+            raw={'channel': 'warner', 'comment': 'Instant recording via TVHplayer'},
+        )
+        Backend.list_dvr_entries = lambda self: [scheduled, quick, other_quick]
+        worker = ui.DvrOperation(
+            {'name': 'tvheadend', 'url': 'http://127.0.0.1:9981'}, 'stop_channel',
+            channel=channel, backend_factory=lambda _server: Backend(),
+        )
+        worker.finished.connect(lambda result, error: results.append((result, error)))
+        worker._run()
+        assert calls == ['quick']
+        assert results[0][0]['quick_count'] == 2
+        assert results[0][0]['targets'] == []
     finally:
         window.close()
         app.processEvents()

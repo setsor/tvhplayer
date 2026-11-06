@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -10,7 +11,7 @@ import time
 from pathlib import Path
 
 from .windows_backend_paths import bind_mount
-from .backend_bundle import verify_bundle
+from .backend_bundle import read_manifest, verify_bundle
 
 
 class WslcError(RuntimeError):
@@ -50,6 +51,7 @@ class WslcRuntimeAdapter:
         self.executable = executable or find_wslc()
         self.runner = runner
         self.cancel = None
+        self.config_storage = None
 
     def command(self, *args, timeout=20, cancellable=True):
         if not self.executable:
@@ -98,16 +100,27 @@ class WslcRuntimeAdapter:
 
     def provision(self, directory):
         directory = Path(directory)
+        started = time.monotonic()
         try:
-            manifest = verify_bundle(directory, cancel=self.cancel)
+            manifest = read_manifest(directory)
             image = manifest['image']
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise WslcError(f'Install the matching offline backend bundle: {exc}') from exc
-        # Always verify the archive, even when this image was previously loaded.
+        # WSLc checks the immutable imported image identity and architecture.
+        # The archive is only needed (and hashed) when that image is absent.
         if not self.has_image(image):
+            try:
+                verify_bundle(directory, cancel=self.cancel)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise WslcError(f'Install the matching offline backend bundle: {exc}') from exc
+            logging.getLogger(__name__).info('Offline backend archive verified in %.1fs', time.monotonic() - started)
+            loading = time.monotonic()
             self.command('load', '--input', directory / 'tvheadend.tar', timeout=300)
+            logging.getLogger(__name__).info('Offline backend image imported in %.1fs', time.monotonic() - loading)
             if not self.has_image(image):
                 raise WslcError('The offline archive did not provide the required backend image.')
+        else:
+            logging.getLogger(__name__).info('Reused offline backend image in %.1fs', time.monotonic() - started)
         return image
 
     def has_image(self, image):
@@ -134,14 +147,44 @@ class WslcRuntimeAdapter:
             raise WslcError('Cannot verify the required x86-64 backend image.') from exc
         return True
 
-    def launch(self, image, name, owner, config, recordings, ports):
+    def prepare_config(self, image, config):
+        from .windows_backend_storage import NativeConfigStorage
+        self.config_storage = NativeConfigStorage(self, image, config)
+        return self.config_storage.prepare()
+
+    def backup_config(self, *, upgrade=False):
+        return self.config_storage.backup(upgrade=upgrade)
+
+    @property
+    def config_generation(self):
+        return self.config_storage.generation
+
+    def hdhomerun_device(self):
+        self._server_settings = self.config_storage.server_settings()
+        return self._server_settings.get('hdhomerun_ip') or ''
+
+    def configure_hdhomerun(self, transport):
+        changes = transport.config() if transport else {'local_ip': '', 'local_port': 0}
+        if any(self._server_settings.get(key) != value for key, value in changes.items()):
+            self.config_storage.update_server_settings(dict(self._server_settings, **changes))
+
+    def launch(self, image, name, owner, config, recordings, ports, udp_ports=()):
+        if self.config_storage is None or not self.config_storage.volume:
+            raise WslcError('Linux server settings have not been prepared.')
         args = ['run', '--detach', '--pull', 'never', '--name', name,
                 '--label', f'tvhplayer.owner={owner}', '--stop-timeout', '5']
         for host, guest in zip(ports, (9981, 9982)):
             args += ['--publish', f'127.0.0.1:{int(host)}:{guest}/tcp']
-        for host, guest in ((config, '/config'), (recordings, '/recordings')):
-            args += ['--mount', bind_mount(str(host), guest)]
-        self.command(*args, image, timeout=60)
+        # HDHomeRun MPEG-TS return path: tuner n sends to local_port+n on the
+        # Windows LAN address, and WSLc forwards the same guest UDP port.
+        for host_ip, port in udp_ports:
+            port = int(port)
+            args += ['--publish', f'{host_ip}:{port}:{port}/udp']
+        args += ['--mount', f'type=volume,source={self.config_storage.volume},target=/config',
+                 '--mount', bind_mount(str(recordings), '/recordings'), '--entrypoint', '/bin/sh']
+        self.command(*args, image, '-c',
+                     'umask 077; exec /usr/libexec/tvhplayer/tvheadend -c /config/data -B '
+                     '--bindaddr 0.0.0.0 --http_port 9981 --htsp_port 9982', timeout=60)
 
     def inspect_owned(self, name, owner, cancellable=True, missing_ok=False):
         if not re.fullmatch(r'[0-9a-f]{32}', owner) or name != 'tvhplayer-' + owner:
@@ -165,17 +208,27 @@ class WslcRuntimeAdapter:
         except (ValueError, KeyError, TypeError, IndexError) as exc:
             raise WslcError('Cannot verify TVHplayer container ownership.') from exc
 
-    def verify_running(self, name, owner, ports):
+    def verify_running(self, name, owner, ports, udp_ports=()):
         data = self.inspect_owned(name, owner)
         if not data['State']['Running']:
             raise WslcError('The built-in container stopped before it was ready.')
         # WSLc 3.x uses top-level Ports; Docker-compatible versions may nest it.
         mappings = data.get('Ports', data.get('NetworkSettings', {}).get('Ports', {}))
-        if set(mappings) != {'9981/tcp', '9982/tcp'}:
+        expected = {'9981/tcp', '9982/tcp'}
+        for host_ip, port in udp_ports:
+            expected.add(f'{int(port)}/udp')
+        if set(mappings) != expected:
             raise WslcError('Unexpected backend port publication.')
         for host, guest in zip(ports, (9981, 9982)):
             if mappings.get(f'{guest}/tcp') != [{'HostIp': '127.0.0.1', 'HostPort': str(host)}]:
                 raise WslcError('Cannot verify loopback-only publication of both server ports.')
+        for host_ip, port in udp_ports:
+            port = int(port)
+            published = mappings.get(f'{port}/udp')
+            if published != [{'HostIp': str(host_ip), 'HostPort': str(port)}]:
+                raise WslcError('Cannot verify the HDHomeRun stream port publication.')
+            if host_ip in ('0.0.0.0', '::') or host_ip.startswith('127.'):
+                raise WslcError('HDHomeRun stream ports must be published on one LAN address.')
 
     def stop_owned(self, name, owner):
         data = self.inspect_owned(name, owner, cancellable=False, missing_ok=True)

@@ -219,6 +219,12 @@ def test_http_update_and_create_payloads():
     assert backend.create_dvr_entry_by_event(44, 'cfg') == 'made'
     assert _posted(backend)[2] == {'event_id': 44, 'config_uuid': 'cfg'}
 
+    backend._session.queue.append({'uuid': 'tagged'})
+    assert backend.create_dvr_entry_by_event(45, 'cfg', comment='Instant recording via TVHplayer') == 'tagged'
+    assert _posted(backend)[2] == {
+        'event_id': 45, 'config_uuid': 'cfg', 'comment': 'Instant recording via TVHplayer',
+    }
+
     backend._session.queue.append({'uuid': 'series'})
     ident = backend.create_autorec_entry(AutorecSpec(
         title='News',
@@ -408,6 +414,8 @@ def test_htsp_native_and_proxied_dvr_calls():
     assert backend.create_dvr_entry_by_event(44, 'cfg') == '12'
     assert conn.calls[-1][1]['eventId'] == 44
     assert conn.calls[-1][1]['configName'] == 'cfg'
+    assert backend.create_dvr_entry_by_event(45, 'cfg', comment='Instant recording via TVHplayer') == '12'
+    assert conn.calls[-1][1]['comment'] == 'Instant recording via TVHplayer'
 
     conn.replies['addAutorecEntry'] = {'success': 1, 'id': '99'}
     assert backend.create_autorec_entry(AutorecSpec(
