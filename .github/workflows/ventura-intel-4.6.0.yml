@@ -44,7 +44,7 @@ jobs:
           assert 'def _recording_count_changed(self, count)' in src
           assert 'recordings_changed.connect(self._recording_count_changed)' in src
           assert "self._request_dvr_operation('stop_channel', channel=channel)" in src
-          assert 'def _show_player_epg' in src or 'epg_overlay' in src.lower()
+          assert 'class ProgrammeOverlay(QFrame):' in src and 'DURATION_MS = 5000' in src and 'def _start_programme_overlay(self):' in src
           assert Path('tvhplayer/core/subtitle_preferences.py').exists()
           print('PASS: upstream 4.6.0 and validated Ventura customizations')
           PY
