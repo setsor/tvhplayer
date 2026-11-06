@@ -2450,7 +2450,11 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
             time.sleep(0.01)
         _wait_for_tasks(app, panel)
         assert backend.cancelled == ['soon']
-        assert window.is_recording is True
+        # The upstream 4.6.0 REC indicator follows actual Tasks counts. The
+        # test deliberately forced REC on with no running job above; cancelling
+        # a scheduled item must clear that stale indicator, not retain it.
+        assert window.is_recording is False
+        assert window.recording_indicator.count() == 0
         assert any('Old' in text for text in _task_texts(panel))
         assert panel.task_table.isVisible()
         _select_task(panel, 'Old')
