@@ -20,6 +20,10 @@ from PyQt6.QtGui import (
 import html
 import json
 import re
+try:
+    from .core.recording_folder import validate_recording_folder
+except ImportError:
+    from core.recording_folder import validate_recording_folder
 # Replace this line:
 #from . import resources_rc
 
@@ -71,6 +75,7 @@ try:
         starting_caption, stream_path, stream_reason,
     )
     from .builtin_supervisor import BuiltinSupervisor
+    from .core.builtin_runtime import create_supervisor, windows_backend_enabled
     from . import cursor_debug
     from . import window_frame
     from .file_manager import show_in_file_manager
@@ -174,6 +179,7 @@ except ImportError:
         starting_caption, stream_path, stream_reason,
     )
     from builtin_supervisor import BuiltinSupervisor
+    from core.builtin_runtime import create_supervisor, windows_backend_enabled
     import cursor_debug
     import window_frame
     from file_manager import show_in_file_manager
@@ -280,7 +286,7 @@ import logging
 import platform
 
 # Shown in About; the release notes in the metainfo file give the same version.
-APP_VERSION = "4.5.0"
+APP_VERSION = "4.6.0"
 UPDATE_CHECK_DELAY_MS = 10_000
 CHANNEL_RELOAD_SECONDS = 30
 # A reload of a big list freezes the window a while: space them by a second per this many channels.
@@ -1830,17 +1836,16 @@ def default_recording_dir():
 
 def ensure_recording_dir(folder):
     """Make ``folder`` if needed; True when recordings can be written there."""
-    if not folder:
-        return False
-    if not os.path.isdir(folder):
-        # A folder made inside the Flatpak sandbox's home would vanish on exit.
-        if in_flatpak():
-            return False
-        try:
-            os.makedirs(folder, exist_ok=True)
-        except OSError:
-            return False
-    return os.access(folder, os.W_OK)
+    return not recording_dir_error(folder)
+
+
+def recording_dir_error(folder):
+    """An actionable filesystem error, or '' after a successful write probe."""
+    try:
+        validate_recording_folder(folder, create_missing=not in_flatpak())
+    except OSError as exc:
+        return str(exc)
+    return ''
 
 
 def local_recording_name(channel_name, when, extension=DEFAULT_FORMAT):
@@ -2328,6 +2333,8 @@ class ServerDialog(QDialog):
             return {
                 'running': (STATUS_CONNECTED, "Running on this computer"),
                 'starting': (STATUS_TESTING, "Starting…"),
+                'installing': (STATUS_TESTING, "Loading server image…"),
+                'stopping': (STATUS_TESTING, "Stopping…"),
                 'failed': (STATUS_UNREACHABLE, "Could not start"),
             }.get(self._builtin_state(), (STATUS_STOPPED, "Stopped"))
         if validate_server_url(server.get('url') or ''):
@@ -2407,9 +2414,10 @@ class ServerDialog(QDialog):
         self.status_label.setText(text)
         if server.get('builtin'):
             state = self._builtin_state()
-            active = state in ('starting', 'running')
-            self.run_btn.setText("S&top Server" if active else "S&tart Server")
-            self.run_btn.setEnabled(self._supervisor is not None)
+            active = state in ('starting', 'installing', 'running')
+            setup = getattr(self._supervisor, 'setup_issue', None) is not None
+            self.run_btn.setText("S&top Server" if active else ("Set &up WSL…" if setup else "S&tart Server"))
+            self.run_btn.setEnabled(self._supervisor is not None and state != 'stopping')
             self.builtin_address.setText(self._builtin_url(server) or "Chosen when the server starts")
             self.open_web_btn.setEnabled(state == 'running')
             self.log_btn.setEnabled(self._supervisor is not None)
@@ -2575,8 +2583,10 @@ class ServerDialog(QDialog):
     def _toggle_builtin(self):
         if self._supervisor is None:
             return
-        if self._builtin_state() in ('starting', 'running'):
+        if self._builtin_state() in ('starting', 'installing', 'running'):
             self._supervisor.stop()
+        elif getattr(self._supervisor, 'setup_issue', None) is not None:
+            self.parent().show_windows_backend_setup()
         else:
             self._supervisor.start()
         self._refresh_selected()
@@ -3959,12 +3969,12 @@ class TVHeadendClient(QMainWindow):
         )
         
         # Initialize servers from config. Without a packaged Tvheadend there is no built-in entry.
-        self._builtin_binary = find_bundled_binary() if platform_supports_builtin() else None
+        self._builtin_binary = find_bundled_binary() if platform_supports_builtin() and not windows_backend_enabled() else None
         self.servers = ensure_builtin_server(
             self.config_store.servers,
             self.config['builtin_http_port'],
             self.config['builtin_htsp_port'],
-            available=self._builtin_binary is not None,
+            available=self._builtin_binary is not None or windows_backend_enabled(),
         )
         self._backend = None
         self._backend_key = None
@@ -4047,8 +4057,8 @@ class TVHeadendClient(QMainWindow):
         self._conversion_timer = QTimer(self)
         self._conversion_timer.timeout.connect(self._tick_conversions)
         self.builtin = None
-        if self._builtin_binary is not None:
-            self.builtin = BuiltinSupervisor(
+        if self._builtin_binary is not None or windows_backend_enabled():
+            self.builtin = create_supervisor(
                 self._builtin_binary,
                 builtin_config_dir(self.config_dir),
                 self.config['builtin_http_port'],
@@ -4060,6 +4070,7 @@ class TVHeadendClient(QMainWindow):
             self.builtin.padding = self.recording_padding()
             self.builtin.ready.connect(self._on_builtin_ready)
             self.builtin.failed.connect(self._on_builtin_failed)
+            self.builtin.status_changed.connect(self._on_builtin_phase, Qt.ConnectionType.QueuedConnection)
         # Keep the computer awake while a recording on it is running or waiting.
         self.sleep_inhibitor = SleepInhibitor()
         self._builtin_entries = []
@@ -4625,7 +4636,7 @@ class TVHeadendClient(QMainWindow):
         # Text plus a red pill, so recording state is not color alone.
         self.recording_indicator = RecordingBadge()
         self.recording_indicator.clicked.connect(self._show_recordings_in_tasks)
-        self.tasks_pane.recordings_changed.connect(self.recording_indicator.set_count)
+        self.tasks_pane.recordings_changed.connect(self._recording_count_changed)
         
         # Shown while the recordings folder runs low on space.
         self.space_warning = QLabel("")
@@ -5678,7 +5689,7 @@ class TVHeadendClient(QMainWindow):
                 self._show_channel_state(message)
                 self.statusbar.showMessage(message)
                 return
-            if supervisor.binary is None:
+            if not supervisor.available:
                 message = "Built-in Tvheadend is not packaged in this build."
                 self._show_channel_state(message)
                 self.statusbar.showMessage(message)
@@ -7639,6 +7650,15 @@ class TVHeadendClient(QMainWindow):
         if channel is not None:
             self._request_dvr_operation('stop_channel', channel=channel)
 
+    def _recording_count_changed(self, count):
+        """Keep the indicator in sync with the unfiltered server and local tasks."""
+        self.recording_indicator.set_count(count)
+        if count > 0:
+            if not self.is_recording:
+                self.start_recording_indicator()
+        elif self.is_recording:
+            self.stop_recording_indicator()
+
     def start_recording_indicator(self):
         """Show the Recording pill in the status bar."""
         print("Debug: Starting recording indicator")
@@ -7979,12 +7999,49 @@ class TVHeadendClient(QMainWindow):
         if is_builtin_server(self.current_server()):
             self.fetch_channels()
         self._load_guides_after_start(find_builtin_server(self.servers))
+        if (self.builtin is not None and hasattr(self.builtin, 'applied_recordings_dir')
+                and self.builtin.recordings_dir
+                and self.builtin.applied_recordings_dir != self.builtin.recordings_dir):
+            self.statusbar.showMessage(
+                'The built-in server is available, but its recordings folder could not be applied. '
+                'Check the folder in Settings before recording.'
+            )
 
     def _on_builtin_failed(self, message):
         print(f"Debug: Built-in server failed: {message}")
         self.statusbar.showMessage(message)
         if is_builtin_server(self.current_server()) and not self._channels:
             self._show_channel_state(message, retry=True)
+        if getattr(self.builtin, 'setup_issue', None) is not None and is_builtin_server(self.current_server()):
+            self.show_windows_backend_setup()
+
+    def _on_builtin_phase(self, phase):
+        if self.builtin is None or self.builtin.status != phase or not is_builtin_server(self.current_server()):
+            return
+        if phase == 'installing':
+            self._show_channel_state('Preparing the built-in server…', busy=True)
+            self.statusbar.showMessage('Loading the offline server image…')
+        elif phase == 'stopping':
+            self._show_channel_state('Stopping the built-in server…', busy=True)
+        elif phase == 'stopped':
+            self._show_channel_state('The built-in server is stopped.', retry=True)
+            self.statusbar.showMessage('The built-in server is stopped.')
+
+    def show_windows_backend_setup(self):
+        if getattr(self, '_windows_setup_dialog', None) is not None:
+            self._windows_setup_dialog.raise_()
+            return
+        try:
+            from .windows_backend_setup import WindowsBackendSetup
+        except ImportError:
+            from windows_backend_setup import WindowsBackendSetup
+        dialog = WindowsBackendSetup(self.builtin, self)
+        self._windows_setup_dialog = dialog
+        def closed(_result):
+            self._windows_setup_dialog = None
+            dialog.deleteLater()
+        dialog.finished.connect(closed)
+        dialog.show()
 
     def _set_builtin_autostart(self, checked):
         self.config['builtin_autostart'] = bool(checked)
@@ -8463,25 +8520,44 @@ class TVHeadendClient(QMainWindow):
     def local_recording_dir(self):
         return self.config.get('local_recording_dir') or default_recording_dir()
 
+    def recording_folder_problem(self):
+        folder = self.local_recording_dir()
+        return recording_dir_error(folder) if folder else ''
+
     def set_local_recording_dir(self, folder):
+        error = recording_dir_error(folder)
+        if error:
+            QMessageBox.warning(self, "Recordings Folder", f"TVHplayer cannot save recordings in {folder}.\n\n{error}")
+            return False
         self.config['local_recording_dir'] = folder
         self.save_config()
         if self._settings_dialog is not None:
             self._settings_dialog.folder_edit.setText(folder)
         if self.builtin is not None and not self.builtin.set_recordings_dir(folder):
             self.statusbar.showMessage("The built-in server keeps its old recordings folder until it starts again.")
+        if self._settings_dialog is not None:
+            self._settings_dialog._refresh_folder_status()
         self._check_disk_space()
+        return True
 
     def server_recordings_ready(self):
         """Before recording on the built-in server: a folder it can save in, asked for if needed."""
         if not is_builtin_server(self.current_server()):
             return True
         folder = self.local_recording_dir()
-        if ensure_recording_dir(folder):
-            if self.builtin is not None and self.builtin.recordings_dir != folder:
-                self.builtin.set_recordings_dir(folder)
-            return True
-        return bool(self._ask_recording_dir(folder))
+        if not ensure_recording_dir(folder):
+            folder = self._ask_recording_dir(folder)
+            if not folder:
+                return False
+        # recordings_dir is the desired folder, including after a failed update.
+        # Confirm the server's profile before scheduling, even when it matches.
+        if self.builtin is not None and not self.builtin.set_recordings_dir(folder):
+            QMessageBox.warning(
+                self, "Recordings Folder",
+                "The built-in server could not use the recordings folder. Try recording again when the server is ready.",
+            )
+            return False
+        return True
 
     def recording_format(self):
         return self.config['local_recording_format']
@@ -8588,6 +8664,9 @@ class TVHeadendClient(QMainWindow):
         if previous:
             text = (f"TVHplayer cannot save recordings in {previous}. "
                     "Choose another folder; recordings go there from now on.")
+            error = recording_dir_error(previous)
+            if error:
+                text += f"\n\n{error}"
         else:
             text = ("Choose a folder for recordings. "
                     "Recordings go there from now on; you can change it in Settings.")
@@ -8601,11 +8680,7 @@ class TVHeadendClient(QMainWindow):
         folder = QFileDialog.getExistingDirectory(self, "Recordings Folder", str(Path.home()))
         if not folder:
             return ''
-        if not ensure_recording_dir(folder):
-            QMessageBox.warning(self, "Recordings Folder", f"TVHplayer cannot save recordings in {folder}.")
-            return ''
-        self.set_local_recording_dir(folder)
-        return folder
+        return folder if self.set_local_recording_dir(folder) else ''
 
     def _remember_channel(self, channel):
         last = {'server': self._channels_server, 'key': channel_key(channel), 'name': channel.name}
@@ -8690,7 +8765,7 @@ class TVHeadendClient(QMainWindow):
         """Servers a playlist can go to: the built-in server first, then the user's."""
         targets = []
         builtin = find_builtin_server(self.servers)
-        if builtin is not None and self.builtin is not None and self.builtin.binary is not None:
+        if builtin is not None and self.builtin is not None and self.builtin.available:
             targets.append(builtin)
         targets.extend(server for server in self.servers if not is_builtin_server(server))
         return targets
@@ -8724,7 +8799,7 @@ class TVHeadendClient(QMainWindow):
             on_ready(server)
             return
         supervisor = self.builtin
-        if supervisor is None or supervisor.binary is None:
+        if supervisor is None or not supervisor.available:
             on_failed("The built-in server is not part of this version of TVHplayer.")
             return
         current = find_builtin_server(self.servers)
@@ -8733,7 +8808,8 @@ class TVHeadendClient(QMainWindow):
             return
 
         def disconnect():
-            for signal, slot in ((supervisor.ready, ready), (supervisor.failed, failed)):
+            for signal, slot in ((supervisor.ready, ready), (supervisor.failed, failed),
+                                 (supervisor.status_changed, status_changed)):
                 try:
                     signal.disconnect(slot)
                 except TypeError:
@@ -8747,8 +8823,13 @@ class TVHeadendClient(QMainWindow):
             disconnect()
             on_failed(message)
 
+        def status_changed(status):
+            if status == 'stopped':
+                failed('Built-in server startup was cancelled.')
+
         supervisor.ready.connect(ready)
         supervisor.failed.connect(failed)
+        supervisor.status_changed.connect(status_changed)
         self.statusbar.showMessage("Starting built-in server...")
         supervisor.start()
 

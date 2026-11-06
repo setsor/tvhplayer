@@ -19,7 +19,7 @@ TVHplayer is a cross-platform desktop app for watching and recording live TV usi
 ## Who is this for
 This is for people who already have a Tvheadend server.
 
-But if you use linux, you can use this as a normal TV and PVR app, even without a server. You just need an IPTV playlist, or a TV tuner. 
+But if you use linux, you can use this as a normal TV and PVR app, using the built-in server. You just need an IPTV playlist, or a TV tuner. 
 
 ## Features
 
@@ -83,3 +83,9 @@ Run the tests with `python3 -m pytest tests`.
 Bitcoin: `bc1qqtsyf0ft85zshsnw25jgsxnqy45rfa867zqk4t`
 
 Doge:  `DRzNb8DycFD65H6oHNLuzyTzY1S5avPHHx`
+
+## Windows built-in server
+
+Windows packages can include an offline WSL Containers backend with native UI,
+automatic credentials and HDHomeRun discovery. Build/setup instructions and
+release qualification notes are in [windows/backend/README.md](windows/backend/README.md).
