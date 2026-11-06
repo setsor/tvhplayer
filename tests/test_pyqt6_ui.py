@@ -189,6 +189,10 @@ def _make_player(monkeypatch, tmp_path, prepare=None):
 
     from tvhplayer.core.config import ConfigStore
 
+    # These stand-in player tests must not start a real backend just because
+    # the developer checkout contains an offline Windows bundle.
+    monkeypatch.setattr(ui, 'windows_backend_enabled', lambda: False)
+    monkeypatch.setattr('tvhplayer.core.builtin_runtime.windows_backend_enabled', lambda: False)
     store = ConfigStore(tmp_path / 'tvhplayer.conf')
     monkeypatch.setattr(ui, 'ConfigStore', lambda *a, **k: store)
     # Not the picon pack on this computer: each window read its tens of thousands of logos.
@@ -2446,7 +2450,11 @@ def test_tasks_panel_lists_filters_and_controls_jobs(monkeypatch, tmp_path):
             time.sleep(0.01)
         _wait_for_tasks(app, panel)
         assert backend.cancelled == ['soon']
-        assert window.is_recording is True
+        # The upstream 4.6.0 REC indicator follows actual Tasks counts. The
+        # test deliberately forced REC on with no running job above; cancelling
+        # a scheduled item must clear that stale indicator, not retain it.
+        assert window.is_recording is False
+        assert window.recording_indicator.count() == 0
         assert any('Old' in text for text in _task_texts(panel))
         assert panel.task_table.isVisible()
         _select_task(panel, 'Old')
@@ -2659,6 +2667,143 @@ def test_local_recordings_default_to_the_videos_folder(monkeypatch, tmp_path):
     assert window.local_recording_dir() == ui.default_recording_dir()
     window.close()
     app.processEvents()
+
+
+def test_recordings_folder_rejects_unwritable_settings_and_persists_selection(monkeypatch, tmp_path):
+    from tvhplayer.core.config import ConfigStore
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    warnings = []
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: warnings.append(args[2]))
+    try:
+        assert window.set_local_recording_dir(str(tmp_path))
+        dialog = window.show_settings()
+        rejected = str(tmp_path / 'read-only')
+        monkeypatch.setattr(ui.QFileDialog, 'getExistingDirectory', lambda *_a: rejected)
+        monkeypatch.setattr(ui, 'recording_dir_error', lambda folder: 'Read-only filesystem' if folder == rejected else '')
+        updates = []
+        window.builtin = types.SimpleNamespace(set_recordings_dir=lambda folder: updates.append(folder) or True)
+        dialog._choose_folder()
+        assert warnings
+        assert dialog.folder_edit.text() == str(tmp_path)
+        assert window.local_recording_dir() == str(tmp_path)
+        assert updates == []
+        # Reopen the configuration from disk, rather than checking in-memory data.
+        assert ConfigStore(window.config_store.path).load()['local_recording_dir'] == str(tmp_path)
+    finally:
+        window.builtin = None
+        window.close()
+        app.processEvents()
+
+
+def test_server_recordings_retry_failed_folder_updates(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    warnings, calls = [], []
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: warnings.append(args[2]))
+    monkeypatch.setattr(ui, 'is_builtin_server', lambda _server: True)
+    window.current_server = lambda: {}
+    answers = iter([False, True])
+
+    def update(folder):
+        calls.append(folder)
+        return next(answers)
+
+    try:
+        window.set_local_recording_dir(str(tmp_path))
+        window.builtin = types.SimpleNamespace(recordings_dir=str(tmp_path), set_recordings_dir=update)
+        assert not window.server_recordings_ready()
+        assert warnings
+        assert window.server_recordings_ready()
+        assert calls == [str(tmp_path), str(tmp_path)]
+    finally:
+        window.builtin = None
+        window.close()
+        app.processEvents()
+
+
+def test_settings_folder_change_shows_server_acceptance(monkeypatch, tmp_path):
+    from tvhplayer import builtin_supervisor as module
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    supervisor = module.BuiltinSupervisor(tmp_path / 'tvheadend', tmp_path / 'server-config')
+    monkeypatch.setattr(supervisor, '_child_alive', lambda: True)
+    supervisor._status = 'running'
+    accepted = True
+    monkeypatch.setattr(module, 'set_recordings_dir', lambda *_a: accepted)
+    first, second = tmp_path / 'first', tmp_path / 'second'
+    first.mkdir()
+    second.mkdir()
+    try:
+        window.builtin = supervisor
+        window.set_local_recording_dir(str(first))
+        dialog = window.show_settings()
+        monkeypatch.setattr(ui.QFileDialog, 'getExistingDirectory', lambda *_a: str(second))
+        accepted = False
+        dialog._choose_folder()
+        assert dialog.folder_edit.text() == str(second)
+        assert window.config_store.load()['local_recording_dir'] == str(second)
+        assert supervisor.recordings_dir == str(second)
+        assert supervisor.applied_recordings_dir == str(first)
+        assert 'has not accepted' in dialog.folder_status.text()
+        accepted = True
+        assert supervisor.set_recordings_dir(str(second))
+        assert supervisor.applied_recordings_dir == str(second)
+        assert dialog.folder_status.text() == ''
+    finally:
+        window.builtin = None
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('stale', ['deleted', 'access_revoked'])
+def test_flatpak_stale_saved_folder_is_replaced_before_server_recording(monkeypatch, tmp_path, stale):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    old, replacement = tmp_path / 'old', tmp_path / 'replacement'
+    old.mkdir()
+    replacement.mkdir()
+    monkeypatch.setattr(ui, 'in_flatpak', lambda: True)
+    monkeypatch.setattr(ui, 'is_builtin_server', lambda _server: True)
+    window.current_server = lambda: {}
+    calls, prompts = [], []
+    try:
+        assert window.set_local_recording_dir(str(old))
+        if stale == 'deleted':
+            old.rmdir()
+        else:
+            validate = ui.validate_recording_folder
+
+            def revoked(folder, **kwargs):
+                if folder == str(old):
+                    raise PermissionError('Portal access was revoked')
+                return validate(folder, **kwargs)
+
+            monkeypatch.setattr(ui, 'validate_recording_folder', revoked)
+
+        dialog = window.show_settings()
+        assert 'Cannot save recordings here:' in dialog.folder_status.text()
+
+        class Box(ui.QMessageBox):
+            def exec(self):
+                prompts.append(self.text())
+
+            def clickedButton(self):
+                return self.defaultButton()
+
+        monkeypatch.setattr(ui, 'QMessageBox', Box)
+        monkeypatch.setattr(ui.QFileDialog, 'getExistingDirectory', lambda *_a: str(replacement))
+        window.builtin = types.SimpleNamespace(set_recordings_dir=lambda folder: calls.append(folder) or True)
+        assert window.server_recordings_ready()
+        assert prompts and str(old) in prompts[0]
+        assert calls and all(folder == str(replacement) for folder in calls)
+        assert window.config_store.load()['local_recording_dir'] == str(replacement)
+        assert dialog.folder_edit.text() == str(replacement)
+        assert dialog.folder_status.text() == ''
+        if stale == 'deleted':
+            assert not old.exists()
+    finally:
+        window.builtin = None
+        window.close()
+        app.processEvents()
 
 
 def test_flatpak_asks_for_the_recordings_folder_once(monkeypatch, tmp_path):
@@ -4378,6 +4523,57 @@ def _dvr_entry(category, htsp_id):
     )
 
 
+def test_recording_indicator_follows_task_refreshes(monkeypatch, tmp_path):
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        pane = window.tasks_pane
+        pane.update_timer.stop()
+        badge = window.recording_indicator
+
+        def refresh(entries, error=None):
+            pane._on_server_fetched(pane._generation, entries, error)
+
+        refresh([_dvr_entry('recording', 1), _dvr_entry('recording', 2)])
+        assert window.is_recording
+        assert badge.count() == 2
+        assert not badge.isHidden()
+        assert badge.dot.is_pulsing()
+
+        pane.search_box.setText('no matching task')
+        assert window.is_recording
+        refresh([], RuntimeError('offline'))
+        assert window.is_recording
+        assert badge.count() == 2
+
+        refresh([_dvr_entry('finished', 1), _dvr_entry('recording', 2)])
+        assert window.is_recording
+        assert badge.count() == 1
+        refresh([_dvr_entry('finished', 1), _dvr_entry('upcoming', 3)])
+        assert not window.is_recording
+        assert badge.count() == 0
+        assert badge.isHidden()
+        assert not badge.dot.is_pulsing()
+        assert badge.accessibleName() == 'Not recording'
+
+        job = types.SimpleNamespace(
+            recorder=types.SimpleNamespace(), is_running=True,
+            channel=ui.Channel(uuid='local', name='Local'), end=None,
+        )
+        window.local_jobs.append(job)
+        pane.refresh(server=False)
+        assert window.is_recording
+        refresh([])
+        assert window.is_recording
+        job.is_running = False
+        pane.refresh(server=False)
+        assert not window.is_recording
+        assert badge.isHidden()
+        window.local_jobs.remove(job)
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_tasks_stay_hidden_when_the_server_starts_with_only_completed_recordings(monkeypatch, tmp_path):
     # The built-in server is not ready on the first refresh, so the pane sees no
     # recordings; its first real answer lists old recordings, which are not new.
@@ -4548,6 +4744,58 @@ def test_finished_buffer_recording_is_finalized_by_monitor(monkeypatch, tmp_path
             assert 'Cannot write recording' in errors[0]
         window.check_recording_status()
         assert len(errors) == int(failed)
+    finally:
+        window.close()
+        app.processEvents()
+def test_windows_backend_setup_requires_explicit_install_click(tmp_path, monkeypatch):
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QProcess
+    from tvhplayer.windows_backend_setup import WindowsBackendSetup
+    from tvhplayer.wslc_builtin_supervisor import WslcBuiltinSupervisor
+    from tvhplayer.core.windows_wslc import WslcPrerequisiteError
+    app = QApplication.instance() or QApplication([])
+    calls = []
+    monkeypatch.setattr(QProcess, 'start', lambda self, program, args: calls.append((program, args)))
+    monkeypatch.setattr('tvhplayer.windows_backend_setup.shutil.which', lambda name: 'powershell.exe')
+    supervisor = WslcBuiltinSupervisor(tmp_path / 'config', tmp_path / 'bundle')
+    supervisor.setup_issue = WslcPrerequisiteError('WSL is missing')
+    dialog = WindowsBackendSetup(supervisor)
+    assert calls == [] and not dialog.resume_file.exists()
+    assert not dialog.isModal()
+    dialog.install.click()
+    assert len(calls) == 1 and '--no-distribution' in calls[0][1][-1]
+    assert '-Verb RunAs' in calls[0][1][-1]
+    assert json.loads(dialog.resume_file.read_text())['stage'] == 'installing'
+    dialog._installed(3010, QProcess.ExitStatus.NormalExit)
+    assert 'restart' in dialog.message.text().lower()
+    assert json.loads(dialog.resume_file.read_text())['stage'] == 'restart_or_retry'
+    dialog.reject()
+    app.processEvents()
+def test_cancelling_backend_start_disconnects_queued_actions(monkeypatch, tmp_path):
+    from PyQt6.QtCore import QObject, pyqtSignal
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    class Supervisor(QObject):
+        ready = pyqtSignal(int, int)
+        failed = pyqtSignal(str)
+        status_changed = pyqtSignal(str)
+        available = True
+        username = password = ''
+        def is_running(self):
+            return False
+        def start(self):
+            self.status_changed.emit('stopped')
+        def shut_down(self):
+            pass
+    supervisor = Supervisor()
+    window.builtin = supervisor
+    window.servers = [{'builtin': True, 'url': ''}]
+    ready, failed = [], []
+    try:
+        window.ensure_server_ready(window.servers[0], ready.append, failed.append)
+        assert failed and 'cancelled' in failed[0]
+        supervisor.ready.emit(24111, 24112)
+        assert ready == []
     finally:
         window.close()
         app.processEvents()
