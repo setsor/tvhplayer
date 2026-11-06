@@ -1,4 +1,4 @@
-from tvhplayer.core.models import Channel, DvrEntry, ServerConfig, recordings_to_stop
+from tvhplayer.core.models import Channel, DvrEntry, ServerConfig, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel
 
 
 def test_new_server_defaults_to_htsp_and_old_saved_server_keeps_http():
@@ -92,3 +92,18 @@ def test_recordings_to_stop_keeps_other_jobs_when_several_are_running():
     assert recordings_to_stop([first, second], Channel(uuid='b', name='BBC')) == [second]
     assert recordings_to_stop([first, second], None) == []
     assert recordings_to_stop([first, second], Channel(uuid='c', name='Other')) == []
+
+
+def test_quick_record_selection_never_includes_epg_schedule_on_same_channel():
+    channel = Channel(uuid='warner', name='Warner TV HD')
+    quick = _running('quick', 'Warner TV HD', 'warner')
+    quick.raw['comment'] = QUICK_RECORD_COMMENT
+    scheduled = _running('scheduled', 'Warner TV HD', 'warner')
+    scheduled.raw['comment'] = 'Scheduled via TVHplayer'
+    unrelated = _running('other', 'Elsewhere', 'elsewhere')
+    unrelated.raw['comment'] = QUICK_RECORD_COMMENT
+
+    assert quick_recordings_for_channel([scheduled, quick, unrelated], channel) == [quick]
+    assert quick_recordings_for_channel([scheduled], channel) == []
+    assert quick_recordings_for_channel([quick], None) == []
+    assert quick_recordings_for_channel([quick, quick], channel) == [quick, quick]

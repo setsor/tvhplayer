@@ -1,9 +1,9 @@
-name: TVHplayer 4.6.0 - macOS Ventura Intel
+name: TVHplayer 4.6.2 - macOS Ventura Intel
 
 on:
   push:
     branches:
-      - integration/upstream-4.6.0-20261106
+      - main
     paths:
       - 'tvhplayer/**'
       - 'icons/**'
@@ -31,22 +31,23 @@ jobs:
       - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - name: Verify both histories, 4.6.0 source and Python syntax
+      - name: Verify both histories, 4.6.2 source and Python syntax
         run: |
           set -euo pipefail
           git merge-base --is-ancestor 4391ce35b2b0a7d75d0542a611d8895ae84bb7e6 HEAD
+          git merge-base --is-ancestor 41219209b4b1ea66da3532ffd89989410c0e776e HEAD
           git merge-base --is-ancestor db80e224aacf6b3c58c8f1ee21cad73af4abe6f4 HEAD
           python3 -m compileall -q tvhplayer tests
           python3 - <<'PY'
           from pathlib import Path
           src = Path('tvhplayer/tvhplayer.py').read_text()
-          assert 'version="4.6.0"' in Path('setup.py').read_text()
+          assert 'version="4.6.2"' in Path('setup.py').read_text()
           assert 'def _recording_count_changed(self, count)' in src
           assert 'recordings_changed.connect(self._recording_count_changed)' in src
           assert "self._request_dvr_operation('stop_channel', channel=channel)" in src
           assert 'class ProgrammeOverlay(QFrame):' in src and 'DURATION_MS = 5000' in src and 'def _start_programme_overlay(self):' in src
           assert Path('tvhplayer/core/subtitle_preferences.py').exists()
-          print('PASS: upstream 4.6.0 and validated Ventura customizations')
+          print('PASS: upstream 4.6.2 and validated Ventura customizations')
           PY
   build:
     needs: preflight
@@ -56,7 +57,7 @@ jobs:
       run:
         shell: bash -el {0}
     steps:
-      - name: Checkout official upstream 4.6.0
+      - name: Checkout official upstream 4.6.2
         uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
@@ -64,12 +65,12 @@ jobs:
       - name: Verify Ventura-specific changes are allowlisted
         run: |
           set -euo pipefail
-          base=4391ce35b2b0a7d75d0542a611d8895ae84bb7e6
+          base=41219209b4b1ea66da3532ffd89989410c0e776e
           git cat-file -e "$base^{commit}"
           git diff --name-only "$base" HEAD
-          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4\.5\.0\.yml|\.github/workflows/ventura-intel-4\.6\.0\.yml|TODO\.md|macos/audit-native-minos\.py|macos/smoke_libmpv\.py|tests/test_channel_view\.py|tests/test_guide_view\.py|tests/test_macos_gl_format\.py|tests/test_pyqt6_ui\.py|tests/test_subtitle_preferences\.py|tvhplayer/channel_view\.py|tvhplayer/core/models\.py|tvhplayer/core/mpv_player\.py|tvhplayer/core/subtitle_preferences\.py|tvhplayer/guide_view\.py|tvhplayer/player_bar\.py|tvhplayer/tvhplayer\.py|tvhplayer/video_widget\.py)$' || true)
+          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4\.5\.0\.yml|\.github/workflows/ventura-intel-4\.6\.0\.yml|TODO\.md|macos/audit-native-minos\.py|macos/smoke_libmpv\.py|tests/test_channel_view\.py|tests/test_guide_view\.py|tests/test_macos_gl_format\.py|tests/test_pyqt6_ui\.py|tests/test_subtitle_preferences\.py|tvhplayer/channel_view\.py|tvhplayer/core/models\.py|tvhplayer/core/mpv_player\.py|tvhplayer/core/subtitle_preferences\.py|tvhplayer/guide_view\.py|tvhplayer/player_bar\.py|tvhplayer/tvhplayer\.py|tvhplayer/video_widget\.py|tests/test_models\.py|tests/test_dvr_api\.py|tvhplayer/core/backend\.py|tvhplayer/core/http_backend\.py|tvhplayer/core/htsp_backend\.py)$' || true)
           if [[ -n "$bad" ]]; then echo "ERROR: source changed: $bad"; exit 1; fi
-          grep -q 'version="4.6.0"' setup.py
+          grep -q 'version="4.6.2"' setup.py
           echo 'PASS: source changes and Ventura packaging are allowlisted'
       - name: Install macOS 13-compatible conda native mpv and FFmpeg
         uses: mamba-org/setup-micromamba@v3.2.1
@@ -218,9 +219,9 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m compileall -q tvhplayer
           "$RUNNER_TEMP/venv/bin/python" - <<'PY'
           from pathlib import Path
-          assert 'version="4.6.0"' in Path("setup.py").read_text()
+          assert 'version="4.6.2"' in Path("setup.py").read_text()
           assert Path("tvhplayer/core/chromecast.py").exists()
-          print("Upstream 4.6.0 sources confirmed")
+          print("Upstream 4.6.2 sources confirmed")
           PY
           # Upstream UI tests include Linux shortcut expectations and a Cast fixture without a server.
           # Keep existing upstream tests; omit only the three unrelated platform/fixture cases.
@@ -249,7 +250,7 @@ jobs:
           print('Only packaging script patched in temporary build workspace')
           PY
           test -z "$(git diff --name-only HEAD -- tvhplayer)"
-      - name: Build TVHplayer 4.6.0 for Ventura 13 Intel
+      - name: Build TVHplayer 4.6.2 for Ventura 13 Intel
         env:
           TVHPLAYER_APP_NAME: TVHplayer
           TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer
@@ -339,17 +340,17 @@ jobs:
           fi
           # The installed app and executable are simply TVHplayer.
           # Only the downloadable DMG carries version and target architecture.
-          mv macos/dist/TVHplayer.dmg macos/dist/TVHplayer-4.6.0-macOS13-Intel.dmg
-          (cd macos/dist && shasum -a 256 "TVHplayer-4.6.0-macOS13-Intel.dmg" > "TVHplayer-4.6.0-macOS13-Intel.dmg.sha256")
-          ls -lh macos/dist/TVHplayer-4.6.0-macOS13-Intel.dmg
-          (cd macos/dist && shasum -a 256 -c "TVHplayer-4.6.0-macOS13-Intel.dmg.sha256")
+          mv macos/dist/TVHplayer.dmg macos/dist/TVHplayer-4.6.2-macOS13-Intel.dmg
+          (cd macos/dist && shasum -a 256 "TVHplayer-4.6.2-macOS13-Intel.dmg" > "TVHplayer-4.6.2-macOS13-Intel.dmg.sha256")
+          ls -lh macos/dist/TVHplayer-4.6.2-macOS13-Intel.dmg
+          (cd macos/dist && shasum -a 256 -c "TVHplayer-4.6.2-macOS13-Intel.dmg.sha256")
 
       - name: Publish verified Intel DMG
         uses: actions/upload-artifact@v7.0.2
         with:
-          name: TVHplayer-4.6.0-macOS13-Intel-DMG
+          name: TVHplayer-4.6.2-macOS13-Intel-DMG
           path: |
-            macos/dist/TVHplayer-4.6.0-macOS13-Intel.dmg
-            macos/dist/TVHplayer-4.6.0-macOS13-Intel.dmg.sha256
+            macos/dist/TVHplayer-4.6.2-macOS13-Intel.dmg
+            macos/dist/TVHplayer-4.6.2-macOS13-Intel.dmg.sha256
           if-no-files-found: error
           retention-days: 14

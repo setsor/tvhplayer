@@ -57,7 +57,7 @@ try:
     from .core.dvr import instant_recording_title
     from .core.errors import TvhAuthError, TvhError
     from .core.server_log import ServerLogFeed
-    from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop
+    from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel
     from .core.urls import http_base_url
     from .core.recorder import DEFAULT_FORMAT, STALL_LIMIT, LocalRecorder, free_path, parse_ffmpeg_options
     from .core import convert
@@ -161,7 +161,7 @@ except ImportError:
     from core.dvr import instant_recording_title
     from core.errors import TvhAuthError, TvhError
     from core.server_log import ServerLogFeed
-    from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop
+    from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel
     from core.urls import http_base_url
     from core.recorder import DEFAULT_FORMAT, STALL_LIMIT, LocalRecorder, free_path, parse_ffmpeg_options
     from core import convert
@@ -286,7 +286,7 @@ import logging
 import platform
 
 # Shown in About; the release notes in the metainfo file give the same version.
-APP_VERSION = "4.6.0"
+APP_VERSION = "4.6.2"
 UPDATE_CHECK_DELAY_MS = 10_000
 CHANNEL_RELOAD_SECONDS = 30
 # A reload of a big list freezes the window a while: space them by a second per this many channels.
@@ -797,13 +797,16 @@ class DvrOperation(QObject):
                 entries = backend.list_dvr_entries()
                 running = [entry for entry in entries if entry.category() == 'recording']
                 result['running_count'] = len(running)
-                # Never stop an unrelated recording just because it is the only one.
-                targets = [
-                    entry for entry in running
-                    if self.channel is not None and entry.matches_channel(self.channel)
-                ]
-                for target in targets:
-                    print(f"Debug: DVR stop RPC: {target.title!r} on {target.channel_name!r}")
+                result['matching_count'] = sum(
+                    entry.matches_channel(self.channel) for entry in running
+                ) if self.channel is not None else 0
+                targets = quick_recordings_for_channel(running, self.channel)
+                result['quick_count'] = len(targets)
+                # Stop exactly one Quick Record. Ambiguity is resolved in Tasks,
+                # never by stopping every recording of the same channel.
+                if len(targets) == 1:
+                    target = targets[0]
+                    print(f"Debug: Quick DVR stop RPC: {target.title!r} on {target.channel_name!r}")
                     backend.stop_dvr_entry(target)
                     result['targets'].append(target)
             elif self.mode in ('stop_entry', 'cancel_entry'):
@@ -5880,7 +5883,9 @@ class TVHeadendClient(QMainWindow):
             event = duration_dialog.programme_event()
             if event is not None:
                 # The server records the programme and stops when it ends.
-                self.get_backend().create_dvr_entry_by_event(event.event_id)
+                self.get_backend().create_dvr_entry_by_event(
+                    event.event_id, comment=QUICK_RECORD_COMMENT
+                )
                 until = datetime.fromtimestamp(event.stop).strftime('%H:%M')
                 self.statusbar.showMessage(
                     f"Recording started for: {channel.name} ({event.title}, until {until})"
@@ -5895,7 +5900,7 @@ class TVHeadendClient(QMainWindow):
                     now + duration,
                     title=instant_recording_title(channel.name, datetime.fromtimestamp(now)),
                     description='Recorded via TVHplayer',
-                    comment='Instant recording via TVHplayer',
+                    comment=QUICK_RECORD_COMMENT,
                 )
                 duration_minutes = duration // 60
                 self.statusbar.showMessage(
@@ -5997,13 +6002,10 @@ class TVHeadendClient(QMainWindow):
         self._sync_timeshift()
 
     def _server_recordings_for(self, channel):
-        """Running server recordings of channel."""
-        if channel is None:
-            return []
-        return [
-            entry for entry in getattr(self, '_dvr_entries', None) or []
-            if entry.category() == 'recording' and entry.matches_channel(channel)
-        ]
+        """The player controls only Quick Record jobs; scheduled DVR stays in Tasks."""
+        return quick_recordings_for_channel(
+            getattr(self, '_dvr_entries', None) or [], channel
+        )
 
     def _sync_record_controls(self):
         """Show Stop recording only while the active channel records.
@@ -7631,12 +7633,18 @@ class TVHeadendClient(QMainWindow):
                 )
                 self._show_on_picture("Recording stop acknowledged")
         else:
-            if result.get('running_count', 0) > 1:
+            if result.get('quick_count', 0) > 1:
                 self.statusbar.showMessage(
-                    "No matching recording; select the channel to stop"
+                    "Multiple Quick Records on this channel; stop one in Tasks"
                 )
+            elif result.get('matching_count', 0):
+                self.statusbar.showMessage(
+                    "No Quick Record on this channel; scheduled recordings stay in Tasks"
+                )
+            elif result.get('running_count', 0):
+                self.statusbar.showMessage("No Quick Record on the playing channel")
             else:
-                self.statusbar.showMessage("No active recordings to stop")
+                self.statusbar.showMessage("No active Quick Record to stop")
         # Refresh via Tasks' independent background connection. Do not call
         # sync_recording_indicator(): it performs a synchronous server RPC.
         self._refresh_tasks()
@@ -7645,7 +7653,7 @@ class TVHeadendClient(QMainWindow):
         self._sync_record_controls()
 
     def stop_recording(self):
-        """Stop the playing channel's server recording, never an unrelated DVR entry."""
+        """Stop the playing channel's Quick Record only; preserve EPG schedules."""
         channel = self.active_channel()
         if channel is not None:
             self._request_dvr_operation('stop_channel', channel=channel)

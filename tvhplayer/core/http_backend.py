@@ -248,10 +248,12 @@ class HttpBackend(TvhBackend):
     def list_removed_dvr_entries(self) -> List[DvrEntry]:
         return [parse_dvr_entry(raw) for raw in self._grid('api/dvr/entry/grid_removed')]
 
-    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '') -> str:
+    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '', comment: str = '') -> str:
         data = {'event_id': int(event_id)}
         if config_uuid:
             data['config_uuid'] = config_uuid
+        if comment:
+            data['comment'] = comment
         return response_id(self._post_form('dvr/entry/create_by_event', data))
 
     def list_autorec_entries(self) -> List[AutorecEntry]:
