@@ -537,7 +537,8 @@ class PlayerBar(QWidget):
         self.live_btn.setText(f"−{_clock(behind)}" if behind > 0 else "LIVE")
         self.live_btn.setEnabled(behind > 0)
 
-    def set_recording(self, server, local, channel_name='', local_here=None, playing=False):
+    def set_recording(self, server, local, channel_name='', local_here=None, playing=False,
+                      server_quick_count=0):
         """Record and Stop belong only to the channel currently playing here.
 
         ``local_here`` identifies a local recording of this channel.
@@ -550,6 +551,10 @@ class PlayerBar(QWidget):
         self.stop_record_btn.setEnabled(bool(playing) and recording)
         self.record_more_btn.setEnabled(bool(playing) and recording)
         both = self._server and self._local
+        multiple_quick = server_quick_count > 1
+        self.stop_record_btn.setText(
+            " Manage…" if multiple_quick and not local_here else " Stop recording"
+        )
         if both:
             self.stop_record_btn.setToolTip("Stop recording… (asks which)")
             describe(
@@ -558,8 +563,14 @@ class PlayerBar(QWidget):
                 "Recording on the server and on this computer. Asks which to stop.",
             )
         elif self._server:
-            self.stop_record_btn.setToolTip(keys_text("Stop the server recording (Ctrl+E)"))
-            describe(self.stop_record_btn, "Stop recording", "Stop the recording on the server. Keyboard: Ctrl+E.")
+            if multiple_quick:
+                self.stop_record_btn.setToolTip("Choose a Quick Record in Tasks")
+                describe(self.stop_record_btn, "Manage recordings",
+                         "Choose which Quick Record to stop in Tasks.")
+            else:
+                self.stop_record_btn.setToolTip(keys_text("Stop the server recording (Ctrl+E)"))
+                describe(self.stop_record_btn, "Stop recording",
+                         "Stop the recording on the server. Keyboard: Ctrl+E.")
         else:
             self.stop_record_btn.setToolTip(keys_text("Stop the recording on this computer (Ctrl+Shift+E)"))
             describe(

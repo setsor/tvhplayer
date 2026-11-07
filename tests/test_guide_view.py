@@ -24,6 +24,10 @@ class _Backend:
         self.events = events
         self.queries = []
         self.calls = []
+        self.entries = []
+
+    def list_dvr_entries(self):
+        return list(self.entries)
 
     def query_epg(self, query):
         self.queries.append(query)
