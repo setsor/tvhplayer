@@ -24,6 +24,10 @@ class _Backend:
         self.events = events
         self.queries = []
         self.calls = []
+        self.entries = []
+
+    def list_dvr_entries(self):
+        return list(self.entries)
 
     def query_epg(self, query):
         self.queries.append(query)
@@ -277,4 +281,66 @@ def test_guide_description_scrolls_and_survives_periodic_refresh(monkeypatch):
         window.shutdown()
         window.close()
         window.deleteLater()
+        app.processEvents()
+
+
+def test_tv_guide_does_not_duplicate_an_active_manual_quick_record(monkeypatch):
+    import time
+    from tvhplayer.core.models import Channel, DvrEntry, EpgEvent
+    import tvhplayer.guide_view as guide_view
+
+    app = _app()
+    now = int(time.time())
+    channel = Channel(uuid='one', name='One', number=1)
+    event = EpgEvent(event_id=101, start=now - 300, stop=now + 1800,
+                     title='Current show', channel_uuid='one')
+    backend = _Backend([event])
+    quick = DvrEntry(
+        uuid='quick', title='One 2026-11-07 11:00', channel_name='One',
+        start=now - 200, duration=900, status='Running',
+        sched_status='recording',
+        raw={'channel': 'one', 'stop': now + 700,
+             'comment': 'Instant recording via TVHplayer'},
+    )
+    backend.entries = [quick]
+    monkeypatch.setattr(guide_view, 'create_backend', lambda server: backend)
+    host = _Host([channel], [], backend)
+    host._dvr_entries = [quick]
+    guide = guide_view.GuideWindow(host)
+    try:
+        guide.toggle_recording(channel, event)
+        assert not any(action == 'create' for action, _ in backend.calls)
+        assert 'Quick Record already active' in host.statusbar.messages[-1]
+    finally:
+        guide.shutdown()
+        guide.deleteLater()
+        app.processEvents()
+
+
+def test_tv_guide_allows_distinct_epg_event_on_same_channel(monkeypatch):
+    import time
+    from tvhplayer.core.models import Channel, DvrEntry, EpgEvent
+    import tvhplayer.guide_view as guide_view
+
+    app = _app()
+    now = int(time.time())
+    channel = Channel(uuid='one', name='One', number=1)
+    event = EpgEvent(event_id=102, start=now + 1800, stop=now + 3600,
+                     title='Next programme', channel_uuid='one')
+    backend = _Backend([event])
+    backend.entries = [DvrEntry(
+        uuid='old', title='Current show', channel_name='One',
+        start=now - 300, duration=3600, status='Running',
+        sched_status='recording',
+        raw={'channel': 'one', 'broadcast': 101, 'stop': now + 3300},
+    )]
+    monkeypatch.setattr(guide_view, 'create_backend', lambda server: backend)
+    host = _Host([channel], [], backend)
+    guide = guide_view.GuideWindow(host)
+    try:
+        guide.toggle_recording(channel, event)
+        assert ('create', 102) in backend.calls
+    finally:
+        guide.shutdown()
+        guide.deleteLater()
         app.processEvents()

@@ -4873,3 +4873,129 @@ def test_player_stop_only_stops_quick_record_not_scheduled_on_same_channel(monke
     finally:
         window.close()
         app.processEvents()
+
+
+def test_quick_record_cannot_duplicate_same_epg_programme(monkeypatch, tmp_path):
+    """Every Quick Record entry point uses the live server DVR list."""
+    import time
+    from tvhplayer.core.models import Channel, DvrEntry, EpgEvent
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    now = int(time.time())
+    channel = Channel(uuid='one', name='One')
+    event = EpgEvent(event_id=40, start=now - 300, stop=now + 1200,
+                     channel_uuid='one', title='Current show')
+    existing = DvrEntry(
+        uuid='scheduled', title='Current show', channel_name='One',
+        start=event.start - 30, duration=event.stop - event.start + 30,
+        sched_status='recording', status='Running',
+        raw={'channel': 'one', 'broadcast': 40, 'stop': event.stop},
+    )
+    class Backend:
+        def __init__(self):
+            self.entries = [existing]
+            self.creates = []
+        def list_dvr_entries(self):
+            return list(self.entries)
+        def create_dvr_entry_by_event(self, *args, **kwargs):
+            self.creates.append((args, kwargs))
+    backend = Backend()
+    class Duration:
+        def __init__(self, _parent, _channel, _event):
+            pass
+        def exec(self):
+            return ui.QDialog.DialogCode.Accepted
+        def programme_event(self):
+            return event
+        def get_duration(self):
+            return 600
+    monkeypatch.setattr(ui, 'RecordingDurationDialog', Duration)
+    window.get_backend = lambda: backend
+    window.server_recordings_ready = lambda: True
+    window._programme_on_now = lambda _channel: event
+    try:
+        window.start_recording(channel)
+        assert backend.creates == []
+        assert 'already' in window.status_label.text().lower()
+
+        # A timer for a different event on this channel does not block Quick.
+        existing.raw['broadcast'] = 39
+        existing.title = 'Previous show'
+        window.start_recording(channel)
+        assert len(backend.creates) == 1
+        assert backend.creates[0][0] == (40,)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_duplicate_quick_and_scheduled_are_prevented_from_channel_epg(monkeypatch, tmp_path):
+    import time
+    from tvhplayer.core.models import Channel, DvrEntry, EpgEvent
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    now = int(time.time())
+    channel = Channel(uuid='one', name='One')
+    event = EpgEvent(event_id=40, start=now - 300, stop=now + 1200,
+                     channel_uuid='one', title='Current show')
+    quick = DvrEntry(
+        uuid='quick', title='One 2026-11-07 11:00', channel_name='One',
+        start=now - 250, duration=600, sched_status='recording', status='Running',
+        raw={'channel': 'one', 'comment': 'Instant recording via TVHplayer',
+             'stop': now + 350},
+    )
+    class Backend:
+        def __init__(self):
+            self.entries = [quick]
+            self.creates, self.updates = [], []
+        def list_dvr_entries(self):
+            return list(self.entries)
+        def create_dvr_entry(self, *args, **kwargs):
+            self.creates.append((args, kwargs))
+        def update_dvr_entry(self, entry, update):
+            self.updates.append((entry.uuid, update.stop))
+    backend = Backend()
+    monkeypatch.setattr(ui.QMessageBox, 'question',
+                        lambda *a, **kw: ui.QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(ui.QMessageBox, 'information', lambda *a, **kw: None)
+    dialog = ui.EPGDialog(channel, [], backend, window)
+    try:
+        dialog.schedule_recording(event)
+        assert backend.creates == []
+        assert backend.updates == [('quick', event.stop)]
+    finally:
+        dialog.close()
+        window.close()
+        app.processEvents()
+
+
+def test_multiple_quick_recordings_open_tasks_instead_of_stopping_all(monkeypatch, tmp_path):
+    import time
+    from tvhplayer.core.models import Channel, DvrEntry, QUICK_RECORD_COMMENT
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    channel = Channel(uuid='one', name='One')
+    now = int(time.time())
+    entries = [
+        DvrEntry(
+            uuid=str(i), title=f'Quick {i}', channel_name='One', start=now - 60,
+            duration=600, status='Running', sched_status='recording',
+            raw={'channel': 'one', 'comment': QUICK_RECORD_COMMENT},
+        ) for i in range(2)
+    ]
+    try:
+        window.show()
+        app.processEvents()
+        window._playback_channel = channel
+        window._protect_video_surface(True)
+        window.channel_recordings_changed(entries)
+        assert window.stop_record_btn.isVisible()
+        assert window.stop_record_btn.text().strip() == 'Manage…'
+        requests = []
+        window._request_dvr_operation = lambda *a, **kw: requests.append(a)
+        window.stop_record_btn.click()
+        assert not requests
+        assert window.tasks_pane.isVisible()
+    finally:
+        window.close()
+        app.processEvents()

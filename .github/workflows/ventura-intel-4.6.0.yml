@@ -68,7 +68,7 @@ jobs:
           base=41219209b4b1ea66da3532ffd89989410c0e776e
           git cat-file -e "$base^{commit}"
           git diff --name-only "$base" HEAD
-          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4\.5\.0\.yml|\.github/workflows/ventura-intel-4\.6\.0\.yml|TODO\.md|macos/audit-native-minos\.py|macos/smoke_libmpv\.py|tests/test_channel_view\.py|tests/test_guide_view\.py|tests/test_macos_gl_format\.py|tests/test_pyqt6_ui\.py|tests/test_subtitle_preferences\.py|tvhplayer/channel_view\.py|tvhplayer/core/models\.py|tvhplayer/core/mpv_player\.py|tvhplayer/core/subtitle_preferences\.py|tvhplayer/guide_view\.py|tvhplayer/player_bar\.py|tvhplayer/tvhplayer\.py|tvhplayer/video_widget\.py|tests/test_models\.py|tests/test_dvr_api\.py|tvhplayer/core/backend\.py|tvhplayer/core/http_backend\.py|tvhplayer/core/htsp_backend\.py)$' || true)
+          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4\.5\.0\.yml|\.github/workflows/ventura-intel-4\.6\.0\.yml|TODO\.md|macos/audit-native-minos\.py|macos/smoke_libmpv\.py|tests/test_channel_view\.py|tests/test_guide_view\.py|tests/test_macos_gl_format\.py|tests/test_pyqt6_ui\.py|tests/test_subtitle_preferences\.py|tvhplayer/channel_view\.py|tvhplayer/core/models\.py|tvhplayer/core/mpv_player\.py|tvhplayer/core/subtitle_preferences\.py|tvhplayer/guide_view\.py|tvhplayer/player_bar\.py|tvhplayer/tvhplayer\.py|tvhplayer/video_widget\.py|tests/test_models\.py|tests/test_dvr_api\.py|tvhplayer/core/backend\.py|tvhplayer/core/http_backend\.py|tvhplayer/core/htsp_backend\.py|tvhplayer/core/dvr_conflicts\.py|tests/test_dvr_conflicts\.py|docs/dvr-recording-identity\.md)$' || true)
           if [[ -n "$bad" ]]; then echo "ERROR: source changed: $bad"; exit 1; fi
           grep -q 'version="4.6.2"' setup.py
           echo 'PASS: source changes and Ventura packaging are allowlisted'
@@ -226,7 +226,7 @@ jobs:
           # Upstream UI tests include Linux shortcut expectations and a Cast fixture without a server.
           # Keep existing upstream tests; omit only the three unrelated platform/fixture cases.
           QT_QPA_PLATFORM=offscreen "$RUNNER_TEMP/venv/bin/python" -m pytest -q \
-            tests/test_config.py tests/test_mpv_player.py tests/test_pyqt6_ui.py tests/test_guide_view.py tests/test_macos_gl_format.py tests/test_subtitle_preferences.py tests/test_recording_folder.py tests/test_builtin_server.py \
+            tests/test_config.py tests/test_mpv_player.py tests/test_pyqt6_ui.py tests/test_guide_view.py tests/test_dvr_conflicts.py tests/test_macos_gl_format.py tests/test_subtitle_preferences.py tests/test_recording_folder.py tests/test_builtin_server.py \
             -k 'not test_video_context_menu_and_double_click and not test_accessibility_names_keyboard_and_contrast and not test_player_bar_casts_the_selected_channel_and_routes_audio'
 
       - name: Adapt only packaging script for Ventura native libraries
