@@ -19,7 +19,7 @@ from PyQt6.QtCore import QObject, QLockFile, pyqtSignal
 try:
     from .core.builtin_server import (ensure_superuser, initial_ports, serverinfo_ok,
                                      apply_builtin_defaults, apply_hdhomerun_transport,
-                                     set_padding, pick_port_pair, use_guest_ffmpeg)
+                                     set_padding, pick_port_pair, use_guest_ffmpeg, defaults_verdict, htsp_ready)
     from .core.windows_backend_paths import bind_mount
     from .core.logs import sanitize, SERVER_LOGGER
     from .core.hdhomerun import probe_host_device, pick_udp_base, plan_transport
@@ -27,7 +27,7 @@ try:
 except ImportError:  # PyInstaller/source script imports
     from core.builtin_server import (ensure_superuser, initial_ports, serverinfo_ok,
                                     apply_builtin_defaults, apply_hdhomerun_transport,
-                                    set_padding, pick_port_pair, use_guest_ffmpeg)
+                                    set_padding, pick_port_pair, use_guest_ffmpeg, defaults_verdict, htsp_ready)
     from core.windows_backend_paths import bind_mount
     from core.logs import sanitize, SERVER_LOGGER
     from core.hdhomerun import probe_host_device, pick_udp_base, plan_transport
@@ -191,6 +191,8 @@ class WslcBuiltinSupervisor(QObject):
     ready = pyqtSignal(int, int)
     failed = pyqtSignal(str)
     log_output = pyqtSignal(str)
+    setup_progress = pyqtSignal(str)
+    recordings_dir_changed = pyqtSignal()
     _phase = pyqtSignal(str)
     _completed = pyqtSignal(str)
     _started = pyqtSignal()
@@ -217,6 +219,17 @@ class WslcBuiltinSupervisor(QObject):
         self._lock = None
         self.hdhomerun_transport = None
         self.setup_issue = None
+        self.last_error = ''
+        self.startup_warnings = []
+        self.applied_recordings_dir = None
+        self.runtime.progress = self._progress
+        try:
+            from .core.windows_prerequisites import pending_setup
+        except ImportError:
+            from core.windows_prerequisites import pending_setup
+        saved_setup = pending_setup(self.config_dir) or {}
+        self.disabled = saved_setup.get('stage') == 'disabled'
+        self.setup_checks = saved_setup.get('checks') or []
         self._phase.connect(self._set_status)
         self._completed.connect(self._finish)
         self._started.connect(self._on_ready)
@@ -255,10 +268,18 @@ class WslcBuiltinSupervisor(QObject):
         self._status = status
         self.status_changed.emit(status)
 
+    def _progress(self, message):
+        self.setup_progress.emit(message)
+        self._emit_log(message + '\n')
+
     def start(self):
-        if self._closing or self._thread is not None:
+        if self.disabled or self._closing or self._thread is not None:
             return
         self.setup_issue = None
+        self.last_error = ''
+        self.startup_warnings = []
+        self.setup_checks = []
+        self.runtime.setup_checks = []
         try:
             self.config_dir.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -271,12 +292,23 @@ class WslcBuiltinSupervisor(QObject):
             message = ('Could not write the backend lock file. Check the settings-folder permissions.'
                        if self._lock.error() == QLockFile.LockError.PermissionError
                        else 'Another TVHplayer is using the built-in backend.')
+            self.last_error = message
             self.failed.emit(message)
             return
         self._cancel.clear()
         self._set_status('starting')
         self._thread = threading.Thread(target=self._run, name='tvhplayer-wslc', daemon=True)
         self._thread.start()
+
+    def enable_and_check(self):
+        """Explicit user action after changing firmware or choosing to retry setup."""
+        try:
+            from .core.windows_prerequisites import save_setup
+        except ImportError:
+            from core.windows_prerequisites import save_setup
+        save_setup(self.config_dir, 'check_required', 'check')
+        self.disabled = False
+        self.start()
 
     def _run(self):
         owner = uuid.uuid4().hex
@@ -285,7 +317,18 @@ class WslcBuiltinSupervisor(QObject):
         error = ''
         record = self.config_dir / 'wslc-owner.json'
         try:
+            try:
+                from .core.windows_prerequisites import restart_still_required
+            except ImportError:
+                from core.windows_prerequisites import restart_still_required
+            if restart_still_required(self.config_dir):
+                raise WslcPrerequisiteError(
+                    'Restart Windows to finish built-in server setup, even if no reboot prompt appeared. '
+                    'Save your work, use Start > Power > Restart, then reopen TVHplayer. '
+                    'Restarting only the app does not complete setup.', 'reboot')
+            self._progress('Checking Windows support…')
             self.runtime.check()
+            self._progress('Protecting server settings…')
             protect_config(self.config_dir)
             # QLockFile ensures no second UI is using this config. A stale record
             # identifies only our previous randomly named, labelled container.
@@ -298,6 +341,7 @@ class WslcBuiltinSupervisor(QObject):
             if self._cancel.is_set():
                 return
             self.username, self.password = ensure_superuser(self.config_dir)
+            self._progress('Preparing server storage…')
             self.runtime.prepare_config(image, self.config_dir)
             if self._cancel.is_set():
                 return
@@ -310,8 +354,10 @@ class WslcBuiltinSupervisor(QObject):
             bind_mount(str(recordings), '/recordings')
             recordings.mkdir(parents=True, exist_ok=True)
             self.http_port, self.htsp_port = initial_ports(self.http_port, self.htsp_port)
+            self._progress('Checking tuner networking…')
             transport = self._plan_hdhomerun_transport()
             self._phase.emit('starting')
+            self._progress('Starting the server…')
             for attempt in range(3):
                 ports = (self.http_port, self.htsp_port)
                 udp_ports = self._udp_specs(transport)
@@ -334,19 +380,28 @@ class WslcBuiltinSupervisor(QObject):
                     name = 'tvhplayer-' + owner
                     self._emit_log('Server ports were in use; retrying with different ports.\n')
             deadline = time.monotonic() + 60
+            self._progress('Checking the server connection…')
             while not self._cancel.is_set():
                 self.runtime.verify_running(name, owner, ports, udp_ports)
                 if serverinfo_ok(self.http_port, username=self.username, password=self.password):
-                    with socket.create_connection(('127.0.0.1', self.htsp_port), timeout=1):
-                        pass
+                    if not htsp_ready(self.htsp_port, connect=socket.create_connection):
+                        if time.monotonic() >= deadline:
+                            raise WslcError('The server HTSP connection did not answer in time.')
+                        self._cancel.wait(.5)
+                        continue
+                    self._progress('Applying server settings…')
                     failures = apply_builtin_defaults(self.http_port, self.username, self.password,
                                                       '/recordings', self.padding)
                     if transport is not None and not apply_hdhomerun_transport(
                             self.http_port, transport.local_ip, transport.base_port,
                             self.username, self.password):
                         failures.append('HDHomeRun stream address')
-                    if failures:
-                        raise WslcError('Could not configure backend: ' + ', '.join(failures))
+                    fatal, self.startup_warnings = defaults_verdict(failures)
+                    if fatal:
+                        raise WslcError('Could not configure backend: ' + ', '.join(fatal))
+                    self.applied_recordings_dir = str(recordings) if 'recordings folder' not in failures else None
+                    if self.startup_warnings:
+                        self._emit_log('Some preferences could not be applied: ' + ', '.join(self.startup_warnings) + '\n')
                     if transport is not None:
                         self._emit_log(
                             f'HDHomeRun streaming configured: udp://{transport.local_ip}:'
@@ -356,6 +411,7 @@ class WslcBuiltinSupervisor(QObject):
                     if (previous_state.get('guest_ffmpeg') != GUEST_FFMPEG_MIGRATION
                             or previous_state.get('config_generation') != generation
                             or previous_state.get('image') != image):
+                        self._progress('Updating playlist commands…')
                         migrated = use_guest_ffmpeg(self.http_port, self.username, self.password, self._cancel)
                         if migrated < 0:
                             if self._cancel.is_set():
@@ -382,8 +438,30 @@ class WslcBuiltinSupervisor(QObject):
                     previous_log = current_log
         except Exception as exc:
             error = '' if self._cancel.is_set() else str(exc)
+            try:
+                from .core.windows_prerequisites import failed_checks
+            except ImportError:
+                from core.windows_prerequisites import failed_checks
+            action = getattr(exc, 'action', 'diagnose')
+            if action == 'diagnose' and any(word in str(exc).lower() for word in
+                                            ('offline backend', 'offline archive', 'checksum', 'bundle')):
+                action = 'image'
+            self.setup_checks = failed_checks(getattr(self.runtime, 'setup_checks', []), action)
             if isinstance(exc, WslcPrerequisiteError):
                 self.setup_issue = exc
+                if exc.action == 'bios':
+                    self.disabled = True
+                try:
+                    from .core.windows_prerequisites import pending_setup, save_setup
+                except ImportError:
+                    from core.windows_prerequisites import pending_setup, save_setup
+                try:
+                    if self.disabled:
+                        save_setup(self.config_dir, 'disabled', exc.action, self.setup_checks)
+                    elif not pending_setup(self.config_dir):
+                        save_setup(self.config_dir, 'check_required', exc.action)
+                except OSError:
+                    logging.getLogger(__name__).exception('Could not save built-in server setup progress')
             if launched and not self._cancel.is_set():
                 try:
                     self._emit_log(self.runtime.logs_owned(name, owner) + '\n')
@@ -446,9 +524,14 @@ class WslcBuiltinSupervisor(QObject):
         if self._cancel.is_set() or self._closing:
             return
         self._set_status('running')
+        try:
+            (self.config_dir.parent / 'wslc-setup.json').unlink(missing_ok=True)
+        except OSError:
+            logging.getLogger(__name__).exception('Could not clear completed setup progress')
         self.ready.emit(self.http_port, self.htsp_port)
 
     def _finish(self, error):
+        self.last_error = error
         self._thread = None
         if self._lock:
             self._lock.unlock()

@@ -17,6 +17,67 @@ def test_ui_module_parses():
     ast.parse(UI_PATH.read_text(encoding='utf-8'))
 
 
+@pytest.mark.parametrize('dismiss', [False, True])
+def test_onboarding_cancel_is_not_completion_and_explicit_dismissal_is_saved(monkeypatch, tmp_path, dismiss):
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    try:
+        server = {'name': 'Built-in Server', 'builtin': True, 'url': 'http://127.0.0.1:24111'}
+        window.servers = [server]
+        window.server_combo.blockSignals(True)
+        window.server_combo.addItem('Built-in Server')
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        monkeypatch.setattr(window, 'ensure_server_ready', lambda server, ready, failed: ready(server))
+        monkeypatch.setattr(ui.SetupWizard, 'call', lambda *args: None)
+        window.show_setup_wizard()
+        wizard = window._setup_wizard
+        assert window.config['setup_started']
+        assert not window.config['setup_completed']
+        wizard.dismiss_automatic.setChecked(dismiss)
+        wizard.reject()
+        app.processEvents()
+        saved = ui.ConfigStore().data
+        assert saved['setup_dismissed'] is dismiss
+        assert not saved['setup_completed']
+        assert window._setup_wizard is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def _onboarding_channels(ui, window, server, channels):
+    fetch = types.SimpleNamespace(server=server, key=ui.server_key(server), backend=None,
+                                  keep_place=False, _now_next=False, deleteLater=lambda: None)
+    window._channel_fetch = fetch
+    window._on_channels_loaded(fetch, {'channels': channels, 'tags': [], 'services': [], 'now_next': {}})
+
+
+def test_legacy_offered_flag_does_not_suppress_incomplete_onboarding(monkeypatch, tmp_path):
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    try:
+        server = {'name': 'Built-in Server', 'builtin': True, 'url': 'http://127.0.0.1:24111'}
+        window.servers = [server]
+        window.server_combo.addItem('Built-in Server')
+        window.config['setup_offered'] = True
+        offers = []
+        monkeypatch.setattr(window, 'show_setup_wizard', lambda: offers.append(True))
+        _onboarding_channels(ui, window, server, [])
+        app.processEvents()
+        assert offers == [True]
+        _onboarding_channels(ui, window, server, [])
+        app.processEvents()
+        assert offers == [True]  # Never repeatedly prompt within the same session.
+        window._setup_offer_this_session = False  # A new application session.
+        _onboarding_channels(ui, window, server, [])
+        app.processEvents()
+        assert offers == [True, True]
+        _onboarding_channels(ui, window, server, [ui.Channel(uuid='one', name='One', number=1)])
+        assert window.config['setup_completed']
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_ui_module_uses_pyqt6(monkeypatch):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     sys.modules.pop('tvhplayer.tvhplayer', None)
@@ -4769,7 +4830,7 @@ def test_windows_backend_setup_requires_explicit_install_click(tmp_path, monkeyp
     assert json.loads(dialog.resume_file.read_text())['stage'] == 'installing'
     dialog._installed(3010, QProcess.ExitStatus.NormalExit)
     assert 'restart' in dialog.message.text().lower()
-    assert json.loads(dialog.resume_file.read_text())['stage'] == 'restart_or_retry'
+    assert json.loads(dialog.resume_file.read_text())['stage'] == 'restart_required'
     dialog.reject()
     app.processEvents()
 def test_cancelling_backend_start_disconnects_queued_actions(monkeypatch, tmp_path):
@@ -4870,6 +4931,38 @@ def test_player_stop_only_stops_quick_record_not_scheduled_on_same_channel(monke
         assert calls == ['quick']
         assert results[0][0]['quick_count'] == 2
         assert results[0][0]['targets'] == []
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_recording_folder_display_never_becomes_picker_or_writer_path(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    folder = tmp_path / 'recordings'
+    folder.mkdir()
+    friendly = '/media/Storage/Recordings'
+    try:
+        monkeypatch.setattr(ui, 'in_flatpak', lambda: True)
+        monkeypatch.setattr(ui, 'recording_folder_display', lambda *_: friendly)
+        assert window.set_local_recording_dir(str(folder))
+        dialog = window.show_settings()
+        assert dialog.folder_edit.text() == friendly
+        assert dialog.folder_edit.toolTip() == str(folder)
+        assert window.config_store.load()['local_recording_display'] == friendly
+        calls = []
+        monkeypatch.setattr(ui.QFileDialog, 'getExistingDirectory', lambda *args: calls.append(args[2]) or '')
+        dialog._choose_folder()
+        assert calls == [str(folder)]
+        folder.rmdir()
+        dialog._refresh_folder_status()
+        dialog._choose_folder()
+        assert calls[-1] == os.path.expanduser('~')
+        assert window.local_recording_dir() == str(folder)
+        folder.mkdir()
+        dialog._refresh_folder_status()
+        assert window.recording_folder_problem() == ''
+        assert 'Cannot save recordings here:' not in dialog.folder_status.text()
+        assert window.local_recording_dir() == str(folder)
     finally:
         window.close()
         app.processEvents()

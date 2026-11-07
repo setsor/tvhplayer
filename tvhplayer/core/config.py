@@ -37,6 +37,9 @@ DEFAULT_GEOMETRY = {'x': 100, 'y': 100, 'width': 1200, 'height': 700}
 
 
 def default_config_dir():
+    profile = os.environ.get('TVHPLAYER_PROFILE_DIR')
+    if profile:
+        return Path(profile).expanduser().resolve() / 'Roaming' / 'TVHplayer'
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Application Support' / 'TVHplayer'
     if sys.platform == 'win32':
@@ -47,6 +50,9 @@ def default_config_dir():
 
 
 def default_cache_dir():
+    profile = os.environ.get('TVHPLAYER_PROFILE_DIR')
+    if profile:
+        return Path(profile).expanduser().resolve() / 'Local' / 'TVHplayer' / 'Cache'
     if sys.platform == 'darwin':
         return Path.home() / 'Library' / 'Caches' / 'TVHplayer'
     if sys.platform == 'win32':
@@ -80,6 +86,7 @@ def default_config():
         'hide_dead_channels': True,
         # Empty until chosen: the Videos folder, or asked the first time where that cannot be written.
         'local_recording_dir': '',
+        'local_recording_display': '',
         'local_recording_format': DEFAULT_FORMAT,
         'local_recording_ffmpeg_options': '',
         'convert_after_recording': False,
@@ -109,8 +116,11 @@ def default_config():
         'builtin_padding_late': 5,
         # Warn when the recordings folder has less than this many GB free; 0 never warns.
         'low_space_gb': 5,
-        # Set Up Channels opens by itself once, when the built-in server first has no channels.
+        # Legacy field: having offered setup is not evidence that channels exist.
         'setup_offered': False,
+        'setup_started': False,
+        'setup_completed': False,
+        'setup_dismissed': False,
         # Programme guides for servers on this computer, and each channel's guide
         # chosen by hand: {server key: {channel uuid: choice}}.
         'guide_sources': [],
@@ -168,7 +178,7 @@ def _normalize(data):
     for key in (
         'play_on_start', 'hide_dead_channels', 'convert_after_recording', 'delete_converted_original',
         'stay_awake_for_scheduled', 'setup_offered', 'own_title_bar', 'check_for_updates', 'fast_channel_start',
-        'timeshift_on_disk',
+        'timeshift_on_disk', 'setup_started', 'setup_completed', 'setup_dismissed',
     ):
         cfg[key] = bool(cfg.get(key))
     try:
@@ -179,7 +189,7 @@ def _normalize(data):
     cfg.pop('resize_on_release', None)
     choice = cfg.get('live_resize', None)
     cfg['live_resize'] = None if choice is None else bool(choice)
-    for key in ('local_recording_dir', 'local_recording_ffmpeg_options', 'convert_options', 'skipped_update_version'):
+    for key in ('local_recording_dir', 'local_recording_display', 'local_recording_ffmpeg_options', 'convert_options', 'skipped_update_version'):
         if not isinstance(cfg.get(key), str):
             cfg[key] = ''
     if cfg.get('deinterlace') not in DEINTERLACE_MODES:
