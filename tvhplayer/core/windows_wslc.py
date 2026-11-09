@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -52,6 +53,15 @@ class WslcRuntimeAdapter:
         self.runner = runner
         self.cancel = None
         self.config_storage = None
+        self._prerequisite_state = {}
+        self.setup_checks = []
+        self.progress = None
+        self.image_state = 'not_checked'
+        self.archive_verified = False
+
+    def _progress(self, message):
+        if self.progress:
+            self.progress(message)
 
     def command(self, *args, timeout=20, cancellable=True):
         if not self.executable:
@@ -82,45 +92,100 @@ class WslcRuntimeAdapter:
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise WslcError(f'WSL container command failed: {args[0]}: {exc}') from exc
         if result.returncode:
+            output = result.stderr or result.stdout
+            if any(marker in output.lower() for marker in (
+                    'hcs_e_hyperv_not_installed', '0x80370102',
+                    'virtualization is not enabled', 'virtualisation is not enabled')):
+                if self._prerequisite_state.get('feature') == 1:
+                    raise WslcPrerequisiteError(
+                        'Virtual Machine Platform is enabled, but the Windows hypervisor could not start. '
+                        'Restart Windows if you have not done so since setup. If the problem persists, '
+                        'open WSL troubleshooting to check hypervisor startup, nested virtualization, '
+                        'and system policy.\n\nDiagnostic details:\n' + output[-2000:], 'diagnose')
+                raise WslcPrerequisiteError(
+                    'Windows is not ready to run the built-in server.\n\n'
+                    '1. Choose Enable Virtual Machine Platform below and accept the administrator prompt.\n'
+                    '2. Restart Windows, then reopen TVHplayer.\n'
+                    '3. If this message returns, enable Intel VT-x or AMD-V / SVM in your '
+                    'computer\'s BIOS/UEFI settings. In Task Manager > Performance > CPU, '
+                    'check that Virtualization says Enabled.\n\n'
+                    'If Windows runs inside a virtual machine, its host must allow nested virtualization. '
+                    'You can also connect to an existing TVheadend server.', 'repair')
             raise WslcCommandError(args[0], result.returncode, result.stderr or result.stdout)
         # WSLc preserves a container's stderr stream for `logs`.
         return (result.stdout + '\n' + result.stderr).strip() if args[0] == 'logs' else result.stdout.strip()
 
     def check(self):
+        from .windows_prerequisites import probe_windows, prerequisite_issue, setup_checks
         if self.executable is None:
             self.executable = find_wslc()
-        version = self.command('version')
+        issue = None
+        if sys.platform == 'win32' and self.runner is None:
+            self._prerequisite_state = probe_windows()
+            issue = prerequisite_issue(self._prerequisite_state)
+            if issue and issue[1] == 'repair' and not self.executable:
+                issue = ('Install WSL to set up the built-in server. Setup enables the required '
+                         'Windows features. Restart Windows when setup finishes, even if no reboot '
+                         'prompt appears.', 'install')
+        version_error = None
+        try:
+            version = self.command('version')
+        except WslcError as exc:
+            version, version_error = '', exc
         match = re.search(r'(\d+)\.(\d+)\.(\d+)', version)
+        self.setup_checks = setup_checks(self._prerequisite_state, bool(self.executable),
+                                        tuple(map(int, match.groups())) if match else None)
+        if issue:
+            raise WslcPrerequisiteError(*issue)
+        if version_error:
+            raise version_error
         if not match or tuple(map(int, match.groups())) < (2, 9, 3):
             raise WslcPrerequisiteError('WSL 2.9.3 or newer is required. Update WSL and restart TVHplayer.', 'update')
         try:
             self.command('info')
+        except WslcPrerequisiteError:
+            raise
         except WslcError as exc:
-            raise WslcPrerequisiteError(f'WSL Containers could not start. Virtualization may be disabled, or a Windows restart may be needed.\n{exc}', 'repair') from exc
+            raise WslcPrerequisiteError(
+                'WSL could not start. Open WSL troubleshooting for help checking the Windows '
+                'hypervisor and system policy, or connect to an existing server.\n\n'
+                f'Diagnostic details:\n{exc}', 'diagnose') from exc
 
     def provision(self, directory):
+        self.image_state = 'not_checked'
+        self.archive_verified = False
+        self._progress('Checking the server image…')
         directory = Path(directory)
         started = time.monotonic()
         try:
             manifest = read_manifest(directory)
             image = manifest['image']
+            self.image_state = 'available'
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise WslcError(f'Install the matching offline backend bundle: {exc}') from exc
         # WSLc checks the immutable imported image identity and architecture.
         # The archive is only needed (and hashed) when that image is absent.
         if not self.has_image(image):
+            self._progress('Verifying the server files…')
             try:
                 verify_bundle(directory, cancel=self.cancel)
+                self.archive_verified = True
+                self.image_state = 'verified'
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 raise WslcError(f'Install the matching offline backend bundle: {exc}') from exc
             logging.getLogger(__name__).info('Offline backend archive verified in %.1fs', time.monotonic() - started)
             loading = time.monotonic()
+            self._progress('Importing the server image. This can take a few minutes…')
             self.command('load', '--input', directory / 'tvheadend.tar', timeout=300)
             logging.getLogger(__name__).info('Offline backend image imported in %.1fs', time.monotonic() - loading)
             if not self.has_image(image):
                 raise WslcError('The offline archive did not provide the required backend image.')
         else:
             logging.getLogger(__name__).info('Reused offline backend image in %.1fs', time.monotonic() - started)
+        self.image_state = 'installed'
+        for row in self.setup_checks:
+            if row['key'] == 'image':
+                row['status'] = 'passed'
         return image
 
     def has_image(self, image):
@@ -180,11 +245,13 @@ class WslcRuntimeAdapter:
         for host_ip, port in udp_ports:
             port = int(port)
             args += ['--publish', f'{host_ip}:{port}:{port}/udp']
+        # No access control: the ports above are published on 127.0.0.1 only,
+        # as on Linux, and verify_running checks that before the app uses them.
         args += ['--mount', f'type=volume,source={self.config_storage.volume},target=/config',
                  '--mount', bind_mount(str(recordings), '/recordings'), '--entrypoint', '/bin/sh']
         self.command(*args, image, '-c',
                      'umask 077; exec /usr/libexec/tvhplayer/tvheadend -c /config/data -B '
-                     '--bindaddr 0.0.0.0 --http_port 9981 --htsp_port 9982', timeout=60)
+                     '--bindaddr 0.0.0.0 --noacl --http_port 9981 --htsp_port 9982', timeout=60)
 
     def inspect_owned(self, name, owner, cancellable=True, missing_ok=False):
         if not re.fullmatch(r'[0-9a-f]{32}', owner) or name != 'tvhplayer-' + owner:

@@ -21,9 +21,11 @@ import html
 import json
 import re
 try:
-    from .core.recording_folder import validate_recording_folder
+    from .portal_paths import document_host_path
+    from .core.recording_folder import validate_recording_folder, recording_folder_display, recording_folder_error
 except ImportError:
-    from core.recording_folder import validate_recording_folder
+    from portal_paths import document_host_path
+    from core.recording_folder import validate_recording_folder, recording_folder_display, recording_folder_error
 # Replace this line:
 #from . import resources_rc
 
@@ -47,7 +49,7 @@ try:
         recording_titles,
         upcoming_recordings,
     )
-    from .core.config import ConfigStore, default_cache_dir
+    from .core.config import DEFAULT_THEME, ConfigStore, default_cache_dir
     from .core.chromecast import CastManager
     from .core.cast_profiles import AUTO_PROFILE
     from .core.guide_feeds import GuideCache, GuideSource
@@ -69,7 +71,7 @@ try:
         preferred_subtitle_track, subtitle_track_language,
     )
     from .core.player import DEINTERLACE_AUTO, DEINTERLACE_OFF, DEINTERLACE_ON, NO_TRACK, Timeshift
-    from .core.playlist_sync import PlaylistSource, same_source, server_key, source_key
+    from .core.playlist_sync import PlaylistSource, failed_channels, retest_entry, same_source, server_key, source_key
     from .core.playback_status import (
         SIGNAL_FAIR, SIGNAL_GOOD, STARTING, find_subscription, find_tuner, receiving, scrambled_notice, signal_report,
         starting_caption, stream_path, stream_reason,
@@ -151,7 +153,7 @@ except ImportError:
         recording_titles,
         upcoming_recordings,
     )
-    from core.config import ConfigStore, default_cache_dir
+    from core.config import DEFAULT_THEME, ConfigStore, default_cache_dir
     from core.chromecast import CastManager
     from core.cast_profiles import AUTO_PROFILE
     from core.guide_feeds import GuideCache, GuideSource
@@ -173,7 +175,7 @@ except ImportError:
         preferred_subtitle_track, subtitle_track_language,
     )
     from core.player import DEINTERLACE_AUTO, DEINTERLACE_OFF, DEINTERLACE_ON, NO_TRACK, Timeshift
-    from core.playlist_sync import PlaylistSource, same_source, server_key, source_key
+    from core.playlist_sync import PlaylistSource, failed_channels, retest_entry, same_source, server_key, source_key
     from core.playback_status import (
         SIGNAL_FAIR, SIGNAL_GOOD, STARTING, find_subscription, find_tuner, receiving, scrambled_notice, signal_report,
         starting_caption, stream_path, stream_reason,
@@ -286,9 +288,11 @@ import logging
 import platform
 
 # Shown in About; the release notes in the metainfo file give the same version.
-APP_VERSION = "4.6.2"
+APP_VERSION = "4.6.5"
 UPDATE_CHECK_DELAY_MS = 10_000
 CHANNEL_RELOAD_SECONDS = 30
+# The not-working marks wait this long after the channel list fills.
+FAILED_MARKS_DELAY_MS = 3000
 # A reload of a big list freezes the window a while: space them by a second per this many channels.
 CHANNELS_PER_RELOAD_SECOND = 100
 # Now/next is asked for again this often, and sooner when a programme ends.
@@ -1847,7 +1851,7 @@ def recording_dir_error(folder):
     try:
         validate_recording_folder(folder, create_missing=not in_flatpak())
     except OSError as exc:
-        return str(exc)
+        return recording_folder_error(folder, exc)
     return ''
 
 
@@ -2333,6 +2337,10 @@ class ServerDialog(QDialog):
     def _status(self, server):
         """Dot colour and words for a server's state."""
         if server.get('builtin'):
+            if getattr(self._supervisor, 'disabled', False):
+                return STATUS_STOPPED, 'Disabled: virtualization unavailable'
+            if self._builtin_state() == 'running' and getattr(self._supervisor, 'startup_warnings', []):
+                return STATUS_INVALID, 'Running — some settings need attention'
             return {
                 'running': (STATUS_CONNECTED, "Running on this computer"),
                 'starting': (STATUS_TESTING, "Starting…"),
@@ -2419,7 +2427,12 @@ class ServerDialog(QDialog):
             state = self._builtin_state()
             active = state in ('starting', 'installing', 'running')
             setup = getattr(self._supervisor, 'setup_issue', None) is not None
+            self.autostart.setEnabled(self._supervisor is not None)
             self.run_btn.setText("S&top Server" if active else ("Set &up WSL…" if setup else "S&tart Server"))
+            if getattr(self._supervisor, 'disabled', False):
+                self.run_btn.setText('Enable and check…')
+                self.autostart.setChecked(False)
+                self.autostart.setEnabled(False)
             self.run_btn.setEnabled(self._supervisor is not None and state != 'stopping')
             self.builtin_address.setText(self._builtin_url(server) or "Chosen when the server starts")
             self.open_web_btn.setEnabled(state == 'running')
@@ -2585,6 +2598,10 @@ class ServerDialog(QDialog):
 
     def _toggle_builtin(self):
         if self._supervisor is None:
+            return
+        if getattr(self._supervisor, 'disabled', False):
+            self._supervisor.enable_and_check()
+            self._refresh_selected()
             return
         if self._builtin_state() in ('starting', 'installing', 'running'):
             self._supervisor.stop()
@@ -3375,6 +3392,7 @@ class ChannelListState(QWidget):
     """Shown in place of the channel list while it loads, when it is empty, or when loading failed."""
 
     retry = pyqtSignal()
+    setup_action = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3388,6 +3406,14 @@ class ChannelListState(QWidget):
         self.message.setWordWrap(True)
         self.message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.message)
+        try:
+            from .windows_setup_checks import WindowsSetupChecks
+        except ImportError:
+            from windows_setup_checks import WindowsSetupChecks
+        self.checklist = WindowsSetupChecks(self)
+        self.checklist.action_requested.connect(self.setup_action)
+        self.checklist.hide()
+        layout.addWidget(self.checklist)
         self.retry_btn = QPushButton("&Retry", self)
         self.retry_btn.clicked.connect(self.retry)
         describe(self.retry_btn, description="Try to load the channel list again")
@@ -3395,6 +3421,7 @@ class ChannelListState(QWidget):
         layout.addStretch(2)
 
     def show_state(self, text, busy=False, retry=False):
+        self.checklist.hide()
         self.ring.setVisible(busy)
         self.retry_btn.setVisible(retry)
         announce_label(self.message, text)
@@ -3655,6 +3682,42 @@ class ChannelEditJob(QObject):
             error = str(exc) or type(exc).__name__
         try:
             self.done.emit(error)
+        except RuntimeError:
+            pass
+
+
+class RetestJob(QObject):
+    """Have the server test one playlist channel's stream again, off the UI thread.
+
+    ``done`` carries the verdict ('working', 'failed', 'untested', 'checking',
+    or '' on error), an error message, and the playlist source as saved.
+    """
+
+    done = pyqtSignal(str, str, object)
+
+    def __init__(self, server, source, key, hide, channel_uuid, parent=None):
+        super().__init__(parent)
+        self._server = dict(server)
+        self.source = source
+        self._key = key
+        self._hide = hide
+        self._channel = channel_uuid
+        self._thread = threading.Thread(target=self._run, name='channel-retest', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        status, error = '', ''
+        try:
+            with TvhAdmin(self._server) as admin:
+                status = retest_entry(admin, self.source, self._key, hide=self._hide, channel=self._channel)
+        except TvhAuthError:
+            error = "This server's login is not allowed to test channels."
+        except Exception as exc:
+            error = str(exc) or type(exc).__name__
+        try:
+            self.done.emit(status, error, self.source.to_dict())
         except RuntimeError:
             pass
 
@@ -3936,7 +3999,8 @@ class TVHeadendClient(QMainWindow):
         self.setup_paths()
         # Windows and macOS take the title bar, taskbar and Dock icon from the window;
         # Linux desktops take it from the desktop file, an AppImage without one from here.
-        app_icon = QIcon(str(self.icons_dir / 'tvhplayer.svg'))
+        icon_name = 'tvhplayer-windows.svg' if sys.platform == 'win32' else 'tvhplayer.svg'
+        app_icon = QIcon(str(self.icons_dir / icon_name))
         if not app_icon.isNull():
             QApplication.instance().setWindowIcon(app_icon)
             self.setWindowIcon(app_icon)
@@ -3998,9 +4062,21 @@ class TVHeadendClient(QMainWindow):
         self._channel_reload_timer = QTimer(self)
         self._channel_reload_timer.setSingleShot(True)
         self._channel_reload_timer.timeout.connect(self._reload_changed_channels)
+        # Channel uuid -> (playlist location, entry key) of channels that failed
+        # the server's stream test. Worked out from the saved verdicts only,
+        # well after the list is on screen, so it never slows a start.
+        self._failed_channels = {}
+        self._failed_marks_for = None
+        # Goes up whenever the saved playlists change.
+        self._playlists_revision = 0
+        self._failed_marks_timer = QTimer(self)
+        self._failed_marks_timer.setSingleShot(True)
+        self._failed_marks_timer.setInterval(FAILED_MARKS_DELAY_MS)
+        self._failed_marks_timer.timeout.connect(self._mark_failed_channels)
         self._last_channel_reload = 0.0
         # Extras shown beside each channel, keyed by channel_key().
         self._channels = []
+        self._setup_offer_this_session = False
         # Play the last channel once the first channel list arrives.
         self._play_on_start = self.plays_on_start()
         # server_key() of the server _channels came from, and the fetch still running.
@@ -4074,6 +4150,8 @@ class TVHeadendClient(QMainWindow):
             self.builtin.ready.connect(self._on_builtin_ready)
             self.builtin.failed.connect(self._on_builtin_failed)
             self.builtin.status_changed.connect(self._on_builtin_phase, Qt.ConnectionType.QueuedConnection)
+            if hasattr(self.builtin, 'setup_progress'):
+                self.builtin.setup_progress.connect(self._on_builtin_progress)
         # Keep the computer awake while a recording on it is running or waiting.
         self.sleep_inhibitor = SleepInhibitor()
         self._builtin_entries = []
@@ -4128,6 +4206,8 @@ class TVHeadendClient(QMainWindow):
 
         if self.builtin is not None and self.config.get('builtin_autostart'):
             self.builtin.start()
+        if self.builtin is not None and hasattr(self.builtin, 'setup_issue'):
+            QTimer.singleShot(0, self._resume_windows_backend_setup)
 
         try:
             self.player.attach(self.video_frame)
@@ -4305,7 +4385,9 @@ class TVHeadendClient(QMainWindow):
         exit_action.setMenuRole(QAction.MenuRole.QuitRole)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        self.window_frame = window_frame.install(self, menubar, self.config['own_title_bar'])
+        self.window_frame = window_frame.install(
+            self, menubar, self.draws_title_bar(), guard_path=os.path.join(self.config_dir, 'window-menu.json'),
+        )
         
         # Create main widget and layout
         main_widget = QWidget()
@@ -4465,6 +4547,7 @@ class TVHeadendClient(QMainWindow):
         left_layout.addWidget(self.channel_busy)
         self.channel_state = ChannelListState()
         self.channel_state.retry.connect(lambda: self.fetch_channels())
+        self.channel_state.setup_action.connect(self._fix_builtin_setup)
         self.channel_stack = QStackedWidget()
         self.channel_stack.addWidget(self.channel_list)
         self.channel_stack.addWidget(self.channel_state)
@@ -5110,6 +5193,18 @@ class TVHeadendClient(QMainWindow):
         model.set_channels(shown, references)
         self._apply_channel_filter()
         self._visible_logo_timer.start()
+        self._failed_marks_timer.start()
+
+    def _mark_failed_channels(self):
+        """Mark the listed channels whose stream failed the server's last test."""
+        server = self.current_server()
+        playlists = self.config.get('playlists') or []
+        key = server_key(server) if server and self.config['mark_dead_channels'] else ''
+        cache = (self._playlists_revision, id(self.config), key)
+        if cache != self._failed_marks_for:
+            self._failed_marks_for = cache
+            self._failed_channels = failed_channels(playlists, key) if key and playlists else {}
+        self.channel_model.set_failed(self._failed_channels)
 
     def _logo_placeholder(self):
         """Blank space the size of a logo, shared by every row still without one."""
@@ -5698,6 +5793,10 @@ class TVHeadendClient(QMainWindow):
                 self.statusbar.showMessage(message)
                 print("Debug: Built-in Tvheadend binary was not found in this build.")
                 return
+            if getattr(supervisor, 'disabled', False):
+                self._show_builtin_problem()
+                self.statusbar.showMessage('The built-in server needs attention.')
+                return
             self._show_channel_state("Starting built-in server…", busy=True)
             self.statusbar.showMessage("Starting built-in server...")
             supervisor.start()
@@ -5764,19 +5863,27 @@ class TVHeadendClient(QMainWindow):
             self._fill_channel_rows()
             self._mark_playing_channel(scroll=True)
         if self._channels:
+            if is_builtin_server(fetch.server) and not self.config.get('setup_completed'):
+                self.config['setup_completed'] = True
+                self.save_config()
             self._show_channel_list()
         elif is_builtin_server(fetch.server):
             self._show_channel_state(
                 "The built-in server has no channels yet. Add some with File > Set Up Channels…"
             )
-            if not self.config['setup_offered']:
-                # Once, on the first start: offer the wizard instead of an empty list.
-                self.config['setup_offered'] = True
+            if self.config.get('setup_completed'):
+                self.config['setup_completed'] = False
                 self.save_config()
-                QTimer.singleShot(0, self.show_setup_wizard)
+            if not self.config.get('setup_dismissed') and not self._setup_offer_this_session:
+                # Cancellation allows another offer next launch, not on every reload.
+                self._setup_offer_this_session = True
+                QTimer.singleShot(0, self._offer_channel_setup)
         else:
             self._show_channel_state("This server has no channels yet.")
-        self.statusbar.showMessage("Channels loaded successfully")
+        if is_builtin_server(fetch.server) and getattr(self.builtin, 'startup_warnings', []):
+            self.statusbar.showMessage('Channels loaded. Some server preferences need attention; open Server Log for details.')
+        else:
+            self.statusbar.showMessage("Channels loaded successfully")
         if fetch._now_next and self._channels:
             # No wait for EPG before channels, logos and playback become usable.
             # This worker opens a lightweight independent connection.
@@ -8017,11 +8124,49 @@ class TVHeadendClient(QMainWindow):
 
     def _on_builtin_failed(self, message):
         print(f"Debug: Built-in server failed: {message}")
-        self.statusbar.showMessage(message)
+        if getattr(self.builtin, 'disabled', False):
+            self.config['builtin_autostart'] = False
+            self.save_config()
+        windows_problem = hasattr(self.builtin, 'setup_checks')
+        self.statusbar.showMessage('The built-in server needs attention.' if windows_problem else message)
         if is_builtin_server(self.current_server()) and not self._channels:
-            self._show_channel_state(message, retry=True)
-        if getattr(self.builtin, 'setup_issue', None) is not None and is_builtin_server(self.current_server()):
+            if windows_problem:
+                self._show_builtin_problem()
+            else:
+                self._show_channel_state(message, retry=True)
+        if (getattr(self.builtin, 'setup_issue', None) is not None
+                and not getattr(self.builtin, 'disabled', False) and is_builtin_server(self.current_server())):
             self.show_windows_backend_setup()
+
+    def _show_builtin_problem(self):
+        try:
+            from .core.windows_prerequisites import failed_checks
+        except ImportError:
+            from core.windows_prerequisites import failed_checks
+        issue = getattr(self.builtin, 'setup_issue', None)
+        action = issue.action if issue else ('bios' if getattr(self.builtin, 'disabled', False) else 'diagnose')
+        rows = getattr(self.builtin, 'setup_checks', []) or failed_checks([], action)
+        try:
+            from .windows_setup_checks import problem_summary
+        except ImportError:
+            from windows_setup_checks import problem_summary
+        diagnostic = getattr(self.builtin, 'last_error', '')
+        summary = problem_summary(diagnostic) if diagnostic and action == 'diagnose' else 'The built-in server needs attention'
+        self._show_channel_state(summary,
+                                 retry=not getattr(self.builtin, 'disabled', False))
+        self.channel_state.checklist.set_checks(rows)
+        self.channel_state.checklist.set_diagnostics(getattr(self.builtin, 'last_error', ''))
+        self.channel_state.checklist.show()
+
+    def _on_builtin_progress(self, message):
+        if is_builtin_server(self.current_server()) and not self._channels:
+            self._show_channel_state(message, busy=True)
+            self.statusbar.showMessage(message)
+
+    def _fix_builtin_setup(self, action):
+        dialog = self.show_windows_backend_setup()
+        if action in ('install', 'update', 'repair'):
+            dialog._fix(action)
 
     def _on_builtin_phase(self, phase):
         if self.builtin is None or self.builtin.status != phase or not is_builtin_server(self.current_server()):
@@ -8035,21 +8180,38 @@ class TVHeadendClient(QMainWindow):
             self._show_channel_state('The built-in server is stopped.', retry=True)
             self.statusbar.showMessage('The built-in server is stopped.')
 
-    def show_windows_backend_setup(self):
-        if getattr(self, '_windows_setup_dialog', None) is not None:
-            self._windows_setup_dialog.raise_()
+    def _resume_windows_backend_setup(self):
+        if getattr(self.builtin, 'disabled', False):
             return
+        try:
+            from .core.windows_prerequisites import pending_setup
+        except ImportError:
+            from core.windows_prerequisites import pending_setup
+        if not self.builtin.is_running() and pending_setup(self.builtin.config_dir):
+            self.show_windows_backend_setup()
+            self.builtin.start()
+
+    def show_windows_backend_setup(self, parent=None):
+        parent = parent or QApplication.activeModalWidget() or self
+        if getattr(self, '_windows_setup_dialog', None) is not None:
+            if parent is not None and self._windows_setup_dialog.parentWidget() is not parent:
+                dialog = self._windows_setup_dialog
+                dialog.setParent(parent, dialog.windowFlags())
+                dialog.show()
+            self._windows_setup_dialog.raise_()
+            return self._windows_setup_dialog
         try:
             from .windows_backend_setup import WindowsBackendSetup
         except ImportError:
             from windows_backend_setup import WindowsBackendSetup
-        dialog = WindowsBackendSetup(self.builtin, self)
+        dialog = WindowsBackendSetup(self.builtin, parent or self)
         self._windows_setup_dialog = dialog
         def closed(_result):
             self._windows_setup_dialog = None
             dialog.deleteLater()
         dialog.finished.connect(closed)
         dialog.show()
+        return dialog
 
     def _set_builtin_autostart(self, checked):
         self.config['builtin_autostart'] = bool(checked)
@@ -8074,6 +8236,10 @@ class TVHeadendClient(QMainWindow):
             return
 
         def ready(server):
+            existing = getattr(self, '_setup_wizard', None)
+            if existing is not None and existing.isVisible():
+                existing.raise_()
+                return
             wizard = SetupWizard(
                 server,
                 on_iptv=lambda server: ImportPlaylistDialog(self, self, server=server).exec(),
@@ -8082,9 +8248,24 @@ class TVHeadendClient(QMainWindow):
                 servers=self.import_targets(),
             )
             self._setup_wizard = wizard
+            wizard.dismiss_automatic.setChecked(bool(self.config.get('setup_dismissed')))
+            self.config['setup_started'] = True
+            self.save_config()
+            wizard.finished.connect(lambda _result: self._setup_wizard_closed(wizard))
             wizard.open()
 
         self.ensure_server_ready(server, ready, self.statusbar.showMessage)
+
+    def _offer_channel_setup(self):
+        if (is_builtin_server(self.current_server()) and not self._channels
+                and not self.config.get('setup_dismissed')):
+            self.show_setup_wizard()
+
+    def _setup_wizard_closed(self, wizard):
+        self.config['setup_dismissed'] = wizard.dismiss_automatic.isChecked()
+        self.save_config()
+        if getattr(self, '_setup_wizard', None) is wizard:
+            self._setup_wizard = None
 
     def picon_count(self):
         return len(self.picons) if self.picons is not None else 0
@@ -8181,6 +8362,8 @@ class TVHeadendClient(QMainWindow):
             source.to_dict() for source in self.playlist_sources()
             if not same_source(source, gone)
         ]
+        self._playlists_revision += 1
+        self._failed_marks_timer.start()
         for guide in self.all_guide_sources():
             if guide.server == gone.server and guide.playlist == gone.location:
                 self.remove_guide_source(guide)
@@ -8444,11 +8627,13 @@ class TVHeadendClient(QMainWindow):
         return window_frame.wants_own_title_bar(QApplication.platformName(), environ)
 
     def draws_title_bar(self):
-        """The Settings choice; the window in use keeps its title bar until the next start."""
-        return self.config['own_title_bar']
+        """The Settings choice, or the desktop's default until one is made; the
+        window in use keeps its title bar until the next start."""
+        environ = LAUNCH_ENVIRON or os.environ
+        return window_frame.uses_own_title_bar(self.config.get('title_bar'), QApplication.platformName(), environ)
 
     def set_draws_title_bar(self, on):
-        self.config['own_title_bar'] = bool(on)
+        self.config['title_bar'] = bool(on)
         self.save_config()
 
     def theme_choice(self):
@@ -8528,6 +8713,10 @@ class TVHeadendClient(QMainWindow):
     def local_recording_dir(self):
         return self.config.get('local_recording_dir') or default_recording_dir()
 
+    def local_recording_display(self):
+        return recording_folder_display(
+            self.local_recording_dir(), self.config.get('local_recording_display', ''), document_host_path)
+
     def recording_folder_problem(self):
         folder = self.local_recording_dir()
         return recording_dir_error(folder) if folder else ''
@@ -8538,9 +8727,10 @@ class TVHeadendClient(QMainWindow):
             QMessageBox.warning(self, "Recordings Folder", f"TVHplayer cannot save recordings in {folder}.\n\n{error}")
             return False
         self.config['local_recording_dir'] = folder
+        self.config['local_recording_display'] = recording_folder_display(folder, '', document_host_path)
         self.save_config()
         if self._settings_dialog is not None:
-            self._settings_dialog.folder_edit.setText(folder)
+            self._settings_dialog.folder_edit.setText(self.local_recording_display())
         if self.builtin is not None and not self.builtin.set_recordings_dir(folder):
             self.statusbar.showMessage("The built-in server keeps its old recordings folder until it starts again.")
         if self._settings_dialog is not None:
@@ -8699,6 +8889,14 @@ class TVHeadendClient(QMainWindow):
     def hides_dead_channels(self):
         return self.config['hide_dead_channels']
 
+    def marks_dead_channels(self):
+        return self.config['mark_dead_channels']
+
+    def set_marks_dead_channels(self, on):
+        self.config['mark_dead_channels'] = bool(on)
+        self.save_config()
+        self._mark_failed_channels()
+
     def set_hides_dead_channels(self, on):
         self.config['hide_dead_channels'] = bool(on)
         self.save_config()
@@ -8793,6 +8991,8 @@ class TVHeadendClient(QMainWindow):
         else:
             sources.append(source)
         self.config['playlists'] = [item.to_dict() for item in sources]
+        self._playlists_revision += 1
+        self._failed_marks_timer.start()
         if replaced_location:
             guides = self.all_guide_sources()
             for guide in guides:
@@ -8809,6 +9009,10 @@ class TVHeadendClient(QMainWindow):
         supervisor = self.builtin
         if supervisor is None or not supervisor.available:
             on_failed("The built-in server is not part of this version of TVHplayer.")
+            return
+        if getattr(supervisor, 'disabled', False):
+            on_failed('The built-in server is disabled because virtualization is unavailable. '
+                      'Choose another server, or use Enable and check in Server Management > Built-in Server.')
             return
         current = find_builtin_server(self.servers)
         if builtin_requests_ready(current, supervisor.is_running()):
@@ -8854,9 +9058,19 @@ class TVHeadendClient(QMainWindow):
             self.close_backend()
             self.fetch_channels()
 
-    def playlist_channels_changed(self, server):
-        """A running import showed or hid channels on ``server``."""
-        if not self.is_current_server(server) or self._channel_reload_timer.isActive():
+    def playlist_channels_changed(self, server, added=False):
+        """A running import showed or hid channels on ``server``.
+
+        Channels it ``added`` are shown at once; the check's changes after
+        that wait their turn so a big list is not reloaded over and over.
+        """
+        if not self.is_current_server(server):
+            return
+        if added:
+            self._channel_reload_timer.stop()
+            self._reload_changed_channels()
+            return
+        if self._channel_reload_timer.isActive():
             return
         spacing = max(CHANNEL_RELOAD_SECONDS, len(self._channels) / CHANNELS_PER_RELOAD_SECOND)
         wait = self._last_channel_reload + spacing - time.monotonic()
@@ -8925,12 +9139,57 @@ class TVHeadendClient(QMainWindow):
             epg_action.triggered.connect(lambda: self.show_channel_epg(channel_data))
             guide_action = menu.addAction(with_keys("Show in TV Guide", "Ctrl+G"))
             guide_action.triggered.connect(lambda: self.show_guide(channel_data))
+            if str(channel_data.uuid or '') in self._failed_channels:
+                retest_action = menu.addAction("&Test Stream Again")
+                retest_action.setToolTip("Ask the server to test this channel's stream now.")
+                retest_action.setEnabled(self._server_requests_ready())
+                retest_action.triggered.connect(lambda: self.retest_channel(channel_data))
 
             menu.addSeparator()
             self._add_channel_edit_actions(menu, channel_data)
 
             # Show the menu at the cursor position
             menu.exec(self.channel_list.viewport().mapToGlobal(position))
+
+    def retest_channel(self, channel):
+        """Have the server test a channel that failed its stream test again."""
+        entry = self._failed_channels.get(str(channel.uuid or ''))
+        server = self.current_server()
+        if entry is None or not server or not self._server_requests_ready():
+            return
+        location, key = entry
+        source = next((
+            item for item in self.playlist_sources()
+            if item.server == server_key(server) and item.location == location
+        ), None)
+        if source is None or key not in source.muxes:
+            self.statusbar.showMessage(f"{channel.name} is no longer in an imported playlist.")
+            return
+        if not self.claim_playlist(source):
+            self.statusbar.showMessage(f"{source.name} is being updated. Try again when it is done.")
+            return
+        job = RetestJob(server, source, key, self.hides_dead_channels(), str(channel.uuid), self)
+
+        def finished(status, error, data, job=job):
+            self.release_playlist(job.source)
+            job.deleteLater()
+            if error:
+                self.statusbar.showMessage(f"Could not test {channel.name}: {error}")
+                return
+            self.store_playlist_source(data)
+            self._mark_failed_channels()
+            self.statusbar.showMessage({
+                'working': f"{channel.name} works now.",
+                'failed': f"{channel.name} still does not work.",
+                'untested': f"The server could not test {channel.name}.",
+                'checking': f"The server is still testing {channel.name}. Try again in a minute.",
+            }.get(status, ''))
+            if status == 'failed' and self.hides_dead_channels() and self._same_server(server, self.current_server()):
+                self.fetch_channels(keep_place=True)
+
+        job.done.connect(finished)
+        self.statusbar.showMessage(f"Testing {channel.name}…")
+        job.start()
 
     def _add_channel_edit_actions(self, menu, channel):
         """Favourites, name, number, and hiding: saved on the server for every client."""
@@ -9263,7 +9522,7 @@ def main():
             window_color = settings['window_color']
         except Exception as e:
             print(f"Debug: Could not read the theme settings: {e}")
-            theme = THEME_TVHPLAYER
+            theme = DEFAULT_THEME
             scheme = accent = window_color = None
         LAUNCH_ENVIRON.update(os.environ)
         cursor_debug.prepare()
@@ -9288,8 +9547,8 @@ def main():
         if prefers_high_contrast():
             theme = None
         elif style_key(theme) is None:
-            print(f"Debug: Theme {theme!r} is not available here; using {THEME_TVHPLAYER}")
-            theme = THEME_TVHPLAYER
+            print(f"Debug: Theme {theme!r} is not available here; using {DEFAULT_THEME}")
+            theme = DEFAULT_THEME
         if theme is not None:
             set_color_scheme(app, scheme)
             set_accent(app, accent)

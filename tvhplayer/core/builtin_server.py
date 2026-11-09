@@ -3,9 +3,11 @@
 The child stays in the foreground. Tvheadend writes a pid file only when
 ``-f`` is passed, so this module does not use ``--pid``.
 
-Access control stays on. The app writes a Tvheadend ``superuser`` file with a
-generated password, so a web page or another local user cannot drive the
-built-in server through 127.0.0.1.
+Access control is off (``--noacl``): the server listens on 127.0.0.1 only and
+anything on this computer can use it without a login, including the web
+interface. The app still writes a ``superuser`` file with a generated password
+and sends that login; Tvheadend accepts it, and the Windows backend, which
+keeps access control on, needs it.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import sys
 import time
 import urllib.error
@@ -40,6 +43,22 @@ STARTUP_TIMEOUT_SECONDS = 60
 SUPERUSER_NAME = 'tvhplayer'
 # Tvheadend exits with 78 when another process holds its config lock.
 CONFIG_LOCKED_EXIT = 78
+
+
+def htsp_ready(port, connect=None):
+    """Both backends require a listening HTSP socket, not just a startup log line."""
+    try:
+        with (connect or socket.create_connection)(('127.0.0.1', port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def defaults_verdict(failures):
+    """Playback/authentication and tuner routing are essential; preferences can degrade."""
+    optional = {'setup wizard off', 'recording margins', 'recordings folder'}
+    return ([item for item in failures if item not in optional],
+            [item for item in failures if item in optional])
 
 _BIND_FAILURE = re.compile(r'bind:\s+\S+:\d+:')
 _HTTP_STARTED = 'Starting HTTP server'
@@ -138,12 +157,16 @@ def ensure_superuser(config_dir) -> tuple[str, str]:
 
 
 def command_args(binary, config_dir, http_port: int, htsp_port: int) -> list[str]:
-    """Foreground command. No ``-f``, ``-C``, ``--pid``, ``--logfile``, ``--nostderr``, or ``--noacl``."""
+    """Foreground command. No ``-f``, ``-C``, ``--pid``, ``--logfile``, or ``--nostderr``.
+
+    ``--noacl`` goes only with ``--bindaddr 127.0.0.1``.
+    """
     return [
         str(binary),
         '-c', str(config_dir),
         '-B',
         '--bindaddr', '127.0.0.1',
+        '--noacl',
         '--http_port', str(int(http_port)),
         '--htsp_port', str(int(htsp_port)),
     ]

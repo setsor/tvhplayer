@@ -7,6 +7,8 @@ the widget attribute names are unchanged from the tabbed version.
 
 from __future__ import annotations
 
+import os
+
 
 from PyQt6.QtCore import QEvent, QRectF, Qt, QTimer
 from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
@@ -50,7 +52,12 @@ WINDOW_COLOR_SHORT = 'Background of windows and panels in the TVHplayer and Orga
 SCHEME_NAMES = {SCHEME_SYSTEM: 'Follow System', SCHEME_LIGHT: 'Light', SCHEME_DARK: 'Dark'}
 HIDE_HELP = (
     'After an import or refresh, the server tests each channel in the background. '
-    'Channels that fail are hidden and come back once a later test finds them working.'
+    'When on, channels that fail are hidden and come back once a later test finds them working. '
+    'When off, they stay in the list.'
+)
+MARK_HELP = (
+    "Channels that failed the server's last test are faded in the channel list and say Not working. "
+    'Right-click one to test it again.'
 )
 PLAY_HELP = 'Once the channel list has loaded, the channel you watched last starts playing.'
 FAST_START_HELP = (
@@ -214,6 +221,7 @@ class SettingsDialog(QDialog):
         self._delete_row.setEnabled(self.convert_check.isChecked())
         self._show_convert_problem(self.convert_edit.text())
         self.hide_check.toggled.connect(self._toggled)
+        self.mark_check.toggled.connect(self._mark_toggled)
         self.check_btn.clicked.connect(self._check)
         self._sync()
 
@@ -285,6 +293,10 @@ class SettingsDialog(QDialog):
         self.hide_check.setChecked(host.hides_dead_channels())
         describe(self.hide_check, description=HIDE_HELP)
         imported.add_row(SettingRow('&Hide channels that do not work', HIDE_HELP, self.hide_check))
+        self.mark_check = ToggleSwitch('Mark channels that do not work')
+        self.mark_check.setChecked(host.marks_dead_channels())
+        describe(self.mark_check, description=MARK_HELP)
+        imported.add_row(SettingRow('&Mark channels that do not work', MARK_HELP, self.mark_check))
         self.check_btn = QPushButton('&Check Now')
         describe(self.check_btn, 'Check Channels Now', CHECK_HELP)
         self.check_btn.setToolTip(CHECK_HELP)
@@ -300,7 +312,7 @@ class SettingsDialog(QDialog):
         folder_row = QHBoxLayout(folder)
         folder_row.setContentsMargins(0, 0, 0, 0)
         folder_row.setSpacing(8)
-        self.folder_edit = QLineEdit(host.local_recording_dir())
+        self.folder_edit = QLineEdit(getattr(host, 'local_recording_display', host.local_recording_dir)())
         self.folder_edit.setReadOnly(True)
         self.folder_edit.setPlaceholderText('Chosen the first time you record')
         folder_text = FOLDER_HELP + (BUILTIN_FOLDER_HELP if has_builtin else '')
@@ -588,12 +600,16 @@ class SettingsDialog(QDialog):
             self._host.set_low_space_gb(self.space_spin.value())
 
     def _choose_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, 'Recordings Folder', self.folder_edit.text())
+        current = self._host.local_recording_dir()
+        start = current if os.path.isdir(current) else os.path.expanduser('~')
+        folder = QFileDialog.getExistingDirectory(self, 'Recordings Folder', start)
         if folder and self._host.set_local_recording_dir(folder):
-            self.folder_edit.setText(folder)
+            self.folder_edit.setText(getattr(self._host, 'local_recording_display', self._host.local_recording_dir)())
             self._refresh_folder_status()
 
     def _refresh_folder_status(self, *_args):
+        self.folder_edit.setText(getattr(self._host, 'local_recording_display', self._host.local_recording_dir)())
+        self.folder_edit.setToolTip(self._host.local_recording_dir())
         supervisor = getattr(self._host, 'builtin', None)
         problem = getattr(self._host, 'recording_folder_problem', lambda: '')()
         text = f'Cannot save recordings here: {problem}' if problem else ''
@@ -673,7 +689,15 @@ class SettingsDialog(QDialog):
         if on:
             announce_label(self.status_label, 'Channels that do not work are hidden from the next import or refresh on.')
         else:
-            announce_label(self.status_label, 'Hidden channels are shown again. Imports no longer test channels.')
+            announce_label(self.status_label, 'Hidden channels are shown again.')
+
+    def _mark_toggled(self, on):
+        self._host.set_marks_dead_channels(on)
+        announce_label(
+            self.status_label,
+            'Channels that do not work are marked in the channel list.' if on
+            else 'Channels that do not work are no longer marked.',
+        )
 
     def _check(self):
         self._jobs = self._host.check_playlist_channels()

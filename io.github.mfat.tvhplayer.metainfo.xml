@@ -2,38 +2,79 @@
 <component type="desktop-application">
   <id>io.github.mfat.tvhplayer</id>
   <name>TVHplayer</name>
-  <summary>A desktop client for Tvheadend for watching and recording live TV channels</summary>
+  <summary>Watch live TV and record your favorite shows</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0+</project_license>
   <description>
     <p>
-      TVHplayer is a desktop app for watching and recording live TV. It comes with its own built-in Tvheadend server, and also connects to any Tvheadend server you already run.
+      TVHplayer is a desktop app for watching and recording live TV powered by Tvheadend. It supports IPTV, HDHomerun, program guides and more.
     </p>
     <p>Features include:</p>
     <ul>
-      <li>Watch live TV and radio from an IPTV playlist, a tuner or HDHomerun</li>
-      <li>Built-in Tvheadend server that starts and stops with the app</li>
-      <li>Scan for channels with USB, PCIe, SAT&gt;IP and HDHomeRun tuners</li>
-      <li>Import IPTV channels from M3U playlists, with TV guide data from XMLTV</li>
-      <li>TV guide showing every channel on a timeline, with watch and record from the guide</li>
-      <li>Record on the server or on local computer, and convert recordings for video editing</li>
-      <li>Customizable channel list with logos, now and next, groups and favourites</li>
-      <li>Cast live channels to Chromecast and Cast-enabled televisions</li>
-      <li>Light and dark themes, keyboard shortcuts and screen reader support</li>
-      <li>Support for multiple Tvheadend servers over HTSP or HTTP</li>
+      <li>Watch live TV channels from an IPTV playlist, a tuner or HDHomerun</li>
+      <li>Record live TV while watching</li>
+      <li>Schedule recordings for your favorite shows</li>
+      <li>Cast live channels to your Chromecast-enabled TV from your computer</li>
+      <li>Browse program guides</li>
+      <li>Fetch missing guides from online sources</li>
+      <li>Rewind live TV during playback</li>
     </ul>
   </description>
   <launchable type="desktop-id">io.github.mfat.tvhplayer.desktop</launchable>
   <screenshots>
     <screenshot type="default">
-      <caption>Channel list and player with the built-in server</caption>
-      <image>https://raw.githubusercontent.com/mfat/tvhplayer/f4f04fa1d39b3f92493d779bfe15f2cc2f4d5087/Screenshots/main.png</image>
+      <caption>Watch live TV with what’s on now beside every channel</caption>
+      <image type="source" width="1379" height="660">https://raw.githubusercontent.com/mfat/tvhplayer/a8208a67c1cd43d15b3ee6ab50b690ede5b96cef/Screenshots/main-window.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>See what’s on every channel in the TV guide</caption>
+      <image type="source" width="1379" height="660">https://raw.githubusercontent.com/mfat/tvhplayer/a8208a67c1cd43d15b3ee6ab50b690ede5b96cef/Screenshots/tv-guide.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Record several channels at once to your computer</caption>
+      <image type="source" width="1379" height="660">https://raw.githubusercontent.com/mfat/tvhplayer/a8208a67c1cd43d15b3ee6ab50b690ede5b96cef/Screenshots/recordings.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Light and dark styles follow your desktop</caption>
+      <image type="source" width="1379" height="660">https://raw.githubusercontent.com/mfat/tvhplayer/a8208a67c1cd43d15b3ee6ab50b690ede5b96cef/Screenshots/dark-style.png</image>
     </screenshot>
   </screenshots>
   <url type="homepage">https://github.com/mfat/tvhplayer</url>
   <url type="bugtracker">https://github.com/mfat/tvhplayer/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="4.6.5" date="2026-11-07">
+      <description>
+        <ul>
+          <li>Make the Organic theme the default for new installs.</li>
+          <li>Fix gaps at the rounded corners of menus and other popups in the Organic theme.</li>
+          <li>Keep the window title readable when switching between light and dark while the app is open.</li>
+          <li>Show pressed, switched-on, disabled and focused controls more clearly in the Organic theme.</li>
+          <li>Show the Flatpak recordings folder by its real location, with clearer guidance when it is unavailable.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.6.4" date="2026-11-07">
+      <description>
+        <ul>
+          <li>Improve built-in server first-run setup and channel onboarding, including retry and dismissal behavior.</li>
+          <li>Show clearer Windows setup diagnostics, prerequisite actions, and credential-safe error details.</li>
+          <li>Strengthen built-in server startup readiness checks and Windows package validation.</li>
+          <li>Enlarge the Windows app icon and refine Linux and macOS icon sizing.</li>
+          <li>Restore macOS Apple Silicon builds on supported runners.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="4.6.3" date="2026-11-06">
+      <description>
+        <ul>
+          <li>Improve Windows built-in server setup with clear prerequisite checklists and actions under failed checks.</li>
+          <li>Detect unavailable hardware virtualization and keep the built-in server disabled until the user explicitly retries.</li>
+          <li>Resume WSL setup after restarting Windows and keep playlist imports to remote servers available during local setup.</li>
+          <li>Fix verification of Windows backend settings-folder permissions for canonical account identities.</li>
+        </ul>
+      </description>
+    </release>
     <release version="4.6.2" date="2026-11-06">
       <description>
         <ul>

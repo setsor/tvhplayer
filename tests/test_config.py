@@ -19,6 +19,17 @@ def test_config_roundtrip_normalizes_servers(tmp_path):
     assert loaded.data['window_geometry']['width'] == 1200
 
 
+def test_app_profile_override_isolates_app_data_without_changing_windows_profile(tmp_path, monkeypatch):
+    from tvhplayer.core.config import default_config_dir, default_cache_dir
+    from tvhplayer.core.logs import log_dir
+    monkeypatch.setenv('TVHPLAYER_PROFILE_DIR', str(tmp_path))
+    original = {key: os.environ.get(key) for key in ('APPDATA', 'LOCALAPPDATA', 'USERPROFILE')}
+    assert default_config_dir() == tmp_path / 'Roaming/TVHplayer'
+    assert default_cache_dir() == tmp_path / 'Local/TVHplayer/Cache'
+    assert log_dir() == tmp_path / 'Local/TVHplayer/Logs'
+    assert {key: os.environ.get(key) for key in original} == original
+
+
 def test_old_config_keeps_port_80_for_portless_http_once(tmp_path):
     path = tmp_path / 'tvhplayer.conf'
     path.write_text(json.dumps({'servers': [
@@ -133,9 +144,11 @@ def test_cast_automatic_and_manual_choices_roundtrip_separately(tmp_path):
     assert loaded.data['cast_auto_profiles'] == {'receiver|local': 'webm-profile'}
 
 
-def test_theme_defaults_to_tvhplayer_and_keeps_a_qt_style_name(tmp_path):
+def test_theme_defaults_to_organic_and_keeps_a_chosen_one(tmp_path):
     path = tmp_path / 'tvhplayer.conf'
-    for saved, loaded in ((None, 'TVHplayer'), ('', 'TVHplayer'), (3, 'TVHplayer'), ('Breeze', 'Breeze')):
+    assert ConfigStore(tmp_path / 'new.conf').data['ui_theme'] == 'Organic'
+    for saved, loaded in ((None, 'Organic'), ('', 'Organic'), (3, 'Organic'), ('Breeze', 'Breeze'),
+                          ('TVHplayer', 'TVHplayer')):
         path.write_text(json.dumps({'ui_theme': saved}), encoding='utf-8')
         assert ConfigStore(path).data['ui_theme'] == loaded
 
@@ -189,7 +202,10 @@ def test_every_setting_has_a_default_and_bad_values_are_replaced(tmp_path):
     assert data['convert_options'] == ''
     assert data['last_channel'] == {}
     assert data['hide_dead_channels'] is False
-    assert default_config()['hide_dead_channels'] is True
+    # A config saved before this setting existed gets marking on.
+    assert data['mark_dead_channels'] is True
+    assert default_config()['hide_dead_channels'] is False
+    assert default_config()['mark_dead_channels'] is True
 
 
 def test_timeshift_size_falls_back_when_unusable(tmp_path):
@@ -217,11 +233,30 @@ def test_live_resize_stays_unset_until_chosen(tmp_path):
     assert 'resize_on_release' not in ConfigStore(path).data
 
 
-def test_own_title_bar_is_off_unless_chosen(tmp_path):
+def test_title_bar_is_left_to_the_desktop_until_chosen(tmp_path):
     path = tmp_path / 'config.json'
-    assert default_config()['own_title_bar'] is False
+    assert default_config()['title_bar'] is None
+    path.write_text(json.dumps({'title_bar': False}), encoding='utf-8')
+    assert ConfigStore(path).data['title_bar'] is False
+    path.write_text(json.dumps({'title_bar': True}), encoding='utf-8')
+    assert ConfigStore(path).data['title_bar'] is True
+
+
+def test_earlier_title_bar_switch_carries_over_only_when_on(tmp_path):
+    # Every config up to 4.6 held own_title_bar, false unless it was switched
+    # on: a false one is the old default, not a choice.
+    path = tmp_path / 'config.json'
     path.write_text(json.dumps({'own_title_bar': True}), encoding='utf-8')
-    assert ConfigStore(path).data['own_title_bar'] is True
+    data = ConfigStore(path).data
+    assert data['title_bar'] is True and 'own_title_bar' not in data
+    path.write_text(json.dumps({'own_title_bar': False}), encoding='utf-8')
+    data = ConfigStore(path).data
+    assert data['title_bar'] is None and 'own_title_bar' not in data
+    # Once saved, the choice stays as it is.
+    store = ConfigStore(path)
+    store.data['title_bar'] = False
+    store.save()
+    assert ConfigStore(path).data['title_bar'] is False
 
 
 def test_legacy_player_engine_choice_is_dropped(tmp_path):
