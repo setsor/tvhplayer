@@ -1250,7 +1250,7 @@ class GuideWindow(QDialog):
         quick = programme_recording(
             getattr(self.host, '_dvr_entries', None), channel, event
         )
-        if quick is not None and is_quick_recording(quick):
+        if not state and quick is not None and is_quick_recording(quick):
             if event.stop > planned_stop(quick):
                 self.record_btn.setText("Extend Quick Record")
                 describe(self.record_btn, "Extend Quick Record",
@@ -1285,23 +1285,24 @@ class GuideWindow(QDialog):
         title = event.title or "the programme"
         try:
             backend = self.host.get_backend()
-            # Recheck the live server. An EPG snapshot can be stale and a
-            # manual Quick Record may not carry an EPG broadcast id.
-            existing = programme_recording(
-                backend.list_dvr_entries(), channel, event
-            )
-            if existing is not None and is_quick_recording(existing):
-                handler = getattr(self.host, '_handle_existing_programme_recording', None)
-                if handler is not None:
-                    handler(existing, event, backend)
-                else:
-                    self._status(f"Quick Record already active for {title}; use Tasks.")
-                self.host._refresh_tasks()
-                return
-            if existing is not None and not state:
-                self._status(f"{title} is already scheduled or recording; use Tasks.")
-                self.host._refresh_tasks()
-                return
+            if not state:
+                # Recheck the live server. An EPG snapshot can be stale and a
+                # manual Quick Record may not carry an EPG broadcast id.
+                existing = programme_recording(
+                    backend.list_dvr_entries(), channel, event
+                )
+                if existing is not None and is_quick_recording(existing):
+                    handler = getattr(self.host, '_handle_existing_programme_recording', None)
+                    if handler is not None:
+                        handler(existing, event, backend)
+                    else:
+                        self._status(f"Quick Record already active for {title}; use Tasks.")
+                    self.host._refresh_tasks()
+                    return
+                if existing is not None:
+                    self._status(f"{title} is already scheduled or recording; use Tasks.")
+                    self.host._refresh_tasks()
+                    return
             if state:
                 entry = self._entry_for(event)
                 if entry is None:
