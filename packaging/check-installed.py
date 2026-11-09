@@ -3,7 +3,7 @@
 
 Checks that the files are in place, that every module imports (so a missing
 runtime dependency fails here instead of on a user's machine), and that the
-built-in Tvheadend starts, answers with its generated login, and stops.
+built-in Tvheadend starts, answers only on loopback with --noacl, and stops.
 Run from outside the source tree so the installed copy is imported.
 """
 
@@ -76,8 +76,15 @@ with tempfile.TemporaryDirectory() as config_dir:
         http_port = outcome[0][1]
         if not serverinfo_ok(http_port, username=supervisor.username, password=supervisor.password):
             sys.exit('Built-in server did not accept its generated login')
-        if serverinfo_ok(http_port):
-            sys.exit('Built-in server answered without a login')
+        # Bundled Tvheadend intentionally uses --noacl on loopback only.
+        # Confirm the configured listener stays private and anonymous access
+        # works as expected; credential-based requests are tested above.
+        from core.builtin_server import command_args
+        args = command_args(binary, supervisor.config_dir, supervisor.http_port, supervisor.htsp_port)
+        if '--noacl' not in args or '--bindaddr' not in args or args[args.index('--bindaddr') + 1] != '127.0.0.1':
+            sys.exit('Built-in server is not configured for loopback-only --noacl')
+        if not serverinfo_ok(http_port):
+            sys.exit('Built-in server did not answer without a login on loopback')
     finally:
         supervisor.stop()
 

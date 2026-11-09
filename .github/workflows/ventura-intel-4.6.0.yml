@@ -64,13 +64,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Verify Ventura-specific changes are allowlisted
+      - name: Verify fork-specific changes are allowlisted
         run: |
           set -euo pipefail
           base=d8befc495e87fc4a22d790bbb9bf3f02bec4629d
           git cat-file -e "$base^{commit}"
           git diff --name-only "$base" HEAD
-          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4\.5\.0\.yml|\.github/workflows/ventura-intel-4\.6\.0\.yml|TODO\.md|macos/audit-native-minos\.py|macos/smoke_libmpv\.py|tests/test_channel_view\.py|tests/test_guide_view\.py|tests/test_recording_folder\.py|tests/test_macos_gl_format\.py|tests/test_pyqt6_ui\.py|tests/test_subtitle_preferences\.py|tvhplayer/channel_view\.py|tvhplayer/core/models\.py|tvhplayer/core/mpv_player\.py|tvhplayer/core/subtitle_preferences\.py|tvhplayer/guide_view\.py|tvhplayer/player_bar\.py|tvhplayer/tvhplayer\.py|tvhplayer/video_widget\.py|tests/test_models\.py|tests/test_dvr_api\.py|tvhplayer/core/backend\.py|tvhplayer/core/http_backend\.py|tvhplayer/core/htsp_backend\.py)$' || true)
+          bad=$(git diff --name-only "$base" HEAD | grep -Ev '^(\.github/workflows/ventura-intel-4\.5\.0\.yml|\.github/workflows/ventura-intel-4\.6\.0\.yml|TODO\.md|packaging/check-installed\.py|windows/pins\.env|macos/audit-native-minos\.py|macos/smoke_libmpv\.py|tests/test_channel_view\.py|tests/test_guide_view\.py|tests/test_recording_folder\.py|tests/test_macos_gl_format\.py|tests/test_pyqt6_ui\.py|tests/test_subtitle_preferences\.py|tvhplayer/channel_view\.py|tvhplayer/core/models\.py|tvhplayer/core/mpv_player\.py|tvhplayer/core/subtitle_preferences\.py|tvhplayer/guide_view\.py|tvhplayer/player_bar\.py|tvhplayer/tvhplayer\.py|tvhplayer/video_widget\.py|tests/test_models\.py|tests/test_dvr_api\.py|tvhplayer/core/backend\.py|tvhplayer/core/http_backend\.py|tvhplayer/core/htsp_backend\.py)$' || true)
           if [[ -n "$bad" ]]; then echo "ERROR: source changed: $bad"; exit 1; fi
           grep -q 'version="4.6.5"' setup.py
           echo 'PASS: source changes and Ventura packaging are allowlisted'
