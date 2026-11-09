@@ -75,6 +75,20 @@ def test_port_collision_recreates_only_owned_container(tmp_path, monkeypatch):
     assert s.status == 'stopped'
 
 
+@pytest.mark.parametrize('failures,fatal', [(['plain login'], True), (['unknown setting'], True),
+    (['recordings folder'], False), (['recording margins', 'setup wizard off'], False)])
+def test_windows_uses_same_essential_defaults_policy(tmp_path, monkeypatch, failures, fatal):
+    s = supervisor(tmp_path, monkeypatch, Runtime())
+    monkeypatch.setattr(module, 'apply_builtin_defaults', lambda *args, **kwargs: failures)
+    ready, errors = [], []
+    s.ready.connect(lambda *_ports: ready.append(True))
+    s.failed.connect(errors.append)
+    s._run()
+    assert bool(errors) == fatal
+    assert bool(ready) != fatal
+    assert s.startup_warnings == ([] if fatal else failures)
+
+
 def test_hdhomerun_udp_range_is_published_and_configured(tmp_path, monkeypatch):
     from tvhplayer.core.hdhomerun import HdHomeRunTransport
     runtime = Runtime()
@@ -172,6 +186,9 @@ def test_setup_commands_are_explicit_fixed_actions():
     assert '--no-distribution' in setup_command('install')[-1]
     assert '-Verb RunAs' in setup_command('install')[-1]
     assert '--update' in setup_command('update')[-1]
+    repair = setup_command('repair')[-1]
+    assert 'dism.exe' in repair and '/featurename:VirtualMachinePlatform' in repair
+    assert '/norestart' in repair and '-Verb RunAs' in repair
     with pytest.raises(ValueError):
         setup_command('arbitrary shell text')
 

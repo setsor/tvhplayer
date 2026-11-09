@@ -5,9 +5,14 @@
 
 
 # TVHplayer
-Watch and record your favorite shows right on your PC or laptop. Supports IPTV, HDHomerun, USB TV tuners and more. 
+Watch live TV and record your favorite shows right on your PC or laptop. Supports IPTV, HDHomerun and more. 
 
-<img width="1418" height="894" alt="main" src="https://github.com/user-attachments/assets/95471032-de4f-4778-a984-722bd2d10dbf" />
+
+
+
+https://github.com/user-attachments/assets/81b82de6-d414-4de1-824e-5ae826cfe540
+
+
 
 
 ## About
@@ -16,10 +21,8 @@ TVHplayer is a cross-platform desktop app for watching and recording live TV usi
 <img width="1965" height="1055" alt="image" src="https://github.com/user-attachments/assets/fe5fae0a-90df-45f0-9bcd-a272cefd76ba" />
 
 
-## Who is this for
-This is for people who already have a Tvheadend server.
-
-But if you use linux, you can use this as a normal TV and PVR app, using the built-in server. You just need an IPTV playlist, or a TV tuner. 
+## Do I need a Tvheadend server to use this?
+No, TVHplayer comes with its own built-in server and works out of the box. But it can also connect to your existing Tvheadend servers too. You can add as many servers as you want.
 
 ## Features
 
@@ -28,8 +31,10 @@ But if you use linux, you can use this as a normal TV and PVR app, using the bui
 - Cast live channels to Chromecast and Cast-enabled televisions from the player bar
 - Timeshif
 
-**Built-in server (Linux only)**
-- Comes with its own optional Tvheadend out of the box (optional, you can use any server), no need to set up a server to watch IPTV or use a USB tuner
+**Built-in server (Linux and Windows)**
+- Optional bundled Tvheadend; existing remote servers remain available
+- Native Linux backend, or WSL Containers on Windows (no Docker or separate Ubuntu installation)
+- Windows does not provide USB tuner passthrough; use supported network tuners or a remote server
 
 **TV guide**
 - Browse EPG
@@ -49,7 +54,7 @@ But if you use linux, you can use this as a normal TV and PVR app, using the bui
 - **macOS:** [Apple silicon](https://mfat.github.io/tvhplayer/download.html?format=macos-arm64) · [Intel](https://mfat.github.io/tvhplayer/download.html?format=macos-x86_64)
 - **Windows:** [installer](https://mfat.github.io/tvhplayer/download.html?format=windows-setup) · [portable zip](https://mfat.github.io/tvhplayer/download.html?format=windows-zip)
 
-The download links automatically get the latest version. The Flatpak, AppImage, deb and rpm include the built-in server, mpv and ffmpeg, or pull them in as dependencies. The macOS and Windows builds connect to an existing Tvheadend server; the built-in server is a Linux-only feature.
+The download links automatically get the latest version. The Flatpak, AppImage, deb and rpm include the built-in server, mpv and ffmpeg, or pull them in as dependencies. Complete Windows installer and ZIP packages include the optional offline WSL Containers backend. macOS connects to an existing Tvheadend server.
 
 You can also [browse all releases](https://github.com/mfat/tvhplayer/releases).
 
@@ -89,3 +94,35 @@ Doge:  `DRzNb8DycFD65H6oHNLuzyTzY1S5avPHHx`
 Windows packages can include an offline WSL Containers backend with native UI,
 automatic credentials and HDHomeRun discovery. Build/setup instructions and
 release qualification notes are in [windows/backend/README.md](windows/backend/README.md).
+
+On first use, TVHplayer checks WSL, Virtual Machine Platform, and hardware
+virtualization before starting the Windows built-in server. Setup offers the
+required installation or repair with administrator permission. After installing
+WSL or enabling Virtual Machine Platform, restart **Windows**, even if Windows
+does not display a reboot prompt. Reopen TVHplayer to resume setup automatically.
+Playlist import into the built-in server becomes available once it is ready;
+import into an existing remote server does not require local WSL setup.
+If hardware virtualization is disabled or unavailable, TVHplayer disables the
+built-in server and its automatic setup checks, including after relaunch.
+Remote servers remain usable. After enabling virtualization in BIOS/UEFI, use
+the gear button, select Built-in Server, and choose **Enable and check…** to retry.
+
+The installer and ZIP use the same in-app setup. Extract the entire ZIP before
+opening TVHplayer. The app requests administrator permission only when you choose
+to install/update WSL or enable a required Windows feature. BIOS/UEFI virtualization
+must be enabled manually. Settings and restart progress are stored in AppData,
+including for the ZIP version. Installing ordinary WSL does not by itself confirm
+that WSL Containers can start on your Windows version.
+
+After the built-in server starts with no channels, Set Up Channels offers a tuner
+or an IPTV playlist. Closing it lets it appear again next launch; select
+**Don’t open setup automatically** to stop automatic offers. It remains available
+from File > Set Up Channels. Setup is complete when the server actually has channels.
+
+Startup shows separate stages for checking Windows support, verifying/importing
+the server image, preparing settings and storage, and testing the server connection.
+When startup fails, the checklist shows what needs attention. Expand **Technical
+details** or choose **Copy details** when reporting an unexpected error.
+
+See [first-run validation](windows/backend/VALIDATION.md) for automated checks and
+the fresh-Windows/UAC/reboot scenarios that still require an isolated test machine.

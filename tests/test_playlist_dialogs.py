@@ -121,7 +121,7 @@ class FakeHost:
     def playlist_imported(self, server):
         self.imported.append(server)
 
-    def playlist_channels_changed(self, server):
+    def playlist_channels_changed(self, server, added=False):
         self.changed.append(server)
 
     def show_server(self, server):
@@ -197,6 +197,59 @@ def _playlist(tmp_path, text):
 
 
 TWO = '#EXTM3U\n#EXTINF:-1 tvg-chno="1",A\nhttp://x/a.ts\n#EXTINF:-1,B\nhttp://x/b.m3u8\n'
+
+
+def test_remote_import_works_while_windows_builtin_needs_setup(app, tmp_path):
+    from PyQt6.QtCore import QObject, pyqtSignal
+    class Supervisor(QObject):
+        status_changed = pyqtSignal(str)
+        ready = pyqtSignal(int, int)
+        failed = pyqtSignal(str)
+        setup_issue = RuntimeError('Windows restart required')
+        disabled = True
+        status = 'failed'
+        def is_running(self):
+            return self.status == 'running'
+        def start(self):
+            pytest.fail('Remote import must not start the Windows server')
+    host = FakeHost([BUILTIN, OTHER], current=OTHER)
+    host.builtin = Supervisor()
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN)
+    assert not dialog.import_btn.isEnabled()
+    assert not dialog.setup_btn.isHidden()
+    dialog._start()
+    assert dialog._job is None
+    dialog.server_combo.setCurrentIndex(1)
+    assert dialog.import_btn.isEnabled()
+    assert dialog.setup_btn.isHidden()
+    dialog.location_input.setText(_playlist(tmp_path, TWO))
+    _run(app, dialog)
+    assert host.imported == [OTHER]
+    dialog.reject()
+
+
+def test_builtin_import_unlocks_only_after_server_ready(app):
+    from PyQt6.QtCore import QObject, pyqtSignal
+    class Supervisor(QObject):
+        status_changed = pyqtSignal(str)
+        ready = pyqtSignal(int, int)
+        failed = pyqtSignal(str)
+        setup_issue = None
+        status = 'starting'
+        def is_running(self):
+            return self.status == 'running'
+    host = FakeHost([BUILTIN, OTHER])
+    host.builtin = Supervisor()
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN)
+    assert not dialog.import_btn.isEnabled()
+    host.builtin.status = 'running'
+    host.builtin.ready.emit(9981, 9982)
+    assert dialog.import_btn.isEnabled()
+    assert dialog.setup_btn.isHidden()
+    host.builtin.status = 'failed'
+    host.builtin.failed.emit('Server failed')
+    assert not dialog.import_btn.isEnabled()
+    dialog.reject()
 
 
 def test_import_to_builtin_server_in_one_step(app, tmp_path):
@@ -457,7 +510,7 @@ def test_closing_while_checking_hands_the_job_to_the_host(app, tmp_path, monkeyp
     while time.monotonic() < deadline and dialog.hint_label.isHidden():
         app.processEvents()
         time.sleep(0.02)
-    assert dialog.hint_label.text() == dialogs.CHECK_HINT
+    assert dialog.hint_label.text() == dialogs.check_hint(host.hides_dead_channels())
     assert dialog.close_btn.text() == 'Close'
 
     job = dialog._job
@@ -491,28 +544,60 @@ def _finish(app, job, timeout=10):
     return events
 
 
-def test_import_without_hiding_skips_the_check(app, tmp_path):
+class _OneDead(FakeAdmin):
+    """The second stream fails the server's test; each mux feeds one channel."""
+
+    hidden = []
+
+    def create_mux(self, network_uuid, conf):
+        uuid = super().create_mux(network_uuid, conf)
+        if uuid == 'm2':
+            self.muxes[uuid].update(scan_result=2)
+        return uuid
+
+    def list_services(self, mux_uuids, fields=None):
+        return [{'uuid': f's{uuid}', 'multiplex_uuid': uuid, 'enabled': True, 'channel': [f'c{uuid}']}
+                for uuid in self.muxes if uuid in set(mux_uuids)]
+
+    def save(self, nodes):
+        _OneDead.hidden.extend(node['uuid'] for node in nodes if node.get('enabled') is False)
+
+
+def test_import_without_hiding_still_tests_and_marks_failures(app, tmp_path, monkeypatch):
+    monkeypatch.setattr(dialogs, 'TvhAdmin', _OneDead)
+    _OneDead.hidden = []
     host = FakeHost([BUILTIN], current=BUILTIN)
     host.hide_dead = False
     source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
     events = _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True))
-    assert events == ['Added 2 channels from news.']
+    assert events == ['checking', 'Added 2 channels from news. 1 is marked in the channel list because it is not working.']
+    assert _OneDead.hidden == []
+    health = PlaylistSource.from_dict(host.stored[-1]).health
+    assert [item['channels'] for item in health.values() if item['status'] == 'failed'] == [['cm2']]
 
 
-def test_an_import_stops_waiting_for_the_test_once_hiding_is_off(app, tmp_path, monkeypatch):
-    class SlowScan(FakeAdmin):
+def test_turning_hiding_off_during_the_test_marks_instead(app, tmp_path, monkeypatch):
+    class SlowScan(_OneDead):
         def create_mux(self, network_uuid, conf):
             uuid = super().create_mux(network_uuid, conf)
-            self.muxes[uuid].update(scan_state=1, scan_result=0)
+            self.muxes[uuid]['scan_state'] = 1
             return uuid
 
     monkeypatch.setattr(dialogs, 'TvhAdmin', SlowScan)
+    SlowScan.hidden = []
     host = FakeHost([BUILTIN], current=BUILTIN)
     source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
     job = dialogs.PlaylistJob(host, source, BUILTIN, first_import=True)
-    job.checking.connect(lambda: setattr(host, 'hide_dead', False))
+
+    def finish_scans():
+        host.hide_dead = False
+        for mux in FakeAdmin.servers[BUILTIN['url']]['muxes'].values():
+            mux['scan_state'] = 0
+
+    job.checking.connect(finish_scans)
     events = _finish(app, job)
-    assert events == ['checking', 'Added 2 channels from news. Channels that were not checked yet stay in the list.']
+    assert events == ['checking', 'Added 2 channels from news. 1 is marked in the channel list because it is not working.']
+    assert SlowScan.hidden == []
 
 
 def test_check_and_show_every_channel_of_an_imported_playlist(app, tmp_path):
@@ -588,8 +673,17 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
         def set_hides_dead_channels(self, on):
             self.hide = on
 
+        mark = True
+
+        def marks_dead_channels(self):
+            return self.mark
+
+        def set_marks_dead_channels(self, on):
+            self.mark = on
+
         def local_recording_dir(self):
-            return '/videos'
+            # The dialog shows what the host saved, not the path it was given.
+            return getattr(self, 'folder', '/videos')
 
         def set_local_recording_dir(self, folder):
             self.folder = folder
@@ -769,6 +863,12 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     assert host.theme == 'Fusion'
     assert not dialog.window_color_combo.isVisibleTo(dialog)
     assert dialog.hide_check.isChecked()
+    assert dialog.mark_check.isChecked()
+    dialog.mark_check.click()
+    assert host.mark is False
+    assert dialog.status_label.text() == 'Channels that do not work are no longer marked.'
+    dialog.mark_check.click()
+    assert host.mark is True
     assert not dialog.play_check.isChecked()
     dialog.play_check.click()
     assert host.play is True
@@ -1002,7 +1102,7 @@ def test_job_adds_only_the_chosen_channels(app, tmp_path):
         return True
 
     events = _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True, choose=keep_news))
-    assert events == ['Added 2 channels from news.']
+    assert events == ['checking', 'Added 2 channels from news.']
     stored = PlaylistSource.from_dict(host.stored[-1])
     assert stored.chosen_groups == ['News']
     assert sorted(stored.muxes) == ['name:A', 'name:B']

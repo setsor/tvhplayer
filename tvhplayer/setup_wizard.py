@@ -37,42 +37,74 @@ from PyQt6.QtWidgets import (
 )
 
 try:
-    from .a11y import announce_label, buddy_label, describe
+    from .a11y import announce_label, buddy_label, describe, set_item_access
+    from .core.signal import SignalReadings
+    from .signal_meter import SignalMeter
     from .ui_theme import color as theme_color, is_active as theme_is_active, is_organic
     from .core.errors import TvhAuthError
     from .core.tuner_setup import (
         KIND_WORDS,
         create_tuner_network,
         discover_satip,
+        ChannelPlan,
+        FREQ_CHANNELS,
+        FREQ_EMPTY,
+        FREQ_NO_DATA,
+        FREQ_SCANNING,
+        FREQ_SKIPPED,
+        FREQ_WAITING,
+        ScanProgress,
+        follow_new_channels,
         map_services,
-        mapper_progress,
         network_name,
+        plan_channels,
         scan_progress,
         scan_regions,
-        services_to_map,
+        scan_summary,
         supported,
     )
     from .core.tuners import read_tuners
-    from .core.hdhomerun import read_windows_builtin_tuners
+    from .core.hdhomerun import (
+        firewall_allow_command,
+        firewall_blocked_devices,
+        hdhomerun_address,
+        read_windows_builtin_tuners,
+    )
     from .core.tvh_admin import TvhAdmin
 except ImportError:
-    from a11y import announce_label, buddy_label, describe
+    from a11y import announce_label, buddy_label, describe, set_item_access
+    from core.signal import SignalReadings
+    from signal_meter import SignalMeter
     from ui_theme import color as theme_color, is_active as theme_is_active, is_organic
     from core.errors import TvhAuthError
     from core.tuner_setup import (
         KIND_WORDS,
         create_tuner_network,
         discover_satip,
+        ChannelPlan,
+        FREQ_CHANNELS,
+        FREQ_EMPTY,
+        FREQ_NO_DATA,
+        FREQ_SCANNING,
+        FREQ_SKIPPED,
+        FREQ_WAITING,
+        ScanProgress,
+        follow_new_channels,
         map_services,
-        mapper_progress,
         network_name,
+        plan_channels,
         scan_progress,
         scan_regions,
-        services_to_map,
+        scan_summary,
         supported,
     )
     from core.tuners import read_tuners
-    from core.hdhomerun import read_windows_builtin_tuners
+    from core.hdhomerun import (
+        firewall_allow_command,
+        firewall_blocked_devices,
+        hdhomerun_address,
+        read_windows_builtin_tuners,
+    )
     from core.tvh_admin import TvhAdmin
 
 SOURCE_TUNER = 'tuner'
@@ -80,6 +112,9 @@ SOURCE_IPTV = 'iptv'
 POLL_MS = 2000
 # A scan that finds nothing new for this long has stalled.
 SCAN_STALL_SECONDS = 600
+# The server makes channels a few seconds after it is asked to; wait at most
+# this long for them.
+ADD_WAIT_SECONDS = 30
 # SAT>IP servers answer discovery within a few seconds. The server looks for HDHomeRun
 # tuners by itself every 15 seconds.
 DISCOVERY_WAIT_SECONDS = 4
@@ -354,6 +389,8 @@ class SetupWizard(QWizard):
         self.source_page = SourcePage(self)
         self.tuner_page = TunerPage(self)
         self.scan_page = ScanPage(self)
+        self.dismiss_automatic = QCheckBox('Don’t open setup automatically')
+        self.source_page.layout().addWidget(self.dismiss_automatic)
         self.addPage(self.source_page)
         self.addPage(self.tuner_page)
         self.addPage(self.scan_page)
@@ -459,8 +496,30 @@ class SourcePage(QWizardPage):
         actions = QHBoxLayout()
         actions.addWidget(self.look_btn)
         actions.addStretch(1)
+        # An HDHomeRun that a firewall on this computer hides from the built-in server.
+        self.firewall = QWidget()
+        firewall_rows = QVBoxLayout(self.firewall)
+        firewall_rows.setContentsMargins(0, 0, 0, 0)
+        firewall_rows.setSpacing(8)
+        self.firewall_note = QLabel('')
+        self.firewall_note.setWordWrap(True)
+        self.firewall_command = QLineEdit()
+        self.firewall_command.setReadOnly(True)
+        describe(self.firewall_command, 'Command', 'The command that lets the HDHomeRun through the firewall.')
+        self.copy_command_btn = QPushButton('&Copy Command')
+        describe(self.copy_command_btn, 'Copy command', 'Copy the firewall command, to paste in a terminal.')
+        self.copy_command_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.firewall_command.text()))
+        # The command has the card's whole width, so it fits without scrolling.
+        firewall_rows.addWidget(self.firewall_note)
+        firewall_rows.addWidget(self.firewall_command)
+        actions.insertWidget(1, self.copy_command_btn)
+        self.copy_command_btn.hide()
+        self.firewall.hide()
+        self._blocked = []
         self.tuner_card.body.addWidget(self.status)
         self.tuner_card.body.addWidget(self.found)
+        self.tuner_card.body.addWidget(self.firewall)
         self.tuner_card.body.addLayout(actions)
         layout.addWidget(self.tuner_card)
         layout.addWidget(self.iptv_card)
@@ -545,7 +604,57 @@ class SourcePage(QWizardPage):
     def _tuner_reader(self):
         if sys.platform == 'win32' and self._wizard.server.get('builtin'):
             return read_windows_builtin_tuners
+        if sys.platform.startswith('linux') and self._wizard.server.get('builtin'):
+            return self._read_local_tuners
         return read_tuners
+
+    def _read_local_tuners(self, admin):
+        """The built-in server's tuners, and any HDHomeRun a firewall on this computer hides from it."""
+        tuners = read_tuners(admin)
+        self._blocked = []
+        if not any(hdhomerun_address(tuner) for tuner in tuners):
+            self._blocked = firewall_blocked_devices()
+        return tuners
+
+    def _show_firewall(self):
+        blocked = self._blocked
+        if not blocked:
+            self.firewall.hide()
+            self.copy_command_btn.hide()
+            return
+        where = blocked[0] if len(blocked) == 1 else ', '.join(blocked[:-1]) + f' and {blocked[-1]}'
+        device = 'an HDHomeRun' if len(blocked) == 1 else 'HDHomeRuns'
+        commands = [firewall_allow_command(address) for address in blocked]
+        if all(commands):
+            how = 'To allow it, run this in a terminal, then choose Look again:' if len(blocked) == 1 else \
+                'To allow them, run this in a terminal, then choose Look again:'
+            self.firewall_command.setText(' && '.join(commands))
+            # Show its start, "sudo ufw", when the box is too narrow for all of it.
+            self.firewall_command.setCursorPosition(0)
+        else:
+            how = f'Allow UDP traffic from {where} in the firewall, then choose Look again.'
+            self.firewall_command.clear()
+        self.firewall_command.setVisible(bool(self.firewall_command.text()))
+        self.copy_command_btn.setVisible(bool(self.firewall_command.text()))
+        announce_label(self.firewall_note, f'Found {device} at {where}, but a firewall on this computer '
+                                           f'blocks it from the built-in server. {how}')
+        self.firewall.show()
+        QTimer.singleShot(0, self._fit_window)
+
+    def _fit_window(self):
+        """Grow the window when the page outgrows it.
+
+        Qt squeezes wrapped text, not the window, when a page's content no
+        longer fits, so the note would be cut to a line or two.
+        """
+        layout = self.layout()
+        if layout.hasHeightForWidth():
+            needed = layout.totalHeightForWidth(self.width())
+        else:
+            needed = layout.totalSizeHint().height()
+        extra = needed - self.height()
+        if extra > 0:
+            self._wizard.resize(self._wizard.width(), self._wizard.height() + extra)
 
     def _read_tuners(self):
         self._looking = True
@@ -559,6 +668,7 @@ class SourcePage(QWizardPage):
         self.look_btn.setEnabled(True)
         if error:
             self._wizard.tuners = []
+            self._blocked = []
             announce_label(self.status, f'Could not look for tuners: {error}')
         else:
             self._wizard.tuners = [tuner for tuner in tuners or [] if supported(tuner.kind)]
@@ -569,6 +679,8 @@ class SourcePage(QWizardPage):
             elif tuners:
                 kinds = ', '.join(sorted({tuner.kind for tuner in tuners}))
                 announce_label(self.status, f'Found tuners for {kinds}, which TVHplayer cannot set up yet.')
+            elif self._blocked:
+                announce_label(self.status, 'No tuner the server can use was found.')
             else:
                 announce_label(
                     self.status,
@@ -576,6 +688,7 @@ class SourcePage(QWizardPage):
                     'network, then choose Look again.',
                 )
         self._show_found(self._wizard.tuners)
+        self._show_firewall()
         self.tuner_radio.setEnabled(bool(self._wizard.tuners))
         if self.group.checkedButton() is None or not self._wizard.tuners:
             (self.tuner_radio if self._wizard.tuners else self.iptv_radio).setChecked(True)
@@ -745,6 +858,87 @@ class TunerPage(QWizardPage):
         return bool(self.chosen_tuners()) and self.region() is not None
 
 
+def _plural(number, one, many):
+    return f'{number} {one if number == 1 else many}'
+
+
+def _firewall_advice(server, tuners):
+    """For a scan on this computer's built-in server: the command that lets its HDHomeRuns through ufw."""
+    if not (server.get('builtin') and sys.platform.startswith('linux')):
+        return ''
+    commands = [firewall_allow_command(address) for address in
+                dict.fromkeys(hdhomerun_address(tuner) for tuner in tuners) if address]
+    commands = [command for command in commands if command]
+    if not commands:
+        return ''
+    return 'If ufw is on, this lets the HDHomeRun through: ' + ' && '.join(commands)
+
+
+def _scan_activity(progress):
+    """What the tuners are doing now."""
+    if progress.done:
+        return 'Scan finished.'
+    # Which frequencies, the list below shows.
+    if any(item.state == FREQ_SCANNING for item in progress.frequencies):
+        return 'Scanning…'
+    if progress.scanned:
+        return 'Waiting for a free tuner…'
+    return 'Starting the scan…'
+
+
+def _scan_counts(progress):
+    """The scan so far: how far it got, and the channels found. Each frequency's result is in the list."""
+    checked = f'Checked {progress.scanned} of {_plural(progress.muxes, "frequency", "frequencies")}.'
+    return f"{checked} {_plural(progress.services, 'channel', 'channels')} found so far."
+
+
+def _frequency_text(item):
+    """One frequency's line in the scan list. Its signal readings go in the meter below it."""
+    if item.state == FREQ_SCANNING:
+        reception = item.reception
+        if reception is None or not reception.signal:
+            return f'{item.label}: scanning, looking for a signal'
+        return f'{item.label}: scanning'
+    if item.state == FREQ_CHANNELS:
+        return f"{item.label}: {_plural(item.services, 'channel', 'channels')}"
+    if item.state == FREQ_EMPTY:
+        return f'{item.label}: received, but no channels on it'
+    if item.state == FREQ_NO_DATA:
+        return f'{item.label}: signal found, but no data reached the server'
+    if item.state == FREQ_SKIPPED:
+        return f'{item.label}: skipped'
+    return f'{item.label}: no station'
+
+
+def _frequency_readings(item):
+    return item.reception.signal if item.reception is not None else SignalReadings()
+
+
+def _frequency_access(item):
+    """The row in words for assistive technology: the line, then the readings."""
+    readings = _frequency_readings(item)
+    text = _frequency_text(item)
+    return f'{text}. {readings.describe()}' if readings else text
+
+
+class _FrequencyRow(QWidget):
+    """A frequency and what it came to, with its signal strength and quality below."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.setSpacing(4)
+        self.text = QLabel('')
+        self.meter = SignalMeter()
+        layout.addWidget(self.text)
+        layout.addWidget(self.meter)
+
+    def show_frequency(self, item):
+        self.text.setText(_frequency_text(item))
+        self.meter.set_readings(_frequency_readings(item))
+
+
 class ScanPage(QWizardPage):
     def __init__(self, wizard):
         super().__init__()
@@ -772,15 +966,28 @@ class ScanPage(QWizardPage):
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.progress.setAccessibleName('Scan progress')
+        self.counts = QLabel('')
+        self.counts.setWordWrap(True)
+        self.counts.setObjectName('rowDesc')
+        self.counts.hide()
+        self.frequency_list = QListWidget()
+        self.frequency_list.setAccessibleName('Frequencies scanned')
+        self.frequency_list.setAccessibleDescription('Each frequency checked so far, and what was found on it')
+        self.frequency_list.hide()
+        self._rows = {}
         inner.addWidget(self.status)
         inner.addWidget(self.progress)
-        layout.addWidget(card)
-        layout.addStretch(1)
+        inner.addWidget(self.counts)
+        inner.addWidget(self.frequency_list, 1)
+        layout.addWidget(card, 1)
         self._timer = QTimer(self)
         self._timer.setInterval(POLL_MS)
         self._timer.timeout.connect(self._poll)
         self._polling = False
         self._step = ''
+        self._seen = {}
+        self._progress = ScanProgress()
+        self._plan = ChannelPlan()
 
     def changeEvent(self, event):
         if event.type() == QEvent.Type.StyleChange:
@@ -796,6 +1003,7 @@ class ScanPage(QWizardPage):
         key, label = page.region()
         tuners = page.chosen_tuners()
         self._include_encrypted = page.encrypted_check.isChecked()
+        self._advice = _firewall_advice(self._wizard.server, tuners)
         self._step = 'create'
         self.progress.setRange(0, 0)
         announce_label(self.status, 'Setting up the tuners…')
@@ -811,7 +1019,9 @@ class ScanPage(QWizardPage):
         self._network = network
         self._step = 'scan'
         self._last_change = time.monotonic()
-        announce_label(self.status, 'Scanning frequencies…')
+        announce_label(self.status, 'Scanning…')
+        self.counts.show()
+        self.frequency_list.show()
         self._timer.start()
 
     def _poll(self):
@@ -819,10 +1029,11 @@ class ScanPage(QWizardPage):
             return
         self._polling = True
         if self._step == 'scan':
-            network = self._network
-            self._wizard.call(lambda admin: scan_progress(admin, network), self._scanned)
+            network, seen = self._network, self._seen
+            self._wizard.call(lambda admin: scan_progress(admin, network, seen), self._scanned)
         elif self._step == 'map':
-            self._wizard.call(mapper_progress, self._mapped)
+            network, services, named = self._network, self._plan.services, self._named_channels
+            self._wizard.call(lambda admin: follow_new_channels(admin, network, services, named), self._mapped)
         else:
             self._polling = False
 
@@ -831,35 +1042,54 @@ class ScanPage(QWizardPage):
         if error or progress is None:
             self._fail(f'Could not follow the scan: {error}')
             return
+        self._progress = progress
         if (progress.scanned, progress.services) != self._best:
             self._best = (progress.scanned, progress.services)
             self._last_change = time.monotonic()
         self.progress.setRange(0, max(progress.muxes, 1))
         self.progress.setValue(progress.scanned)
-        services = '1 channel' if progress.services == 1 else f'{progress.services} channels'
-        self.status.setText(
-            f'Scanned {progress.scanned} of {progress.muxes} frequencies. Found {services} so far.'
-        )
+        self.status.setText(_scan_activity(progress))
+        self.counts.setText(_scan_counts(progress))
+        self._show_frequencies(progress)
         if progress.done or time.monotonic() - self._last_change > SCAN_STALL_SECONDS:
             self._timer.stop()
             self._step = 'list'
+            announce_label(self.status, 'Reading the channels found…')
             include = self._include_encrypted
             network = self._network
-            self._wizard.call(lambda admin: services_to_map(admin, network, include), self._listed)
+            self._wizard.call(lambda admin: plan_channels(admin, network, include), self._listed)
 
-    def _listed(self, services, error):
+    def _show_frequencies(self, progress):
+        """One row a frequency once it is scanned, in frequency order, updated in place."""
+        shown = [item for item in progress.frequencies if item.state != FREQ_WAITING]
+        for index, item in enumerate(shown):
+            row = self._rows.get(item.uuid)
+            if row is None:
+                # The widget draws the row; the item carries its words for screen readers.
+                row = QListWidgetItem()
+                self._rows[item.uuid] = row
+                self.frequency_list.insertItem(index, row)
+                self.frequency_list.setItemWidget(row, _FrequencyRow())
+            widget = self.frequency_list.itemWidget(row)
+            access = _frequency_access(item)
+            if row.data(Qt.ItemDataRole.AccessibleTextRole) != access:
+                widget.show_frequency(item)
+                set_item_access(row, access)
+                row.setSizeHint(widget.sizeHint())
+
+    def _listed(self, plan, error):
         if error:
             self._fail(f'Could not read the channels found: {error}')
             return
-        services = services or []
-        if not services:
-            self._finish(
-                'No channels were found. Check that the aerial, cable, or dish is connected to the tuner, '
-                'or run Set Up Channels again with another region.'
-            )
+        self._plan = plan or ChannelPlan()
+        if not self._plan.services:
+            self._finish(scan_summary(self._progress, self._plan, 0, self._advice))
             return
-        self._expected = len(services)
+        services = self._plan.services
         self._step = 'map'
+        self._named_channels = set()
+        self._made = -1
+        self._add_deadline = time.monotonic() + ADD_WAIT_SECONDS
         announce_label(self.status, f'Adding {len(services)} channels…')
         self.progress.setRange(0, len(services))
         self.progress.setValue(0)
@@ -876,16 +1106,18 @@ class ScanPage(QWizardPage):
         if error or counts is None:
             self._fail(f'Could not follow the channels being added: {error}')
             return
-        handled, total = counts
-        self.progress.setValue(min(handled, self.progress.maximum()))
-        if total and handled < total:
+        made, waiting = counts
+        self.progress.setValue(min(made, self.progress.maximum()))
+        # The server makes all the channels at once. Some services it does
+        # not take (data ones), so once channels came and stopped coming, or
+        # the time is up, the rest are not coming.
+        settled = made > 0 and made == self._made
+        self._made = made
+        if waiting and not settled and time.monotonic() < self._add_deadline:
             return
         self._timer.stop()
-        self.added = self._expected
-        channels = '1 channel' if self.added == 1 else f'{self.added} channels'
-        self._finish(
-            f'Added {channels}. The TV guide fills in over the next minutes as the channels broadcast it.'
-        )
+        self.added = made
+        self._finish(scan_summary(self._progress, self._plan, made, self._advice))
 
     def _fail(self, text):
         self._timer.stop()
