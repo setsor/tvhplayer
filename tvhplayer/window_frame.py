@@ -19,13 +19,16 @@ from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QMargins, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QGuiApplication, QPainter, QPainterPath, QPalette, QPen, QPixmap
-from PyQt6.QtWidgets import QAbstractButton, QHBoxLayout, QLabel, QMenuBar, QWidget
+from PyQt6.QtWidgets import (
+    QAbstractButton, QApplication, QDialog, QHBoxLayout, QLabel, QMainWindow, QMenu, QMenuBar, QWidget,
+)
 
 try:
-    from . import ui_theme
+    from . import ui_theme, window_menu
     from .system_color_scheme import PORTAL_PATH, PORTAL_SERVICE, PORTAL_SETTINGS_INTERFACE, _unwrap
 except ImportError:
     import ui_theme
+    import window_menu
     from system_color_scheme import PORTAL_PATH, PORTAL_SERVICE, PORTAL_SETTINGS_INTERFACE, _unwrap
 
 # Room for the shadow around the window; it falls a little downwards, as GNOME's does.
@@ -57,6 +60,20 @@ def wants_own_title_bar(platform_name, environ=None, compositing=None) -> bool:
             return True
         return x11_compositing() if compositing is None else compositing
     return False
+
+
+def own_title_bar_by_default(platform_name, environ=None) -> bool:
+    """Until it is chosen in Settings, only GNOME on Wayland has the app's title
+    bar: there Qt's stand-in is all there is. KDE draws a title bar of its own."""
+    environ = os.environ if environ is None else environ
+    return platform_name.startswith('wayland') and 'gnome' in _desktops(environ)
+
+
+def uses_own_title_bar(choice, platform_name, environ=None) -> bool:
+    """The Settings choice (None until made) as whether the app draws its title bar."""
+    if not wants_own_title_bar(platform_name, environ):
+        return False
+    return own_title_bar_by_default(platform_name, environ) if choice is None else bool(choice)
 
 
 def x11_compositing() -> bool:
@@ -263,13 +280,15 @@ class WindowButton(QAbstractButton):
 class TitleBar(QMenuBar):
     """The menus, the window title in the middle, and the window buttons.
 
-    A drag on any empty part moves the window; a double click maximizes it.
+    A drag on any empty part moves the window, a double click maximizes it and
+    a right click opens the desktop's window menu. A dialog's title bar has no
+    menus.
 
     It is a menu bar without menus of its own: some styles, such as Breeze, ask
     the window for its menu bar, and a window whose menu widget is no menu bar
     then gets a new empty one in place of this title bar."""
 
-    def __init__(self, window, menubar, button_layout=DEFAULT_BUTTON_LAYOUT):
+    def __init__(self, window, menubar=None, button_layout=DEFAULT_BUTTON_LAYOUT, kinds=BUTTONS):
         super().__init__(window)
         self._window = window
         self.menubar = menubar
@@ -279,18 +298,25 @@ class TitleBar(QMenuBar):
         self.setProperty('titlebar', True)
         self.setAccessibleName('Title bar')
         self.setFixedHeight(TITLE_BAR_HEIGHT)
-        # The theme leaves the line under this menu bar to the title bar.
-        menubar.setProperty('titlebar', True)
-        menubar.style().unpolish(menubar)
-        menubar.style().polish(menubar)
+        # What the window can do, whichever buttons the desktop's layout shows.
+        self.kinds = tuple(kinds)
         left, right = parse_button_layout(button_layout)
+        left = [kind for kind in left if kind in kinds]
+        right = [kind for kind in right if kind in kinds]
         self.buttons = {}
+        self._left = []
         layout = QHBoxLayout(self)
         layout.setContentsMargins(8, 0, 8, 1)
         layout.setSpacing(2)
         for kind in left:
-            layout.addWidget(self._button(kind), 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addWidget(menubar, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._left.append(self._button(kind))
+            layout.addWidget(self.buttons[kind], 0, Qt.AlignmentFlag.AlignVCenter)
+        if menubar is not None:
+            # The theme leaves the line under this menu bar to the title bar.
+            menubar.setProperty('titlebar', True)
+            menubar.style().unpolish(menubar)
+            menubar.style().polish(menubar)
+            layout.addWidget(menubar, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addStretch(1)
         for kind in right:
             layout.addWidget(self._button(kind), 0, Qt.AlignmentFlag.AlignVCenter)
@@ -301,7 +327,8 @@ class TitleBar(QMenuBar):
         font = self.title.font()
         font.setBold(True)
         self.title.setFont(font)
-        menubar.installEventFilter(self)
+        if menubar is not None:
+            menubar.installEventFilter(self)
         window.windowTitleChanged.connect(self._place_title)
         self.sync_state()
 
@@ -316,17 +343,23 @@ class TitleBar(QMenuBar):
         self.buttons[kind] = button
         return button
 
+    def can_maximize(self):
+        """False for a window of a fixed size, such as most message boxes."""
+        window = self._window
+        return window.minimumSize() != window.maximumSize()
+
     def toggle_maximized(self):
         if self._window.isMaximized():
             self._window.showNormal()
-        else:
+        elif self.can_maximize():
             self._window.showMaximized()
 
     def sync_state(self):
-        """Follow the window: maximized or not, active or not."""
+        """Follow the window: maximized or not, active or not, resizable or not."""
         button = self.buttons.get('maximize')
         if button is not None:
             button.set_restore(self._window.isMaximized())
+            button.setVisible(self.can_maximize() or self._window.isMaximized())
         for button in self.buttons.values():
             button.update()
         self._place_title()
@@ -334,11 +367,12 @@ class TitleBar(QMenuBar):
     def _place_title(self, *_args):
         """Center the title on the window, moved aside or shortened where the menus or buttons are."""
         text = self._window.windowTitle()
-        lefts = [self.menubar.geometry().right()] + [
-            button.geometry().right() for button in self.buttons.values() if button.x() < self.menubar.x()
-        ]
-        rights = [button.x() for button in self.buttons.values() if button.x() > self.menubar.x()]
-        start = max(lefts) + 12
+        shown = [button for button in self.buttons.values() if not button.isHidden()]
+        lefts = [button.geometry().right() for button in shown if button in self._left]
+        if self.menubar is not None:
+            lefts.append(self.menubar.geometry().right())
+        rights = [button.x() for button in shown if button not in self._left]
+        start = (max(lefts) if lefts else 8) + 12
         end = (min(rights) if rights else self.width() - 8) - 12
         if end <= start:
             self.title.hide()
@@ -374,6 +408,33 @@ class TitleBar(QMenuBar):
     def _empty_menubar_spot(self, event):
         return self.menubar.actionAt(event.position().toPoint()) is None
 
+    def window_menu(self, widget, event):
+        """The desktop's window menu where ``widget`` was right-clicked, else one of the app's own."""
+        point = event.position().toPoint()
+        pos = widget.mapTo(self._window, point)
+        global_pos = widget.mapToGlobal(point)
+        if not window_menu.show(self._window, pos, global_pos):
+            self.fallback_menu().popup(global_pos)
+
+    def fallback_menu(self):
+        """Minimize, Maximize or Restore, and Close, for desktops that cannot be asked for theirs.
+
+        Offered as far as the window can do them, even where the desktop's
+        button layout leaves out their buttons."""
+        menu = QMenu(self)
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window = self._window
+        if 'minimize' in self.kinds:
+            menu.addAction('Mi&nimize', window.showMinimized)
+        if window.isMaximized():
+            menu.addAction('&Restore', window.showNormal)
+        elif self.can_maximize() and 'maximize' in self.kinds:
+            menu.addAction('Ma&ximize', window.showMaximized)
+        if not menu.isEmpty():
+            menu.addSeparator()
+        menu.addAction('&Close', window.close)
+        return menu
+
     def sizeHint(self):
         return QSize(super().sizeHint().width(), TITLE_BAR_HEIGHT)
 
@@ -387,12 +448,20 @@ class TitleBar(QMenuBar):
         # Not passed on to QMenuBar, which watches the window for the Alt key:
         # the menus inside answer it.
         if obj is self.menubar and event.type() in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick):
-            if event.button() == Qt.MouseButton.LeftButton and self._empty_menubar_spot(event):
+            if not self._empty_menubar_spot(event):
+                return False
+            if event.button() == Qt.MouseButton.LeftButton:
                 if event.type() == QEvent.Type.MouseButtonDblClick:
                     self.toggle_maximized()
                 else:
                     self._start_move()
                 return True
+            if event.button() == Qt.MouseButton.RightButton and event.type() == QEvent.Type.MouseButtonPress:
+                self.window_menu(self.menubar, event)
+                return True
+        elif obj is self.menubar and event.type() == QEvent.Type.ContextMenu:
+            # Else the main window shows its tool bar menu.
+            return True
         elif obj is self.menubar and event.type() == QEvent.Type.Resize:
             self._place_title()
         return False
@@ -402,7 +471,15 @@ class TitleBar(QMenuBar):
             self._start_move()
             event.accept()
             return
+        if event.button() == Qt.MouseButton.RightButton:
+            self.window_menu(self, event)
+            event.accept()
+            return
         super().mousePressEvent(event)
+
+    def contextMenuEvent(self, event):
+        # The right press opened the window menu; the main window's tool bar menu stays shut.
+        event.accept()
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -441,26 +518,24 @@ class _ResizeGrip(QWidget):
             event.accept()
 
 
-class WindowFrame(QObject):
-    """Turns a main window into one that draws its own frame and title bar.
+class _Frame(QObject):
+    """The shadow, outline and resize grips around a frameless window, and its title bar's state."""
 
-    Call before the window is first shown: the window drops the system frame
-    and becomes see-through outside its content, where the shadow is drawn."""
+    # The title bar's height when it lies inside the contents margins, as on dialogs.
+    title_room = 0
 
-    def __init__(self, window, menubar, button_layout=None):
+    def __init__(self, window):
         super().__init__(window)
         self.window = window
         self.margins = QMargins(SHADOW_MARGINS)
         self._shadow = None
         self._shadow_key = None
-        window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
-        window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.title_bar = TitleBar(
-            window, menubar, desktop_button_layout() if button_layout is None else button_layout
-        )
-        window.setMenuWidget(self.title_bar)
+        # The shadow margins the compositor was told of, None until it was.
+        self._native_margins = None
+
+    def _start(self):
         self.grips = [_ResizeGrip(self) for _ in range(4)]
-        window.installEventFilter(self)
+        self.window.installEventFilter(self)
         self._sync()
 
     def _bare(self):
@@ -472,10 +547,21 @@ class WindowFrame(QObject):
         self.margins = QMargins() if self._bare() else QMargins(SHADOW_MARGINS)
         # The fullscreen view sets its own margins and puts them back after.
         if not self.window.isFullScreen():
-            self.window.setContentsMargins(self.margins)
+            self.window.setContentsMargins(self.margins + QMargins(0, self.title_room, 0, 0))
+        self._place_title_bar()
         self._place_grips()
         self.title_bar.sync_state()
+        self._tell_compositor()
         self.window.update()
+
+    def _tell_compositor(self):
+        """Tell the compositor where the shadow ends, so that it snaps and
+        tiles the window by its visible edge rather than its shadow's."""
+        if self.window.windowHandle() is None or self._native_margins == self.margins:
+            return
+        # First told as the window is about to be shown, which keeps its size.
+        if window_menu.set_shadow_margins(self.window, self.margins):
+            self._native_margins = QMargins(self.margins)
 
     def _place_grips(self):
         m, w, h = self.margins, self.window.width(), self.window.height()
@@ -487,18 +573,27 @@ class WindowFrame(QObject):
         )
         for grip, rect in zip(self.grips, rects):
             grip.setGeometry(rect)
-            grip.setVisible(not self._bare() and not rect.isEmpty())
+            grip.setVisible(not self._bare() and not rect.isEmpty() and self.title_bar.can_maximize())
             grip.raise_()
+
+    def _place_title_bar(self):
+        pass
 
     def eventFilter(self, obj, event):
         if obj is self.window:
             kind = event.type()
             if kind == QEvent.Type.Paint:
                 self._paint()
+            elif kind == QEvent.Type.Show:
+                # Its native window is made by now.
+                self._tell_compositor()
             elif kind == QEvent.Type.WindowStateChange:
                 self._sync()
             elif kind == QEvent.Type.Resize:
+                self._place_title_bar()
                 self._place_grips()
+                # A message box fixes its size as it is shown: no Maximize then.
+                self.title_bar.sync_state()
             elif kind in (QEvent.Type.ActivationChange, QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
                 self.title_bar.sync_state()
                 self.window.update()
@@ -565,11 +660,192 @@ class WindowFrame(QObject):
         return path
 
 
-def install(window, menubar, wanted):
-    """Give ``window`` its own frame and title bar if ``wanted`` and the desktop leaves them to the app.
+class WindowFrame(_Frame):
+    """Turns a main window into one that draws its own frame and title bar.
+
+    Call before the window is first shown: the window drops the system frame
+    and becomes see-through outside its content, where the shadow is drawn."""
+
+    def __init__(self, window, menubar, button_layout=None):
+        # Before anything else: the dialog framer, if it runs already, must not
+        # frame this window too, though it may have prepared it as it was built.
+        window.setProperty(SKIP_PROPERTY, True)
+        window.setProperty(PREPARED_PROPERTY, None)
+        super().__init__(window)
+        window.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.title_bar = TitleBar(
+            window, menubar, desktop_button_layout() if button_layout is None else button_layout
+        )
+        window.setMenuWidget(self.title_bar)
+        self._start()
+
+
+def dialog_buttons(window):
+    """The buttons a dialog's title bar may show: a dialog that belongs to
+    another window is not minimized on its own, as on GNOME."""
+    if window.isModal() or (isinstance(window, QDialog) and window.parentWidget() is not None):
+        return ('maximize', 'close')
+    return BUTTONS
+
+
+class DialogFrame(_Frame):
+    """Gives a dialog or other window the frame and title bar of the main
+    window, without menus. The title bar lies in the window's contents margins,
+    over the space the dialog's layout leaves free.
+
+    The window must have been made see-through before its native window was
+    made (see :func:`prepare`). Called while the window is about to be shown
+    for the first time: it then has a native window, which takes new flags
+    before it is on screen."""
+
+    title_room = TITLE_BAR_HEIGHT
+
+    def __init__(self, window, button_layout=None, grow=True):
+        super().__init__(window)
+        window.setProperty(FRAMED_PROPERTY, True)
+        before = window.contentsMargins()
+        # Again: the dialog may have set flags of its own since it was prepared.
+        flags = window.windowFlags() | Qt.WindowType.FramelessWindowHint
+        # Not setWindowFlags(), which would make a new native window and hide this one.
+        window.overrideWindowFlags(flags)
+        handle = window.windowHandle()
+        if handle is not None:
+            handle.setFlags(flags)
+        self.title_bar = TitleBar(
+            window, None, desktop_button_layout() if button_layout is None else button_layout,
+            dialog_buttons(window),
+        )
+        # Made while the window is being shown, which shows only the children it already had.
+        self.title_bar.show()
+        self._start()
+        if grow:
+            # The content keeps the size it was given, a fixed one too.
+            after = window.contentsMargins()
+            width = window.width() + after.left() + after.right() - before.left() - before.right()
+            height = window.height() + after.top() + after.bottom() - before.top() - before.bottom()
+            if window.minimumWidth() == window.maximumWidth():
+                window.setFixedWidth(width)
+            if window.minimumHeight() == window.maximumHeight():
+                window.setFixedHeight(height)
+            window.resize(width, height)
+        # Fixing a size sets the minimum, then the maximum: a resize between the
+        # two found the window resizable and showed Maximize. Now it is settled.
+        self.title_bar.sync_state()
+        self._place_grips()
+
+    def _place_title_bar(self):
+        m = self.margins
+        self.title_bar.setGeometry(m.left(), m.top(), self.window.width() - m.left() - m.right(), self.title_room)
+        self.title_bar.raise_()
+
+
+# Windows that keep the system's frame, or have none: menus, tool tips and the like.
+FRAMED_TYPES = (Qt.WindowType.Window, Qt.WindowType.Dialog)
+# Set before the window is built: one already prepared would be shown see-through, unframed.
+SKIP_PROPERTY = 'systemFrame'
+# A window that restored a saved size has its frame in it already.
+RESTORED_PROPERTY = 'geometryRestored'
+PREPARED_PROPERTY = '_tvhFramePrepared'
+FRAMED_PROPERTY = '_tvhFramed'
+# Events a window gets while it is built, before its native window is made:
+# a dialog adds its widgets and layout, a message box its title.
+PREPARE_EVENTS = (
+    QEvent.Type.ChildAdded, QEvent.Type.WindowTitleChange, QEvent.Type.PolishRequest,
+    QEvent.Type.Polish, QEvent.Type.LayoutRequest,
+)
+
+
+def prepare(window):
+    """Make ``window`` frameless and see-through, before its native window is made.
+
+    A native window takes its see-through background only as it is made; one
+    made opaque shows the shadow drawn around the window as a black frame.
+    What the window had before is kept, for :func:`unprepare`."""
+    window.setProperty(PREPARED_PROPERTY, (
+        bool(window.windowFlags() & Qt.WindowType.FramelessWindowHint),
+        window.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground),
+        window.testAttribute(Qt.WidgetAttribute.WA_NoSystemBackground),
+    ))
+    # Not setWindowFlags(), which also hides the window.
+    window.overrideWindowFlags(window.windowFlags() | Qt.WindowType.FramelessWindowHint)
+    window.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+
+
+def unprepare(widget):
+    """Undo :func:`prepare` for a window that was put inside another one before it was shown."""
+    frameless, translucent, no_background = widget.property(PREPARED_PROPERTY)
+    widget.setProperty(PREPARED_PROPERTY, None)
+    if not frameless:
+        widget.overrideWindowFlags(widget.windowFlags() & ~Qt.WindowType.FramelessWindowHint)
+    widget.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, translucent)
+    widget.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, no_background)
+
+
+class DialogFramer(QObject):
+    """Frames each dialog and further main window of the app as it is first
+    shown, so that they all look like the main window. Dialogs the app makes
+    itself and those Qt makes, such as message boxes, alike.
+
+    The window is made see-through while it is being built, the first time it
+    hears of anything, and gets its title bar when it is shown. A window whose
+    native window was made before that keeps the system's frame.
+
+    Only dialogs and main windows: other widgets are often built on their own,
+    windows for a moment, and then put inside a window."""
+
+    def __init__(self, app, button_layout=None):
+        super().__init__(app)
+        self._button_layout = desktop_button_layout() if button_layout is None else button_layout
+        app.installEventFilter(self)
+
+    def wants(self, widget):
+        return (
+            isinstance(widget, (QDialog, QMainWindow))
+            and widget.isWindow()
+            and widget.windowType() in FRAMED_TYPES
+            and widget.property(PREPARED_PROPERTY) is None
+            and not widget.windowFlags() & Qt.WindowType.FramelessWindowHint
+            and not widget.property(SKIP_PROPERTY)
+        )
+
+    def eventFilter(self, obj, event):
+        kind = event.type()
+        if kind == QEvent.Type.Show:
+            # A prepared window is see-through: without its frame it would show nothing around its content.
+            if (
+                obj.property(PREPARED_PROPERTY) is not None
+                and not obj.property(FRAMED_PROPERTY)
+                and not obj.property(SKIP_PROPERTY)
+                and obj.isWindow()
+            ):
+                # Kept off screen, as by a dialog that shows the desktop's own in its place.
+                if obj.testAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen):
+                    return False
+                DialogFrame(obj, self._button_layout, grow=not obj.property(RESTORED_PROPERTY))
+        elif kind in PREPARE_EVENTS and self.wants(obj) and obj.windowHandle() is None:
+            prepare(obj)
+        elif (
+            kind == QEvent.Type.ParentChange
+            and obj.property(PREPARED_PROPERTY) is not None
+            and not obj.property(FRAMED_PROPERTY)
+            and not obj.isWindow()
+        ):
+            unprepare(obj)
+        return False
+
+
+def install(window, menubar, wanted, guard_path=None):
+    """Give ``window`` its own frame and title bar if ``wanted`` and the desktop leaves them to the app,
+    and every dialog and other window after it too.
 
     Returns the frame, or None after ``menubar`` was made the window's menu bar as usual."""
     if wanted and wants_own_title_bar(QGuiApplication.platformName()):
-        return WindowFrame(window, menubar)
+        window_menu.set_guard_path(guard_path)
+        layout = desktop_button_layout()
+        # The main window first: it is frameless then, and the framer leaves it alone.
+        frame = WindowFrame(window, menubar, layout)
+        window._dialog_framer = DialogFramer(QApplication.instance(), layout)
+        return frame
     window.setMenuBar(menubar)
     return None

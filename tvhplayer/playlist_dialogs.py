@@ -101,6 +101,7 @@ class _Task(QThread):
     status = pyqtSignal(str)
     checkpoint = pyqtSignal(object)
     channels_changed = pyqtSignal()
+    channels_added = pyqtSignal()
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(object)
 
@@ -119,6 +120,8 @@ BUSY = 'This playlist is being updated. Try again in a moment.'
 NONE_CHOSEN = 'None of the channels you chose are in this playlist any more. Use Choose Channels to pick others.'
 NO_GROUP = 'No group'
 BUSY_POLL_MS = 1000
+# How often a running stream test saves the verdicts it has so far.
+VERDICT_SAVE_SECONDS = 30
 REMOVED_SERVERS = 'Removed servers'
 
 
@@ -153,9 +156,10 @@ class PlaylistJob(QObject):
     returns False to stop; without it the saved choice is used.
 
     ``action`` is SYNC (import or refresh), REMOVE, CHECK (test every
-    stream now and hide those that fail), or SHOW (show every channel again).
-    A sync tests the streams only while the host hides channels that fail;
-    it stops waiting for the test once the host no longer does.
+    stream now), or SHOW (show every channel again). A sync and a check
+    both wait for the server's stream test and save its verdicts, which the
+    channel list marks; channels that fail are hidden too while the host
+    hides them.
 
     ``checking`` is emitted once the channels and guide are written and only
     the server's stream test is left, which can take hours.
@@ -234,7 +238,7 @@ class PlaylistJob(QObject):
                 pass
 
     def _hides_failed(self):
-        return self.action == self.CHECK or self._host.hides_dead_channels()
+        return self._host.hides_dead_channels()
 
     def _release(self):
         self._busy = False
@@ -316,11 +320,12 @@ class PlaylistJob(QObject):
                 progress=task.progress.emit,
                 cancelled=lambda: self._cancelled,
                 checkpoint=lambda: task.checkpoint.emit(source.to_dict()),
-                check=self._hides_failed(),
+                check=True,
+                hide=self._hides_failed(),
             )
             result.films = self._playlist.films
             # Removed duplicates and newly hidden channels are already gone from the server.
-            task.channels_changed.emit()
+            task.channels_added.emit()
             # A server on this computer takes the guide with the other guide sources.
             if self._playlist.guide_url and not result.cancelled and not is_local_server(self.server):
                 task.status.emit('Loading the program guide…')
@@ -337,7 +342,7 @@ class PlaylistJob(QObject):
         if self.action == self.SYNC and not result.cancelled:
             guide_url = self._playlist.guide_url if self._playlist is not None else ''
             self._host.after_playlist_sync(self.server, self.source, guide_url, result)
-        if result.cancelled or not self._hides_failed():
+        if result.cancelled:
             self._checked(result)
             return
         self._checking = True
@@ -346,14 +351,25 @@ class PlaylistJob(QObject):
         self._run(lambda task: self._check(task, result), self._checked)
 
     def _check(self, task, result):
+        saved = [time.monotonic()]
+
+        def verdicts():
+            # Save what the test found so far, for the channel list's marks;
+            # a long test is saved now and then rather than on every poll.
+            if time.monotonic() - saved[0] >= VERDICT_SAVE_SECONDS:
+                saved[0] = time.monotonic()
+                task.checkpoint.emit(self.source.to_dict())
+
         with TvhAdmin(self.server) as admin:
             wait_for_checks(
                 admin,
                 self.source,
                 result,
                 progress=task.progress.emit,
-                cancelled=lambda: self._cancelled or not self._hides_failed(),
+                cancelled=lambda: self._cancelled,
                 changed=task.channels_changed.emit,
+                hide=self._hides_failed,
+                verdicts=verdicts,
             )
         task.checkpoint.emit(self.source.to_dict())
         return result
@@ -407,6 +423,7 @@ class PlaylistJob(QObject):
         task.status.connect(self.status.emit)
         task.checkpoint.connect(self._host.store_playlist_source)
         task.channels_changed.connect(lambda: self._host.playlist_channels_changed(self.server))
+        task.channels_added.connect(lambda: self._host.playlist_channels_changed(self.server, added=True))
         task.succeeded.connect(on_success)
         task.failed.connect(self._failed)
         self._task = task
@@ -581,7 +598,9 @@ def show_skipped(parent, skipped):
     box.exec()
 
 
-CHECK_HINT = 'The channels are in the list. Those that do not work are hidden as the check finds them. You can close this window; checking goes on.'
+def check_hint(hides: bool) -> str:
+    fate = 'are hidden' if hides else 'are marked'
+    return f'Channels were imported successfully. Those that do not work {fate} as the check finds them. You can close this window; checking goes on.'
 
 
 class ImportPlaylistDialog(QDialog):
@@ -746,7 +765,7 @@ class ImportPlaylistDialog(QDialog):
         self.progress_bar.hide()
         describe(self.progress_bar, 'Import progress')
         layout.addWidget(self.progress_bar)
-        self.hint_label = QLabel(CHECK_HINT)
+        self.hint_label = QLabel(check_hint(True))
         self.hint_label.setWordWrap(True)
         self.hint_label.hide()
         layout.addWidget(self.hint_label)
@@ -910,6 +929,10 @@ class ImportPlaylistDialog(QDialog):
 
     def _checking(self):
         self.close_btn.setText('Close')
+        self._show_check_hint()
+
+    def _show_check_hint(self):
+        self.hint_label.setText(check_hint(self._host.hides_dead_channels()))
         self.hint_label.show()
 
     def _finished(self, message, skipped):
@@ -1042,7 +1065,7 @@ class PlaylistsDialog(QDialog):
         self.progress_bar.hide()
         describe(self.progress_bar, 'Progress')
         detail.addWidget(self.progress_bar)
-        self.hint_label = QLabel(CHECK_HINT)
+        self.hint_label = QLabel(check_hint(True))
         self.hint_label.setWordWrap(True)
         self.hint_label.hide()
         detail.addWidget(self.hint_label)
@@ -1275,13 +1298,17 @@ class PlaylistsDialog(QDialog):
         self._job = PlaylistJob(self._host, source, server, choose=ask, action=action, parent=self)
         self._job.status.connect(lambda message: announce_label(self.status_label, message))
         self._job.progress.connect(self._progress)
-        self._job.checking.connect(self.hint_label.show)
+        self._job.checking.connect(self._show_check_hint)
         self._job.finished.connect(self._finished)
         self._job.failed.connect(self._failed)
         self.progress_bar.setRange(0, 0)
         self.progress_bar.show()
         self._job.start()
         self._sync_buttons()
+
+    def _show_check_hint(self):
+        self.hint_label.setText(check_hint(self._host.hides_dead_channels()))
+        self.hint_label.show()
 
     def _progress(self, done, total):
         self.progress_bar.setRange(0, max(total, 1))

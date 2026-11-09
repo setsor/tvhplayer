@@ -24,6 +24,8 @@ from .urls import pin_http_port
 THEME_TVHPLAYER = 'TVHplayer'
 # The same, drawn in Jottr's Organic look.
 THEME_ORGANIC = 'Organic'
+# What a new install starts with.
+DEFAULT_THEME = THEME_ORGANIC
 # Light or dark: as the desktop is, or always one of them.
 SCHEME_SYSTEM = 'system'
 SCHEME_LIGHT = 'light'
@@ -83,7 +85,9 @@ def default_config():
         'stream_profiles': {},
         'cast_profiles': {},
         'cast_auto_profiles': {},
-        'hide_dead_channels': True,
+        'hide_dead_channels': False,
+        # Fade channels that failed the server's stream test and say Not working.
+        'mark_dead_channels': True,
         # Empty until chosen: the Videos folder, or asked the first time where that cannot be written.
         'local_recording_dir': '',
         'local_recording_display': '',
@@ -102,13 +106,14 @@ def default_config():
         'timeshift_on_disk': False,
         'timeshift_gb': 4,
         # TVHplayer's own look, or the name of a Qt style. Read before the window is built.
-        'ui_theme': THEME_TVHPLAYER,
+        'ui_theme': DEFAULT_THEME,
         'color_scheme': SCHEME_SYSTEM,
         # Keys of ui_theme.ACCENTS and ui_theme.WINDOW_COLORS, or 'default'.
         'accent_color': 'default',
         'window_color': 'default',
         # On GNOME and KDE, the app's own title bar instead of the desktop's. Read before the window is built.
-        'own_title_bar': False,
+        # None until chosen: on for GNOME on Wayland, off elsewhere.
+        'title_bar': None,
         # None until chosen: live resize is off before Qt 6.11, and on from 6.11.
         'live_resize': None,
         # Minutes the built-in server starts recordings early and ends them late.
@@ -176,8 +181,8 @@ def _normalize(data):
     cfg['channel_list'] = channel_list_options(data.get('channel_list'))
     cfg['builtin_autostart'] = bool(cfg.get('builtin_autostart'))
     for key in (
-        'play_on_start', 'hide_dead_channels', 'convert_after_recording', 'delete_converted_original',
-        'stay_awake_for_scheduled', 'setup_offered', 'own_title_bar', 'check_for_updates', 'fast_channel_start',
+        'play_on_start', 'hide_dead_channels', 'mark_dead_channels', 'convert_after_recording', 'delete_converted_original',
+        'stay_awake_for_scheduled', 'setup_offered', 'check_for_updates', 'fast_channel_start',
         'timeshift_on_disk', 'setup_started', 'setup_completed', 'setup_dismissed',
     ):
         cfg[key] = bool(cfg.get(key))
@@ -187,6 +192,13 @@ def _normalize(data):
         cfg['last_update_check'] = 0.0
     # Left unset so the Qt version picks the default, until Settings saves true or false.
     cfg.pop('resize_on_release', None)
+    # Up to 4.6 every config held own_title_bar, false unless switched on, so a
+    # false one says nothing: only an earlier "on" is kept as a choice.
+    earlier = cfg.pop('own_title_bar', None)
+    choice = cfg.get('title_bar', None)
+    if choice is None and earlier is True:
+        choice = True
+    cfg['title_bar'] = None if choice is None else bool(choice)
     choice = cfg.get('live_resize', None)
     cfg['live_resize'] = None if choice is None else bool(choice)
     for key in ('local_recording_dir', 'local_recording_display', 'local_recording_ffmpeg_options', 'convert_options', 'skipped_update_version'):
@@ -197,7 +209,7 @@ def _normalize(data):
     # Legacy Settings choice (auto/mpv/vlc); playback is always libmpv now.
     cfg.pop('player_engine', None)
     if not isinstance(cfg.get('ui_theme'), str) or not cfg['ui_theme'].strip():
-        cfg['ui_theme'] = THEME_TVHPLAYER
+        cfg['ui_theme'] = DEFAULT_THEME
     if cfg.get('color_scheme') not in SCHEME_CHOICES:
         cfg['color_scheme'] = SCHEME_SYSTEM
     for key in ('accent_color', 'window_color'):

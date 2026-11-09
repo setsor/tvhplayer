@@ -49,7 +49,7 @@ try:
         recording_titles,
         upcoming_recordings,
     )
-    from .core.config import ConfigStore, default_cache_dir
+    from .core.config import DEFAULT_THEME, ConfigStore, default_cache_dir
     from .core.chromecast import CastManager
     from .core.cast_profiles import AUTO_PROFILE
     from .core.guide_feeds import GuideCache, GuideSource
@@ -71,7 +71,7 @@ try:
         preferred_subtitle_track, subtitle_track_language,
     )
     from .core.player import DEINTERLACE_AUTO, DEINTERLACE_OFF, DEINTERLACE_ON, NO_TRACK, Timeshift
-    from .core.playlist_sync import PlaylistSource, same_source, server_key, source_key
+    from .core.playlist_sync import PlaylistSource, failed_channels, retest_entry, same_source, server_key, source_key
     from .core.playback_status import (
         SIGNAL_FAIR, SIGNAL_GOOD, STARTING, find_subscription, find_tuner, receiving, scrambled_notice, signal_report,
         starting_caption, stream_path, stream_reason,
@@ -153,7 +153,7 @@ except ImportError:
         recording_titles,
         upcoming_recordings,
     )
-    from core.config import ConfigStore, default_cache_dir
+    from core.config import DEFAULT_THEME, ConfigStore, default_cache_dir
     from core.chromecast import CastManager
     from core.cast_profiles import AUTO_PROFILE
     from core.guide_feeds import GuideCache, GuideSource
@@ -175,7 +175,7 @@ except ImportError:
         preferred_subtitle_track, subtitle_track_language,
     )
     from core.player import DEINTERLACE_AUTO, DEINTERLACE_OFF, DEINTERLACE_ON, NO_TRACK, Timeshift
-    from core.playlist_sync import PlaylistSource, same_source, server_key, source_key
+    from core.playlist_sync import PlaylistSource, failed_channels, retest_entry, same_source, server_key, source_key
     from core.playback_status import (
         SIGNAL_FAIR, SIGNAL_GOOD, STARTING, find_subscription, find_tuner, receiving, scrambled_notice, signal_report,
         starting_caption, stream_path, stream_reason,
@@ -288,9 +288,11 @@ import logging
 import platform
 
 # Shown in About; the release notes in the metainfo file give the same version.
-APP_VERSION = "4.6.4"
+APP_VERSION = "4.6.5"
 UPDATE_CHECK_DELAY_MS = 10_000
 CHANNEL_RELOAD_SECONDS = 30
+# The not-working marks wait this long after the channel list fills.
+FAILED_MARKS_DELAY_MS = 3000
 # A reload of a big list freezes the window a while: space them by a second per this many channels.
 CHANNELS_PER_RELOAD_SECOND = 100
 # Now/next is asked for again this often, and sooner when a programme ends.
@@ -3684,6 +3686,42 @@ class ChannelEditJob(QObject):
             pass
 
 
+class RetestJob(QObject):
+    """Have the server test one playlist channel's stream again, off the UI thread.
+
+    ``done`` carries the verdict ('working', 'failed', 'untested', 'checking',
+    or '' on error), an error message, and the playlist source as saved.
+    """
+
+    done = pyqtSignal(str, str, object)
+
+    def __init__(self, server, source, key, hide, channel_uuid, parent=None):
+        super().__init__(parent)
+        self._server = dict(server)
+        self.source = source
+        self._key = key
+        self._hide = hide
+        self._channel = channel_uuid
+        self._thread = threading.Thread(target=self._run, name='channel-retest', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _run(self):
+        status, error = '', ''
+        try:
+            with TvhAdmin(self._server) as admin:
+                status = retest_entry(admin, self.source, self._key, hide=self._hide, channel=self._channel)
+        except TvhAuthError:
+            error = "This server's login is not allowed to test channels."
+        except Exception as exc:
+            error = str(exc) or type(exc).__name__
+        try:
+            self.done.emit(status, error, self.source.to_dict())
+        except RuntimeError:
+            pass
+
+
 class UpdateCheck(QObject):
     """Ask GitHub for the latest release, off the UI thread.
 
@@ -4024,6 +4062,17 @@ class TVHeadendClient(QMainWindow):
         self._channel_reload_timer = QTimer(self)
         self._channel_reload_timer.setSingleShot(True)
         self._channel_reload_timer.timeout.connect(self._reload_changed_channels)
+        # Channel uuid -> (playlist location, entry key) of channels that failed
+        # the server's stream test. Worked out from the saved verdicts only,
+        # well after the list is on screen, so it never slows a start.
+        self._failed_channels = {}
+        self._failed_marks_for = None
+        # Goes up whenever the saved playlists change.
+        self._playlists_revision = 0
+        self._failed_marks_timer = QTimer(self)
+        self._failed_marks_timer.setSingleShot(True)
+        self._failed_marks_timer.setInterval(FAILED_MARKS_DELAY_MS)
+        self._failed_marks_timer.timeout.connect(self._mark_failed_channels)
         self._last_channel_reload = 0.0
         # Extras shown beside each channel, keyed by channel_key().
         self._channels = []
@@ -4336,7 +4385,9 @@ class TVHeadendClient(QMainWindow):
         exit_action.setMenuRole(QAction.MenuRole.QuitRole)
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
-        self.window_frame = window_frame.install(self, menubar, self.config['own_title_bar'])
+        self.window_frame = window_frame.install(
+            self, menubar, self.draws_title_bar(), guard_path=os.path.join(self.config_dir, 'window-menu.json'),
+        )
         
         # Create main widget and layout
         main_widget = QWidget()
@@ -5142,6 +5193,18 @@ class TVHeadendClient(QMainWindow):
         model.set_channels(shown, references)
         self._apply_channel_filter()
         self._visible_logo_timer.start()
+        self._failed_marks_timer.start()
+
+    def _mark_failed_channels(self):
+        """Mark the listed channels whose stream failed the server's last test."""
+        server = self.current_server()
+        playlists = self.config.get('playlists') or []
+        key = server_key(server) if server and self.config['mark_dead_channels'] else ''
+        cache = (self._playlists_revision, id(self.config), key)
+        if cache != self._failed_marks_for:
+            self._failed_marks_for = cache
+            self._failed_channels = failed_channels(playlists, key) if key and playlists else {}
+        self.channel_model.set_failed(self._failed_channels)
 
     def _logo_placeholder(self):
         """Blank space the size of a logo, shared by every row still without one."""
@@ -8299,6 +8362,8 @@ class TVHeadendClient(QMainWindow):
             source.to_dict() for source in self.playlist_sources()
             if not same_source(source, gone)
         ]
+        self._playlists_revision += 1
+        self._failed_marks_timer.start()
         for guide in self.all_guide_sources():
             if guide.server == gone.server and guide.playlist == gone.location:
                 self.remove_guide_source(guide)
@@ -8562,11 +8627,13 @@ class TVHeadendClient(QMainWindow):
         return window_frame.wants_own_title_bar(QApplication.platformName(), environ)
 
     def draws_title_bar(self):
-        """The Settings choice; the window in use keeps its title bar until the next start."""
-        return self.config['own_title_bar']
+        """The Settings choice, or the desktop's default until one is made; the
+        window in use keeps its title bar until the next start."""
+        environ = LAUNCH_ENVIRON or os.environ
+        return window_frame.uses_own_title_bar(self.config.get('title_bar'), QApplication.platformName(), environ)
 
     def set_draws_title_bar(self, on):
-        self.config['own_title_bar'] = bool(on)
+        self.config['title_bar'] = bool(on)
         self.save_config()
 
     def theme_choice(self):
@@ -8822,6 +8889,14 @@ class TVHeadendClient(QMainWindow):
     def hides_dead_channels(self):
         return self.config['hide_dead_channels']
 
+    def marks_dead_channels(self):
+        return self.config['mark_dead_channels']
+
+    def set_marks_dead_channels(self, on):
+        self.config['mark_dead_channels'] = bool(on)
+        self.save_config()
+        self._mark_failed_channels()
+
     def set_hides_dead_channels(self, on):
         self.config['hide_dead_channels'] = bool(on)
         self.save_config()
@@ -8916,6 +8991,8 @@ class TVHeadendClient(QMainWindow):
         else:
             sources.append(source)
         self.config['playlists'] = [item.to_dict() for item in sources]
+        self._playlists_revision += 1
+        self._failed_marks_timer.start()
         if replaced_location:
             guides = self.all_guide_sources()
             for guide in guides:
@@ -8981,9 +9058,19 @@ class TVHeadendClient(QMainWindow):
             self.close_backend()
             self.fetch_channels()
 
-    def playlist_channels_changed(self, server):
-        """A running import showed or hid channels on ``server``."""
-        if not self.is_current_server(server) or self._channel_reload_timer.isActive():
+    def playlist_channels_changed(self, server, added=False):
+        """A running import showed or hid channels on ``server``.
+
+        Channels it ``added`` are shown at once; the check's changes after
+        that wait their turn so a big list is not reloaded over and over.
+        """
+        if not self.is_current_server(server):
+            return
+        if added:
+            self._channel_reload_timer.stop()
+            self._reload_changed_channels()
+            return
+        if self._channel_reload_timer.isActive():
             return
         spacing = max(CHANNEL_RELOAD_SECONDS, len(self._channels) / CHANNELS_PER_RELOAD_SECOND)
         wait = self._last_channel_reload + spacing - time.monotonic()
@@ -9052,12 +9139,57 @@ class TVHeadendClient(QMainWindow):
             epg_action.triggered.connect(lambda: self.show_channel_epg(channel_data))
             guide_action = menu.addAction(with_keys("Show in TV Guide", "Ctrl+G"))
             guide_action.triggered.connect(lambda: self.show_guide(channel_data))
+            if str(channel_data.uuid or '') in self._failed_channels:
+                retest_action = menu.addAction("&Test Stream Again")
+                retest_action.setToolTip("Ask the server to test this channel's stream now.")
+                retest_action.setEnabled(self._server_requests_ready())
+                retest_action.triggered.connect(lambda: self.retest_channel(channel_data))
 
             menu.addSeparator()
             self._add_channel_edit_actions(menu, channel_data)
 
             # Show the menu at the cursor position
             menu.exec(self.channel_list.viewport().mapToGlobal(position))
+
+    def retest_channel(self, channel):
+        """Have the server test a channel that failed its stream test again."""
+        entry = self._failed_channels.get(str(channel.uuid or ''))
+        server = self.current_server()
+        if entry is None or not server or not self._server_requests_ready():
+            return
+        location, key = entry
+        source = next((
+            item for item in self.playlist_sources()
+            if item.server == server_key(server) and item.location == location
+        ), None)
+        if source is None or key not in source.muxes:
+            self.statusbar.showMessage(f"{channel.name} is no longer in an imported playlist.")
+            return
+        if not self.claim_playlist(source):
+            self.statusbar.showMessage(f"{source.name} is being updated. Try again when it is done.")
+            return
+        job = RetestJob(server, source, key, self.hides_dead_channels(), str(channel.uuid), self)
+
+        def finished(status, error, data, job=job):
+            self.release_playlist(job.source)
+            job.deleteLater()
+            if error:
+                self.statusbar.showMessage(f"Could not test {channel.name}: {error}")
+                return
+            self.store_playlist_source(data)
+            self._mark_failed_channels()
+            self.statusbar.showMessage({
+                'working': f"{channel.name} works now.",
+                'failed': f"{channel.name} still does not work.",
+                'untested': f"The server could not test {channel.name}.",
+                'checking': f"The server is still testing {channel.name}. Try again in a minute.",
+            }.get(status, ''))
+            if status == 'failed' and self.hides_dead_channels() and self._same_server(server, self.current_server()):
+                self.fetch_channels(keep_place=True)
+
+        job.done.connect(finished)
+        self.statusbar.showMessage(f"Testing {channel.name}…")
+        job.start()
 
     def _add_channel_edit_actions(self, menu, channel):
         """Favourites, name, number, and hiding: saved on the server for every client."""
@@ -9390,7 +9522,7 @@ def main():
             window_color = settings['window_color']
         except Exception as e:
             print(f"Debug: Could not read the theme settings: {e}")
-            theme = THEME_TVHPLAYER
+            theme = DEFAULT_THEME
             scheme = accent = window_color = None
         LAUNCH_ENVIRON.update(os.environ)
         cursor_debug.prepare()
@@ -9415,8 +9547,8 @@ def main():
         if prefers_high_contrast():
             theme = None
         elif style_key(theme) is None:
-            print(f"Debug: Theme {theme!r} is not available here; using {THEME_TVHPLAYER}")
-            theme = THEME_TVHPLAYER
+            print(f"Debug: Theme {theme!r} is not available here; using {DEFAULT_THEME}")
+            theme = DEFAULT_THEME
         if theme is not None:
             set_color_scheme(app, scheme)
             set_accent(app, accent)

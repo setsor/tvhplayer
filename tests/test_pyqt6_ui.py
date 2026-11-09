@@ -3143,6 +3143,30 @@ def test_channel_list_reloads_at_most_every_30_seconds_during_a_playlist_check(m
         window.close()
 
 
+def test_channel_list_reloads_at_once_when_an_import_adds_channels(monkeypatch, tmp_path):
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        reloads = []
+        server = {'name': 'Built-in Server', 'url': 'http://127.0.0.1:1', 'builtin': True}
+        monkeypatch.setattr(window, 'is_current_server', lambda candidate: candidate is server)
+        monkeypatch.setattr(window, 'fetch_channels', lambda keep_place=False: keep_place and reloads.append(server))
+        clock = [1000.0]
+        monkeypatch.setattr(ui.time, 'monotonic', lambda: clock[0])
+        # The list loaded a moment ago, and a check reload is already waiting.
+        window._last_channel_reload = clock[0]
+        clock[0] += 5
+        window.playlist_channels_changed(server)
+        assert window._channel_reload_timer.isActive()
+
+        window.playlist_channels_changed(server, added=True)
+        assert reloads == [server]
+        assert not window._channel_reload_timer.isActive()
+        window.playlist_channels_changed({'url': 'http://other'}, added=True)
+        assert reloads == [server]
+    finally:
+        window.close()
+
+
 def test_reload_channel_list_reads_the_channels_again_in_place(monkeypatch, tmp_path):
     app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
     try:
@@ -4965,4 +4989,114 @@ def test_recording_folder_display_never_becomes_picker_or_writer_path(monkeypatc
         assert window.local_recording_dir() == str(folder)
     finally:
         window.close()
+        app.processEvents()
+
+
+def test_channels_that_failed_the_stream_test_are_marked_later_and_can_be_retested(monkeypatch, tmp_path):
+    from PyQt6.QtCore import QObject, QPoint, pyqtSignal
+
+    from tvhplayer.channel_view import COL_STATUS
+    from tvhplayer.core.models import Channel
+    from tvhplayer.core.playlist_sync import PlaylistSource
+
+    app, ui, window, _fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        server = {'name': 'TV', 'url': 'http://tv:9981'}
+        monkeypatch.setattr(window, 'current_server', lambda: server)
+        monkeypatch.setattr(window, '_server_requests_ready', lambda: True)
+        monkeypatch.setattr(window, 'save_config', lambda: None)
+        source = PlaylistSource('List', 'http://x/list.m3u', 'http://tv:9981', network_uuid='net',
+                                muxes={'id:a': 'ma', 'id:b': 'mb'})
+        source.health = {'id:b': {'name': 'Sport', 'status': 'failed', 'channels': ['sport']}}
+        window.config['playlists'] = [source.to_dict()]
+        news, sport = Channel(uuid='news', name='News', number=1), Channel(uuid='sport', name='Sport', number=2)
+        window._channels = [news, sport]
+        window._fill_channel_rows()
+        # Nothing is worked out while the list is being shown.
+        assert window.channel_model.index(1, COL_STATUS).data() == ''
+        assert window._failed_marks_timer.isActive()
+        assert window._failed_marks_timer.interval() >= 1000
+        window._failed_marks_timer.stop()
+        window._mark_failed_channels()
+        assert window.channel_model.index(1, COL_STATUS).data() == 'Not working'
+        assert window.channel_model.index(0, COL_STATUS).data() == ''
+        # Marking can be turned off and on in Settings; on by default.
+        assert window.marks_dead_channels() is True
+        window.set_marks_dead_channels(False)
+        assert window.channel_model.index(1, COL_STATUS).data() == ''
+        window.set_marks_dead_channels(True)
+        assert window.channel_model.index(1, COL_STATUS).data() == 'Not working'
+
+        started = []
+
+        class FakeRetest(QObject):
+            done = pyqtSignal(str, str, object)
+
+            def __init__(self, server, source, key, hide, channel_uuid, parent=None):
+                super().__init__(parent)
+                self.source = source
+                started.append((key, hide, channel_uuid, window.is_playlist_busy(source)))
+
+            def start(self):
+                self.source.health = {}
+                self.done.emit('working', '', self.source.to_dict())
+
+        monkeypatch.setattr(ui, 'RetestJob', FakeRetest)
+        menus = []
+
+        def open_menu(menu, *_args):
+            actions = {action.text().replace('&', ''): action for action in menu.actions()}
+            menus.append(sorted(actions))
+            retest = actions.get('Test Stream Again')
+            if retest is not None:
+                assert retest.isEnabled()
+                retest.trigger()
+
+        monkeypatch.setattr(ui.QMenu, 'exec', open_menu)
+        rect = window.channel_list.visualRect(window.channel_model.index(0, 1))
+        window.show_channel_context_menu(rect.center())
+        assert 'Test Stream Again' not in menus[-1]
+        rect = window.channel_list.visualRect(window.channel_model.index(1, 1))
+        window.show_channel_context_menu(QPoint(rect.center()))
+        assert 'Test Stream Again' in menus[-1]
+        app.processEvents()
+        # The playlist is claimed while the server tests it.
+        assert started == [('id:b', window.hides_dead_channels(), 'sport', True)]
+        assert window.channel_model.index(1, COL_STATUS).data() == ''
+        assert window.status_label.text() == 'Sport works now.'
+        assert not window.is_playlist_busy(source)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_own_title_bar_frames_the_window_and_not_its_parts(monkeypatch, tmp_path):
+    # The window's parts are built on their own and put in later; with the
+    # app's title bar on, each got a title bar of its own inside the window.
+    (tmp_path / 'tvhplayer.conf').write_text(json.dumps({'title_bar': True}), encoding='utf-8')
+    from tvhplayer import window_frame
+
+    monkeypatch.setattr(window_frame, 'wants_own_title_bar', lambda *a, **k: True)
+    monkeypatch.setattr(window_frame, 'desktop_button_layout', lambda *a, **k: window_frame.DEFAULT_BUTTON_LAYOUT)
+    app, ui, window, fake_player = _make_player(monkeypatch, tmp_path)
+    try:
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtWidgets import QWidget
+
+        assert window.window_frame is not None
+        window.resize(1000, 700)
+        window.show()
+        app.processEvents()
+        assert window.findChildren(window_frame.TitleBar) == [window.window_frame.title_bar]
+        see_through = [
+            widget for widget in window.findChildren(QWidget)
+            if widget.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+            and widget.property(window_frame.PREPARED_PROPERTY) is not None
+        ]
+        assert see_through == []
+    finally:
+        app.removeEventFilter(window._dialog_framer)
+        window._dialog_framer.deleteLater()
+        window.close()
+        window.deleteLater()
         app.processEvents()
