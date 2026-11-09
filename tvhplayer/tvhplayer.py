@@ -57,9 +57,10 @@ try:
     from .core.xmltv import is_local_server
     from .core.logs import SERVER_LOG, configure_logging, log_dir
     from .core.dvr import instant_recording_title
+    from .core.dvr_conflicts import other_running_recording, planned_stop, programme_recording
     from .core.errors import TvhAuthError, TvhError
     from .core.server_log import ServerLogFeed
-    from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel
+    from .core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel, is_quick_recording
     from .core.urls import http_base_url
     from .core.recorder import DEFAULT_FORMAT, STALL_LIMIT, LocalRecorder, free_path, parse_ffmpeg_options
     from .core import convert
@@ -161,9 +162,10 @@ except ImportError:
     from core.xmltv import is_local_server
     from core.logs import SERVER_LOG, configure_logging, log_dir
     from core.dvr import instant_recording_title
+    from core.dvr_conflicts import other_running_recording, planned_stop, programme_recording
     from core.errors import TvhAuthError, TvhError
     from core.server_log import ServerLogFeed
-    from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel
+    from core.models import PROTOCOL_HTTP, PROTOCOL_HTSP, Channel, DvrEntryUpdate, recordings_to_stop, QUICK_RECORD_COMMENT, quick_recordings_for_channel, is_quick_recording
     from core.urls import http_base_url
     from core.recorder import DEFAULT_FORMAT, STALL_LIMIT, LocalRecorder, free_path, parse_ffmpeg_options
     from core import convert
@@ -5970,27 +5972,79 @@ class TVHeadendClient(QMainWindow):
             return None
         return event
 
+    def _handle_existing_programme_recording(self, existing, event, backend):
+        """Never schedule a second file for the same broadcast.
+
+        A Quick Record may be shorter than the programme. In that one case
+        offer to extend its end time, without deleting or recreating its file.
+        """
+        if (is_quick_recording(existing) and existing.category() == 'recording'
+                and event is not None and event.stop > planned_stop(existing)):
+            answer = QMessageBox.question(
+                self, "Quick Record already active",
+                f"{event.title} is already being recorded with Quick Record. "
+                "Extend that recording to the end of the programme instead?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                backend.update_dvr_entry(existing, DvrEntryUpdate(stop=event.stop))
+                self.statusbar.showMessage(f"Extended Quick Record for {event.title}")
+                self._refresh_tasks()
+                return
+        label = event.title if event is not None else (existing.title or 'this channel')
+        self.statusbar.showMessage(
+            f"Already recording {label}; select the existing entry in Tasks"
+        )
+        self._open_tasks_pane()
+
     def start_recording(self, channel=None):
         print("Debug: Starting recording")
         try:
-            # The player controls target the picture, while the channel-list
-            # context menu can explicitly request a different channel.
+            # The channel context menu may target a different channel from
+            # the player. All entry points use this same duplicate guard.
             channel = channel if channel is not None else self.active_channel()
             if channel is None:
                 self.statusbar.showMessage("Play a channel before recording")
                 return
-
             if not self.server_recordings_ready():
                 return
-            duration_dialog = RecordingDurationDialog(self, channel, self._programme_on_now(channel))
+
+            programme = self._programme_on_now(channel)
+            duration_dialog = RecordingDurationDialog(self, channel, programme)
             if duration_dialog.exec() != QDialog.DialogCode.Accepted:
                 print("Debug: Recording cancelled by user")
                 return
-            
+
             event = duration_dialog.programme_event()
+            backend = self.get_backend()
+            # A live server read, never the potentially stale Tasks cache.
+            entries = backend.list_dvr_entries()
+            quick = next((
+                item for item in entries
+                if item.matches_channel(channel)
+                and is_quick_recording(item)
+                and item.category() in ('recording', 'upcoming')
+            ), None)
+            if quick is not None:
+                self.statusbar.showMessage(
+                    f"Quick Record already exists on {channel.name}; manage it in Tasks"
+                )
+                self._open_tasks_pane()
+                return
+
+            existing = programme_recording(entries, channel, event or programme)
+            if existing is None and programme is None:
+                existing = other_running_recording(entries, channel)
+            if existing is not None:
+                self.statusbar.showMessage(
+                    f"This programme is already being recorded on {channel.name}; see Tasks"
+                )
+                self._open_tasks_pane()
+                return
+
             if event is not None:
-                # The server records the programme and stops when it ends.
-                self.get_backend().create_dvr_entry_by_event(
+                backend.create_dvr_entry_by_event(
                     event.event_id, comment=QUICK_RECORD_COMMENT
                 )
                 until = datetime.fromtimestamp(event.stop).strftime('%H:%M')
@@ -6001,10 +6055,8 @@ class TVHeadendClient(QMainWindow):
             else:
                 duration = duration_dialog.get_duration()
                 now = int(datetime.now().timestamp())
-                self.get_backend().create_dvr_entry(
-                    channel,
-                    now,
-                    now + duration,
+                backend.create_dvr_entry(
+                    channel, now, now + duration,
                     title=instant_recording_title(channel.name, datetime.fromtimestamp(now)),
                     description='Recorded via TVHplayer',
                     comment=QUICK_RECORD_COMMENT,
@@ -6019,10 +6071,9 @@ class TVHeadendClient(QMainWindow):
         except Exception as e:
             print(f"Debug: Recording error: {str(e)}")
             print(f"Debug: Error type: {type(e)}")
-            import traceback
             print(f"Debug: Traceback: {traceback.format_exc()}")
             self.statusbar.showMessage(f"Recording error: {str(e)}")
-            
+
     def toggle_playback(self):
         """The Play/Stop button and P: stop what plays, or play the selected channel."""
         if self._playback_active or self._awaiting_playback:
@@ -6124,11 +6175,13 @@ class TVHeadendClient(QMainWindow):
             return
         channel = self.active_channel()
         local = bool(self._local_jobs_for(channel))
+        quick_count = len(self._server_recordings_for(channel))
         bar.set_recording(
-            bool(self._server_recordings_for(channel)), local,
+            bool(quick_count), local,
             channel.name if channel is not None else '',
             local_here=local,
             playing=channel is not None,
+            server_quick_count=quick_count,
         )
 
     def local_recording_running(self):
@@ -7760,10 +7813,17 @@ class TVHeadendClient(QMainWindow):
         self._sync_record_controls()
 
     def stop_recording(self):
-        """Stop the playing channel's Quick Record only; preserve EPG schedules."""
+        """Stop one Quick Record, or open Tasks when the choice is ambiguous."""
         channel = self.active_channel()
-        if channel is not None:
-            self._request_dvr_operation('stop_channel', channel=channel)
+        if channel is None:
+            return
+        if len(self._server_recordings_for(channel)) > 1:
+            self.statusbar.showMessage(
+                "Multiple Quick Records on this channel; choose one in Tasks"
+            )
+            self._open_tasks_pane()
+            return
+        self._request_dvr_operation('stop_channel', channel=channel)
 
     def _recording_count_changed(self, count):
         """Keep the indicator in sync with the unfiltered server and local tasks."""
@@ -9128,8 +9188,15 @@ class TVHeadendClient(QMainWindow):
             # Add menu actions
             play_action = menu.addAction(with_keys("Play", "Enter"))
             play_action.triggered.connect(lambda: self.play_channel_by_data(channel_data))
-            record_action = menu.addAction(with_keys("Record", "Ctrl+R"))
+            active_quick = bool(self._server_recordings_for(channel_data))
+            record_action = menu.addAction(
+                "Quick Record active" if active_quick else with_keys("Record", "Ctrl+R")
+            )
+            record_action.setEnabled(not active_quick)
             record_action.triggered.connect(lambda: self.start_recording(channel_data))
+            if active_quick:
+                manage_action = menu.addAction("Manage recordings in Tasks")
+                manage_action.triggered.connect(self._open_tasks_pane)
             local_record_action = menu.addAction(with_keys("Record Locally", "Ctrl+Shift+R"))
             local_record_action.triggered.connect(
                 lambda: self.start_local_recording(channel_data))
@@ -9463,35 +9530,41 @@ class EPGDialog(QDialog):
         layout.addWidget(close_btn)
         
     def schedule_recording(self, entry):
-        """Schedule a recording for the selected EPG entry"""
+        """Schedule only if this EPG programme is not already being recorded."""
         parent = self.parent()
         if parent is not None and hasattr(parent, 'server_recordings_ready') and not parent.server_recordings_ready():
             return
         try:
+            existing = programme_recording(
+                self.backend.list_dvr_entries(), self.channel, entry
+            )
+            if existing is not None:
+                if parent is not None and hasattr(parent, '_handle_existing_programme_recording'):
+                    parent._handle_existing_programme_recording(existing, entry, self.backend)
+                else:
+                    QMessageBox.information(
+                        self, "Already recording",
+                        f"{entry.title} is already being recorded on {self.channel_name}."
+                    )
+                return
             print(f"Debug: Scheduling recording for: {entry.title}")
             self.backend.create_dvr_entry(
-                self.channel,
-                entry.start,
-                entry.stop,
+                self.channel, entry.start, entry.stop,
                 title=entry.title or 'Scheduled Recording',
                 description=entry.description or '',
                 comment='Scheduled via TVHplayer',
                 event_id=entry.event_id,
             )
             QMessageBox.information(
-                self,
-                "Success",
+                self, "Success",
                 f"Recording scheduled successfully for {entry.title or 'Unknown'}"
             )
-            parent = self.parent()
             if parent is not None and hasattr(parent, '_refresh_tasks'):
                 parent._refresh_tasks()
         except Exception as e:
             print(f"Debug: Error scheduling recording: {str(e)}")
             QMessageBox.critical(
-                self,
-                "Error",
-                f"Failed to schedule recording: {str(e)}"
+                self, "Error", f"Failed to schedule recording: {str(e)}"
             )
 
 class NoDialogButtonIconsStyle(ThemeStyle):

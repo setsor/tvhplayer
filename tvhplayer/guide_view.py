@@ -36,6 +36,7 @@ try:
     from .core.backend import create_backend
     from .core.channel_info import channel_icon_reference, channel_key, channels_in_tag, tag_channel_counts
     from .core.dvr import GRID_LIMIT
+    from .core.dvr_conflicts import planned_stop, programme_recording
     from .core.guide_grid import (
         GUIDE_DAYS,
         RECORDING,
@@ -55,7 +56,7 @@ try:
         spans_between,
         timing_text,
     )
-    from .core.models import EpgQuery
+    from .core.models import EpgQuery, is_quick_recording
     from .core.playlist_sync import server_key
     from .player_bar import RECORD_RED
 except ImportError:
@@ -63,6 +64,7 @@ except ImportError:
     from core.backend import create_backend
     from core.channel_info import channel_icon_reference, channel_key, channels_in_tag, tag_channel_counts
     from core.dvr import GRID_LIMIT
+    from core.dvr_conflicts import planned_stop, programme_recording
     from core.guide_grid import (
         GUIDE_DAYS,
         RECORDING,
@@ -82,7 +84,7 @@ except ImportError:
         spans_between,
         timing_text,
     )
-    from core.models import EpgQuery
+    from core.models import EpgQuery, is_quick_recording
     from core.playlist_sync import server_key
     from player_bar import RECORD_RED
 
@@ -1245,6 +1247,19 @@ class GuideWindow(QDialog):
             describe(self.record_btn, "Record", "Record this programme on the server. Keyboard: Ctrl+R in the guide.")
         self.record_btn.setEnabled(event.event_id is not None and (bool(state) or not ended))
         self.series_btn.setEnabled(bool(event.serieslink_uri) and event.event_id is not None and not ended)
+        quick = programme_recording(
+            getattr(self.host, '_dvr_entries', None), channel, event
+        )
+        if not state and quick is not None and is_quick_recording(quick):
+            if event.stop > planned_stop(quick):
+                self.record_btn.setText("Extend Quick Record")
+                describe(self.record_btn, "Extend Quick Record",
+                         "Extend the existing Quick Record instead of creating a duplicate.")
+                self.record_btn.setEnabled(True)
+            else:
+                self.record_btn.setText("Quick Record active")
+                self.record_btn.setEnabled(False)
+
 
     def _watch(self, channel, event=None):
         if channel is None:
@@ -1270,6 +1285,24 @@ class GuideWindow(QDialog):
         title = event.title or "the programme"
         try:
             backend = self.host.get_backend()
+            if not state:
+                # Recheck the live server. An EPG snapshot can be stale and a
+                # manual Quick Record may not carry an EPG broadcast id.
+                existing = programme_recording(
+                    backend.list_dvr_entries(), channel, event
+                )
+                if existing is not None and is_quick_recording(existing):
+                    handler = getattr(self.host, '_handle_existing_programme_recording', None)
+                    if handler is not None:
+                        handler(existing, event, backend)
+                    else:
+                        self._status(f"Quick Record already active for {title}; use Tasks.")
+                    self.host._refresh_tasks()
+                    return
+                if existing is not None:
+                    self._status(f"{title} is already scheduled or recording; use Tasks.")
+                    self.host._refresh_tasks()
+                    return
             if state:
                 entry = self._entry_for(event)
                 if entry is None:
