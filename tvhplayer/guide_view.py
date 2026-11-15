@@ -102,8 +102,8 @@ TYPEAHEAD_SECONDS = 1.0
 def programme_description(event):
     """Preserve both EPG synopsis fields without repeating duplicated text."""
     subtitle = (event.subtitle or '').strip()
-    description = (event.description or '').strip()
-    summary = (event.summary or '').strip()
+    description = event.description or ''
+    summary = event.summary or ''
     parts = [subtitle] if subtitle else []
     if description and summary:
         if description in summary:
