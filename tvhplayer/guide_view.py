@@ -881,7 +881,6 @@ class GuideWindow(QDialog):
         self._fetch = None
         self._detail_fetch = None
         self._detail_cache = {}
-        self._detail_pending = None
         self._queue = []
         self._error = ''
         self._server_message = ''
@@ -1250,7 +1249,6 @@ class GuideWindow(QDialog):
         event_id = event.event_id
         if event_id in self._detail_cache:
             return
-        self._detail_pending = event_id
         if self._detail_fetch is not None:
             return
         server = self._current_server()
@@ -1276,6 +1274,9 @@ class GuideWindow(QDialog):
         if fetch is not self._detail_fetch:
             return
         self._detail_fetch = None
+        # Cache a failed detail read too, to avoid retrying at every timer tick.
+        if fetch.event_id not in self._detail_cache:
+            self._detail_cache[fetch.event_id] = None
         selected = self.grid.current_event()
         if (selected is not None and selected.event_id != fetch.event_id
                 and selected.event_id not in self._detail_cache):
