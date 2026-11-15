@@ -86,6 +86,31 @@ def test_logo_loader_fetches_once_caches_on_disk_and_skips_failures(tmp_path):
         assert [reference for reference, _image in got] == ['imagecache/1']
         assert len(hits) == 3
 
+        # An address given as a function is found only for a logo not cached,
+        # on the loader's thread: over HTSP finding it can mean logging in.
+        asked = []
+
+        def address(path):
+            def find():
+                asked.append((path, threading.current_thread() is threading.main_thread()))
+                return f'{base}/{path}'
+            return find
+
+        got.clear()
+        loader.forget()
+        loader.request(box, 'imagecache/1', address('imagecache/1'))
+        loader.request(box, 'imagecache/3', address('imagecache/3'))
+        loader.request(box, 'imagecache/4', lambda: 'imagecache/4')
+        loader.request(box, 'imagecache/5', lambda: (_ for _ in ()).throw(OSError('no server')))
+        deadline = time.monotonic() + 5
+        while (not got or len(hits) < 4 or len(asked) < 1) and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert [reference for reference, _image in got] == ['imagecache/1']
+        assert asked == [('imagecache/3', False)]
+        # Not an http address, or none at all: nothing is fetched.
+        assert [path for path, _auth in hits][3:] == ['/imagecache/3']
+
         pixmap = logo_pixmap(png)
         assert pixmap.size() == LOGO_SIZE
         assert logo_pixmap(b'not an image') is None
@@ -297,74 +322,89 @@ def test_no_epg_is_displayed_only_after_successful_now_next_fetch():
     view.close()
 
 
-def test_embossed_channel_logo_follows_the_active_palette():
-    from PyQt6.QtCore import QRect, Qt
-    from PyQt6.QtGui import QColor, QIcon, QPainter, QPalette, QPixmap
+def test_rows_arriving_in_any_order_take_their_final_places():
+    import random
 
-    from tvhplayer.channel_view import COL_NAME, LOGO_SIZE, padded_pixmap
+    from tvhplayer.channel_view import COL_NAME
+    from tvhplayer.core.backend import channel_sort_key
+    from tvhplayer.core.channel_info import channel_key
     from tvhplayer.core.models import Channel
 
-    app, model, view = _model([
-        Channel(uuid='has-logo', name='Channel with logo'),
-        Channel(uuid='no-logo', name='Channel without logo'),
-    ])
-    original_palette = app.palette()
-    original_row_height = view.verticalHeader().defaultSectionSize()
-    original_icon_size = view.iconSize()
+    rng = random.Random(3)
+    channels = [Channel(uuid=f'u{i}', name=f'Ch {rng.randrange(50)}', number=rng.choice([0, rng.randrange(1, 300)]))
+                for i in range(2000)]
+    arrival = channels[:]
+    rng.shuffle(arrival)
+    app, model, view = _model([])
+    for start in range(0, len(arrival), 300):
+        model.update_channels({channel_key(c): c for c in arrival[start:start + 300]})
+        shown = [model.channel_at(row) for row in range(model.rowCount())]
+        # Every batch shows the channels so far in the order the finished list has.
+        assert [channel_sort_key(c) for c in shown] == sorted(channel_sort_key(c) for c in shown)
+    # As the backend's finished list: arrival order, sorted (ties keep arrival order).
+    final = sorted(arrival, key=channel_sort_key)
+    assert [model.channel_at(row).uuid for row in range(model.rowCount())] == [c.uuid for c in final]
 
-    image = QPixmap(LOGO_SIZE)
-    image.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(image)
-    painter.fillRect(QRect(22, 10, 12, 12), QColor('white'))
-    painter.end()
-    original_key = image.cacheKey()
+    # A renumbered channel moves to its new place; a removed one leaves.
+    moved = Channel(uuid=final[0].uuid, name=final[0].name, number=10_000)
+    model.update_channels({channel_key(final[0]): moved, channel_key(final[1]): None})
+    assert model.rowCount() == len(channels) - 1
+    assert model.channel_at(model.rowCount() - 1).uuid == moved.uuid or \
+        channel_sort_key(model.channel_at(model.rowCount() - 1)) >= channel_sort_key(moved)
+    assert model.row_of_key(channel_key(final[1])) == -1
+    assert model.channel_at(model.row_of_key(channel_key(moved))).number == 10_000
+    view.close()
 
-    model.set_channels(
-        [Channel(uuid='has-logo', name='Channel with logo'),
-         Channel(uuid='no-logo', name='Channel without logo')],
-        ['present', 'missing'],
-    )
-    empty = QIcon(padded_pixmap())
-    model.set_logos(True, {'present': image}, empty)
-    icon_index = model.index(0, COL_NAME)
-    empty_index = model.index(1, COL_NAME)
 
-    def palette(base, text):
-        pal = QPalette(original_palette)
-        pal.setColor(QPalette.ColorRole.Base, QColor(base))
-        pal.setColor(QPalette.ColorRole.Text, QColor(text))
-        return pal
+def test_a_programme_change_redraws_its_row_without_moving_any():
+    # Tvheadend sends a channel update whenever a channel's programme
+    # changes; with many channels that is a steady stream. It must not sort
+    # and filter the whole list again.
+    from PyQt6.QtCore import Qt
 
-    try:
-        app.setPalette(palette('#202020', '#ffffff'))
-        dark_icon = icon_index.data(Qt.ItemDataRole.DecorationRole)
-        dark_key = dark_icon.cacheKey()
-        dark = dark_icon.pixmap(LOGO_SIZE).toImage()
-        assert dark.pixelColor(5, 16).alpha() == 0  # No filled grey badge.
-        assert dark.pixelColor(0, 0).alpha() == 0
-        assert dark.pixelColor(28, 16) == QColor('white')
-        assert icon_index.data(Qt.ItemDataRole.DecorationRole).cacheKey() == dark_key
+    from tvhplayer.channel_view import COL_NAME, COL_NUMBER
+    from tvhplayer.core.channel_info import channel_key
+    from tvhplayer.core.models import Channel
 
-        # Switch the application's actual palette while the model and its
-        # downloaded logos stay in place.
-        app.setPalette(palette('#ffffff', '#111111'))
-        app.processEvents()
-        light_icon = icon_index.data(Qt.ItemDataRole.DecorationRole)
-        light = light_icon.pixmap(LOGO_SIZE).toImage()
-        assert light_icon.cacheKey() != dark_key
-        assert light.pixelColor(5, 16).alpha() == 0
-        assert any(dark.pixelColor(x, 16).alpha() > 0 for x in range(18, 23))
-        assert any(light.pixelColor(x, 16).alpha() > 0 for x in range(18, 23))
-        assert light.pixelColor(28, 16) == QColor('white')
-        assert empty_index.data(Qt.ItemDataRole.DecorationRole).cacheKey() == empty.cacheKey()
-        assert image.cacheKey() == original_key
-        assert image.toImage().pixelColor(5, 16).alpha() == 0
-        assert view.iconSize() == original_icon_size
-        assert view.verticalHeader().defaultSectionSize() == original_row_height
+    channels = [Channel(uuid=f'u{i}', name=f'Ch {i}', number=i, htsp_id=i, raw={'eventId': i})
+                for i in range(1, 6)]
+    app, model, view = _model(channels)
+    layouts, changed = [], []
+    model.layoutChanged.connect(lambda *a: layouts.append(1))
+    model.dataChanged.connect(lambda first, last, roles: changed.append((first.row(), last.row())))
+    view.setCurrentIndex(model.index(3, COL_NAME))
 
-        # Selection should not tint the badge or hide the channel artwork.
-        selected = light_icon.pixmap(LOGO_SIZE, QIcon.Mode.Selected).toImage()
-        assert selected.pixelColor(5, 16) == light.pixelColor(5, 16)
-    finally:
-        app.setPalette(original_palette)
-        view.close()
+    update = Channel(uuid='u2', name='Ch 2', number=2, htsp_id=2, raw={'eventId': 99})
+    model.update_channels({channel_key(update): update})
+    assert layouts == []
+    assert changed == [(1, 1)]
+    assert model.channel_at(1) is update
+    assert view.currentIndex().row() == 3
+
+    # Sorted by a column: a change that keeps the channel's value there stays in place too.
+    model.sort(COL_NUMBER, Qt.SortOrder.DescendingOrder)
+    layouts.clear()
+    changed.clear()
+    update = Channel(uuid='u2', name='Ch 2', number=2, htsp_id=2, raw={'eventId': 100})
+    model.update_channels({channel_key(update): update})
+    assert layouts == [] and changed == [(3, 3)]
+
+    # A rename still moves the row.
+    model.sort(-1)
+    layouts.clear()
+    renamed = Channel(uuid='u2', name='Ch 2', number=9, htsp_id=2)
+    model.update_channels({channel_key(renamed): renamed})
+    assert layouts == [1]
+    assert [model.channel_at(row).number for row in range(5)] == [1, 3, 4, 5, 9]
+
+    # A channel the search leaves out changes without a row to redraw.
+    model.set_filter('ch 1')
+    layouts.clear()
+    changed.clear()
+    update = Channel(uuid='u3', name='Ch 3', number=3, htsp_id=3, raw={'eventId': 7})
+    model.update_channels({channel_key(update): update})
+    assert layouts == [] and changed == []
+    assert model.rowCount() == 1
+    model.set_filter('')
+    assert model.channel_at(model.row_of_key('u3')) is update
+    view.close()

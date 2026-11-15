@@ -1,8 +1,13 @@
-from setuptools import setup, find_packages
+from setuptools import Extension, setup, find_packages
+
+# HTSMSG decoding in C. Packages build it in place before copying tvhplayer/:
+#   python3 setup.py build_ext --inplace
+# Without it the app decodes in Python, which is slow for large channel lists.
+HTSMSG = Extension('tvhplayer.core._htsmsg', ['tvhplayer/core/_htsmsg.c'], optional=True)
 
 setup(
     name="tvhplayer",
-    version="4.6.5",
+    version="4.6.7",
     description="Desktop client for TVHeadend",
     author="mFat",
     author_email="mah.fat@gmail.com",
@@ -17,6 +22,7 @@ setup(
     ],
     python_requires='>=3.9',
     packages=find_packages(),
+    ext_modules=[HTSMSG],
     package_data={
         'tvhplayer': ['*.py', 'icons/*'],
     },

@@ -1,8 +1,8 @@
 # The built-in server. These pins match packaging/tvheadend/pins.env;
 # tests/test_packaging_pins.py fails when they disagree.
 %global tvh_repo https://github.com/mfat/tvheadend
-%global tvh_commit 40e88d4cef2c81e44474e75fd2f1edb232575ceb
-%global tvh_version 4.3^2904.g40e88d4ce
+%global tvh_commit 57610597563a3f49ac1d132c4735cb0bee6d4364
+%global tvh_version 4.3^2908.g576105975
 %global scan_commit 31d6fb8f8b86e204518ada99bfb8cf6807c717e5
 %global dvbcsa_version 1.1.0
 %global hdhomerun_version 20250815
@@ -11,7 +11,7 @@
 %global mpv_wheel_sha256 dcf77f612e3f5ce49bd89393f37d286de7ac290db6b0800f1fdcfe0aeb5ba9b8
 
 Name:           tvhplayer
-Version:        4.6.5
+Version:        4.6.7
 Release:        1%{?dist}
 Summary:        Tvheadend desktop client with a built-in server
 
@@ -76,6 +76,8 @@ cp -p %{SOURCE1} %{SOURCE2} %{SOURCE3} %{SOURCE4} tvheadend-sources/
 
 %build
 packaging/tvheadend/build-tvheadend.sh build tvheadend-sources tvheadend-build --bundle-dvbcsa
+# The C decoder for HTSP messages, next to the code copied below.
+%{python3} packaging/build-native.py
 
 %install
 packaging/tvheadend/build-tvheadend.sh install tvheadend-build %{buildroot}
@@ -117,6 +119,14 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.mfat.tvhpla
 %{_metainfodir}/io.github.mfat.tvhplayer.metainfo.xml
 
 %changelog
+* Sun Nov 15 2026 mFat <newmfat@gmail.com> - 4.6.7-1
+- Performance improvements.
+- Better handling of large playlists.
+
+* Sun Nov 15 2026 mFat <newmfat@gmail.com> - 4.6.6-1
+- Performance improvements.
+- Better handling of large playlists.
+
 * Sat Nov 07 2026 mFat <newmfat@gmail.com> - 4.6.5-1
 - Make the Organic theme the default for new installs.
 - Fix gaps at the rounded corners of menus and other popups in the Organic theme.

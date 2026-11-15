@@ -109,7 +109,9 @@ class TvhBackend(ABC):
         redundant full channel/grid request. The next programme is retrieved
         using the current event's nextEventId.
         """
-        events = self.query_epg(EpgQuery(mode='now', limit=10000))
+        # No explicit limit: grid_rows() must page through all current
+        # events, including installations with over 10,000 channels.
+        events = self.query_epg(EpgQuery(mode='now'))
         following = next_event_ids(events)
         if following:
             events = events + self.load_events(following)
@@ -302,13 +304,12 @@ class TvhBackend(ABC):
         """
 
     @abstractmethod
-    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '', comment: str = '') -> str:
+    def create_dvr_entry_by_event(self, event_id: int, config_uuid: str = '') -> str:
         """Schedule a timer from an EPG event id.
 
         HTTP ``dvr/entry/create_by_event`` (``event_id``, optional
-        ``config_uuid`` and ``comment``). HTSP ``addDvrEntry`` with
-        ``eventId`` and optional ``configName``/``comment``.
-        Returns the server id when the response includes one.
+        ``config_uuid``). HTSP ``addDvrEntry`` with ``eventId`` and optional
+        ``configName``. Returns the server id when the response includes one.
         """
 
     @abstractmethod

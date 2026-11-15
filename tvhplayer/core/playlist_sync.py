@@ -21,13 +21,17 @@ import re
 import shutil
 import sys
 import time
+import uuid as uuid_module
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from .errors import PlaylistError, TvhAuthError, TvhConnectionError
 from .ffmpeg_starter import install_starter
-from .playlist import NO_CHANNELS, ChannelPlan, SkippedEntry, _quote, ffmpeg_input, xtream_identity
-from .playlist import tvh_split
+from .tvh_admin import SAVE_BATCH
+from urllib.parse import quote
+
+from .playlist import NO_CHANNELS, ChannelPlan, SkippedEntry, _header_args, _quote, ffmpeg_input, xtream_identity
+from .playlist import tvh_split, xtream_account
 
 BUILTIN_SERVER_KEY = 'builtin'
 # Distro packages and the common Docker images install ffmpeg here. A bare
@@ -38,16 +42,26 @@ NO_FFMPEG = 'TVHplayer could not find ffmpeg, which it needs to play imported ch
 # An Xtream Codes account that allows fewer gets its own limit: a stream over it
 # would cut off the oldest, and a viewer takes the place of a test, never the reverse.
 MAX_STREAMS = 6
-CHECKPOINT_EVERY = 50
+# While channels are added, how often the playlist's channel map is saved. A
+# map lost in a crash is found again on the next refresh, by stream address;
+# saving it more often made the window stutter on big playlists.
+CHECKPOINT_SECONDS = 5
+# How often a playlist import reports progress while it adds channels.
+PROGRESS_SECONDS = 0.25
 CHECK_POLL_SECONDS = 2
 # Each poll reads every mux and service of the server. A big playlist is read
 # less often: a second between polls for every thousand muxes.
 MUXES_PER_POLL_SECOND = 1000
+# A Tvheadend without the fork's bouquet fix maps a big playlist's services
+# to channels in one go and answers nothing meanwhile: 50000 took 12 minutes.
+# A check waits that long for it before it gives up.
+BUSY_SERVER_SECONDS = 15 * 60
 CHECK_MUX_FIELDS = ('scan_result', 'scan_state', 'name', 'iptv_sname')
 CHECK_SERVICE_FIELDS = ('enabled', 'channel')
 NOT_WORKING = 'It is not working right now.'
 NETWORK_GONE = 'The channels from this playlist are no longer on the server. Import it again.'
 _HTTP_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_STATE_ID = re.compile(r'^[0-9a-f]{32}$')
 
 # mpegts_mux_t scan_state and scan_result values.
 SCAN_IDLE = 0
@@ -95,6 +109,8 @@ class PlaylistSource:
     # All statuses are counted, while ``health`` keeps only channels needing attention.
     health_totals: Dict[str, int] = field(default_factory=dict)
     last_checked: float = 0.0
+    # Names the file that keeps ``muxes`` and ``health`` beside the settings.
+    state_id: str = field(default_factory=lambda: uuid_module.uuid4().hex)
 
     @classmethod
     def from_dict(cls, data):
@@ -118,6 +134,7 @@ class PlaylistSource:
             if isinstance(data.get('health'), dict) else {},
             health_totals=_health_totals(data.get('health_totals')),
             last_checked=_seconds(data.get('last_checked')),
+            state_id=valid_state_id(data.get('state_id')) or uuid_module.uuid4().hex,
         )
 
     def to_dict(self):
@@ -137,11 +154,17 @@ class PlaylistSource:
             'health': dict(self.health),
             'health_totals': dict(self.health_totals),
             'last_checked': self.last_checked,
+            'state_id': self.state_id,
         }
 
     def stream_limit(self) -> int:
         """The network's max_streams: the account's limit, at most MAX_STREAMS."""
         return min(self.max_streams, MAX_STREAMS) if self.max_streams > 0 else MAX_STREAMS
+
+
+def valid_state_id(value) -> str:
+    """``value`` when it can name a playlist's state file, else ''."""
+    return value if isinstance(value, str) and _STATE_ID.match(value) else ''
 
 
 def _count(value) -> int:
@@ -288,6 +311,106 @@ def guest_ffmpeg_changes(rows) -> List[dict]:
     return changes
 
 
+_HEADER_OPTIONS = ('-user_agent', '-user-agent', '-headers', '-referer')
+
+
+def provider_changes(
+    rows, old_headers, new_headers, old_location: str = '', new_location: str = '', xtream: bool = False,
+) -> List[dict]:
+    """Mux changes that give saved channels new provider headers or a new Xtream password.
+
+    The stream commands are rewritten in place, so the playlist is not read
+    again. A header a channel got from the playlist itself, rather than from
+    the provider's defaults, is kept. With ``xtream`` every stream of the
+    account goes to ``new_location``'s server and password, which also
+    finishes a move to a new server that stopped part way.
+    """
+    old_headers = dict(old_headers or {})
+    new_headers = dict(new_headers or {})
+    swap = _password_swap(old_location, new_location)
+    account = _xtream_streams(new_location) if xtream else None
+    changes = []
+    for row in rows:
+        url = row.get('iptv_url') or ''
+        wrapped = ffmpeg_input(url[7:]) if url.startswith('pipe://') else None
+        if not row.get('uuid') or wrapped is None:
+            continue
+        address, headers = wrapped
+        args = tvh_split(url[7:])
+        at = args.index('-i')
+        if account:
+            args[at + 1] = address = _move_stream(address, *account)
+        elif swap:
+            args[at + 1] = address = address.replace(*swap)
+        if address.split(':', 1)[0].lower() in ('http', 'https'):
+            own = {key: value for key, value in headers.items() if old_headers.get(key) != value}
+            merged = dict(new_headers)
+            merged.update(own)
+            if merged != headers:
+                options, index = [], 1
+                while index < at:
+                    if args[index] in _HEADER_OPTIONS and index + 1 < at:
+                        index += 2
+                        continue
+                    options.append(args[index])
+                    index += 1
+                args = [args[0], *options, *_header_args(merged), *args[at:]]
+        command = 'pipe://' + ' '.join(_quote(arg) for arg in args)
+        if command != url:
+            changes.append({'uuid': row['uuid'], 'iptv_url': command})
+    return changes
+
+
+def update_provider(admin, source: PlaylistSource, old_headers, old_location: str) -> int:
+    """Give the playlist's channels on the server its new headers or password. Returns how many changed."""
+    admin.check_admin()
+    if not source.network_uuid or not admin.network_exists(source.network_uuid):
+        raise PlaylistError(NETWORK_GONE)
+    ours = set(source.muxes.values())
+    rows = [
+        row for row in admin.list_muxes(source.network_uuid, fields=('uuid', 'iptv_url'))
+        if row.get('uuid') in ours
+    ]
+    changes = provider_changes(
+        rows, old_headers, source.request_headers, old_location, source.location,
+        xtream=source.source_type == 'xc',
+    )
+    if changes:
+        admin.save(changes)
+    return len(changes)
+
+
+_XTREAM_STREAM = re.compile(r'^(?P<base>https?://.+?)/(?P<kind>live|movie|series)/(?P<user>[^/]+)/[^/]+/(?P<rest>[^/]+)$')
+
+
+def _xtream_streams(location: str):
+    """``(server base, quoted username, quoted password)`` streams of this Xtream account use, or None."""
+    base, user, password = xtream_account(location)
+    if not base or not user or not password:
+        return None
+    return base, quote(user, safe=''), quote(password, safe='')
+
+
+def _move_stream(address: str, base: str, user: str, password: str) -> str:
+    """``address`` on the account's current server and password, when it is this account's stream."""
+    match = _XTREAM_STREAM.match(address)
+    if match is None or match['user'] != user:
+        return address
+    return f"{base}/{match['kind']}/{user}/{password}/{match['rest']}"
+
+
+def _password_swap(old_location: str, new_location: str):
+    """The ``/user/password/`` part of Xtream stream addresses before and after, or None."""
+    old_base, user, old_password = xtream_account(old_location)
+    new_base, new_user, new_password = xtream_account(new_location)
+    if not user or not old_password or not new_password or old_password == new_password:
+        return None
+    if old_base != new_base or user != new_user:
+        return None
+    name = quote(user, safe='')
+    return f'/{name}/{quote(old_password, safe="")}/', f'/{name}/{quote(new_password, safe="")}/'
+
+
 def source_identity(source_type: str, location: str):
     """Stable identity for one provider source; XC passwords are deliberately excluded."""
     if source_type == 'xc':
@@ -297,6 +420,14 @@ def source_identity(source_type: str, location: str):
 
 def source_key(source: PlaylistSource):
     return source.server, *source_identity(source.source_type, source.location)
+
+
+def saved_source_key(data):
+    """``source_key`` of a saved playlist dict, read without copying its channel map."""
+    if not isinstance(data, dict):
+        return None
+    source_type = 'xc' if data.get('source_type') == 'xc' else 'm3u'
+    return str(data.get('server') or ''), *source_identity(source_type, str(data.get('location') or ''))
 
 
 def same_source(left: PlaylistSource, right: PlaylistSource) -> bool:
@@ -420,6 +551,11 @@ def error_message(exc: Exception, server_name: str, verb: str = 'add') -> str:
     return f'{server_name} could not {verb} the channels: {exc}'
 
 
+MUX_CONF_FIELDS = (
+    'enabled', 'iptv_url', 'iptv_sname', 'iptv_muxname', 'channel_number', 'iptv_icon', 'iptv_epgid', 'iptv_tags', 'epg',
+)
+
+
 def mux_conf(plan: ChannelPlan) -> dict:
     return {
         'enabled': 1,
@@ -445,6 +581,7 @@ def sync_playlist(
     checkpoint: Optional[Callable[[], None]] = None,
     check: bool = True,
     hide: bool = True,
+    clock: Callable[[], float] = time.monotonic,
 ) -> SyncResult:
     """Create, update, and remove muxes so the network matches ``plans``.
 
@@ -480,7 +617,9 @@ def sync_playlist(
         })
     bouquets = admin.has_network_bouquets(source.network_uuid)
 
-    rows = {row['uuid']: row for row in admin.list_muxes(source.network_uuid) if row.get('uuid')}
+    rows = {
+        row['uuid']: row for row in admin.list_muxes(source.network_uuid, fields=MUX_CONF_FIELDS) if row.get('uuid')
+    }
     known = {key: uuid for key, uuid in source.muxes.items() if uuid in rows}
     if known != source.muxes:
         source.muxes = known
@@ -503,7 +642,7 @@ def sync_playlist(
         leftover = [uuid for uuids in untracked.values() for uuid in uuids]
         if leftover:
             if not bouquets:
-                _delete_channels_of(admin, leftover)
+                _delete_channels_of(admin, leftover, source.network_uuid)
             admin.delete(leftover)
             result.removed += len(leftover)
         checkpoint()
@@ -516,6 +655,21 @@ def sync_playlist(
     # A new address may work where the old one failed, or fail where it worked.
     retest = []
     created_since_checkpoint = 0
+    reported = 0
+    last_checkpoint = last_progress = clock()
+
+    def save_changes():
+        # A saved address is tested at once: afterwards it matches the
+        # playlist, so a later refresh would not test it, even when this
+        # one stops or fails before the end.
+        if changes:
+            admin.save(changes)
+            result.updated += len(changes)
+            changes.clear()
+        if check and retest:
+            admin.scan_muxes(retest)
+            retest.clear()
+
     for plan in plans:
         if cancelled():
             result.cancelled = True
@@ -531,21 +685,30 @@ def sync_playlist(
             source.muxes[plan.key] = admin.create_mux(source.network_uuid, conf)
             result.added += 1
             created_since_checkpoint += 1
-            if created_since_checkpoint >= CHECKPOINT_EVERY:
-                checkpoint()
-                created_since_checkpoint = 0
         done += 1
-        progress(done, total)
+        now = clock()
+        if created_since_checkpoint and now - last_checkpoint >= CHECKPOINT_SECONDS:
+            checkpoint()
+            created_since_checkpoint = 0
+            last_checkpoint = now
+        # Changes reach the server in batches during the walk, and progress
+        # counts only what is there. Progress goes out once a batch or every
+        # PROGRESS_SECONDS, so a slow walk moves and a fast one does not
+        # flood the window with updates.
+        if done % SAVE_BATCH == 0 or now - last_progress >= PROGRESS_SECONDS:
+            save_changes()
+            progress(done, total)
+            last_progress, reported = now, done
     if created_since_checkpoint:
         checkpoint()
 
-    if changes:
-        admin.save(changes)
-        result.updated = len(changes)
+    save_changes()
+    if reported != done:
+        progress(done, total)
 
     if not result.cancelled and stale:
         if not bouquets:
-            _delete_channels_of(admin, [source.muxes[key] for key in stale])
+            _delete_channels_of(admin, [source.muxes[key] for key in stale], source.network_uuid)
         admin.delete([source.muxes[key] for key in stale])
         for key in stale:
             del source.muxes[key]
@@ -561,8 +724,6 @@ def sync_playlist(
     if not check:
         _reconcile_health_totals(source)
     checkpoint()
-    if check and retest and not result.cancelled:
-        admin.scan_muxes(retest)
     if check:
         # Hide channels already known not to work before the bouquet maps them.
         apply_checks(admin, source, hide_failed=hide)
@@ -584,7 +745,7 @@ def map_channels(admin, source: PlaylistSource) -> int:
     were added or deleted.
     """
     muxes = {row['uuid']: row for row in admin.list_muxes(source.network_uuid, fields=('iptv_tags',))}
-    services = admin.list_services(muxes, fields=('enabled',))
+    services = admin.list_services(muxes, fields=('enabled',), network_uuid=source.network_uuid)
     ours = {row['uuid'] for row in services}
     enabled = {row['uuid'] for row in services if row.get('enabled')}
     mapped = set()
@@ -626,9 +787,11 @@ def _map_without_bouquet(admin, source: PlaylistSource) -> None:
         map_channels(admin, source)
 
 
-def _delete_channels_of(admin, mux_uuids) -> None:
+def _delete_channels_of(admin, mux_uuids, network_uuid='') -> None:
     """Delete the channels of these muxes, which Tvheadend 4.2 keeps without a stream."""
-    services = {row['uuid'] for row in admin.list_services(set(mux_uuids), fields=('enabled',))}
+    services = {
+        row['uuid'] for row in admin.list_services(set(mux_uuids), fields=('enabled',), network_uuid=network_uuid)
+    }
     if services:
         admin.delete([
             row['uuid'] for row in admin.list_channels()
@@ -651,7 +814,9 @@ def apply_checks(admin, source: PlaylistSource, hide_failed: bool = True):
         row for row in admin.list_muxes(source.network_uuid, fields=CHECK_MUX_FIELDS)
         if row.get('uuid') in ours
     ]
-    services = admin.list_services([row['uuid'] for row in rows], fields=CHECK_SERVICE_FIELDS)
+    services = admin.list_services(
+        [row['uuid'] for row in rows], fields=CHECK_SERVICE_FIELDS, network_uuid=source.network_uuid,
+    )
     channels = {}
     for service in services:
         channels.setdefault(service.get('multiplex_uuid'), []).extend(
@@ -752,23 +917,44 @@ def wait_for_checks(
     sleep=time.sleep,
     hide: Callable[[], bool] = lambda: True,
     verdicts: Optional[Callable[[], None]] = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """Apply scan verdicts as the server finishes them, until every mux is checked.
 
     ``changed`` is called whenever channels were shown or hidden, and
     ``verdicts`` whenever the server finished more of them. ``hide`` says,
     each round, whether channels that fail are hidden or only marked.
+    A server that does not answer is asked again, for BUSY_SERVER_SECONDS.
     """
     progress = progress or (lambda _done, _total: None)
     cancelled = cancelled or (lambda: False)
     changed = changed or (lambda: None)
     verdicts = verdicts or (lambda: None)
     seen = -1
+    silent_since = None
+    checked = total = untested = 0
+    failed = []
+    hidden = bool(hide())
     while True:
         hidden = bool(hide())
-        checked, total, failed, shown_or_hidden, untested = apply_checks(admin, source, hide_failed=hidden)
+        try:
+            checked, total, failed, shown_or_hidden, untested = apply_checks(admin, source, hide_failed=hidden)
+            if shown_or_hidden:
+                _map_without_bouquet(admin, source)
+        except TvhConnectionError:
+            now = clock()
+            silent_since = now if silent_since is None else silent_since
+            if cancelled():
+                break
+            if now - silent_since >= BUSY_SERVER_SECONDS:
+                raise
+            waited = 0
+            while waited < CHECK_POLL_SECONDS * 5 and not cancelled():
+                sleep(CHECK_POLL_SECONDS)
+                waited += CHECK_POLL_SECONDS
+            continue
+        silent_since = None
         if shown_or_hidden:
-            _map_without_bouquet(admin, source)
             changed()
         if checked != seen:
             verdicts()
@@ -780,7 +966,7 @@ def wait_for_checks(
         while waited < max(CHECK_POLL_SECONDS, total / MUXES_PER_POLL_SECOND) and not cancelled():
             sleep(CHECK_POLL_SECONDS)
             waited += CHECK_POLL_SECONDS
-    result.check_stopped = checked < total
+    result.check_stopped = checked < total or silent_since is not None
     result.hidden = hidden
     result.working = checked - len(failed) - untested
     result.not_working = failed
@@ -888,7 +1074,10 @@ def remove_playlist(admin, source: PlaylistSource) -> None:
     """Delete the playlist's network, its channels, and tags no other channel uses."""
     if admin.network_exists(source.network_uuid):
         if not admin.has_network_bouquets(source.network_uuid):
-            _delete_channels_of(admin, [row['uuid'] for row in admin.list_muxes(source.network_uuid, fields=('uuid',))])
+            _delete_channels_of(
+                admin, [row['uuid'] for row in admin.list_muxes(source.network_uuid, fields=('uuid',))],
+                source.network_uuid,
+            )
         admin.delete_network(source.network_uuid)
     admin.delete_unused_tags(source.tags)
     source.network_uuid = ''

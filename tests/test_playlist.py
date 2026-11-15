@@ -155,6 +155,20 @@ def test_tvh_split_matches_spawn_parse_args():
     assert len(tvh_split(' '.join(['a'] * 100))) == MAX_PIPE_ARGS
 
 
+@pytest.mark.parametrize(('command', 'expected'), [
+    ('ab"cd ef"gh', ['abcd efgh']),
+    ('"a\'b" \'c"d\'', ["a'b", 'c"d']),
+    (r'a\ b c\\d \q', ['a b', 'c\\d', 'q']),
+    (r'''"a\"b" 'c\'d' ''', ['a"b', "c'd"]),
+    ('a\tb\nc', ['a\tb\nc']),
+    ('a "unterminated b', ['a', 'unterminated b']),
+    ('"" \'\' \\', []),
+    (r'\b\f\n\r\t', ['\b\f\n\r\t']),
+])
+def test_tvh_split_preserves_quotes_escapes_and_literal_whitespace(command, expected):
+    assert tvh_split(command) == expected
+
+
 def _plans(text, **kwargs):
     return plan_channels(parse_playlist(text), '/usr/bin/ffmpeg', 'List', **kwargs)
 
@@ -244,6 +258,24 @@ def test_load_playlist_reads_files(tmp_path):
     with pytest.raises(PlaylistError) as info:
         load_playlist(str(tmp_path / 'missing.m3u'))
     assert str(info.value) == FILE_FAILED
+
+
+def test_file_addresses_become_windows_paths(monkeypatch):
+    # file:///C:/... was opened as "/C:/...", which Windows cannot open.
+    import warnings
+    from tvhplayer.core import playlist
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', DeprecationWarning)
+        nturl2path = pytest.importorskip('nturl2path')
+    monkeypatch.setattr(playlist, 'url2pathname', nturl2path.url2pathname)
+    assert playlist._file_path('file:///C:/My%20Lists/tv.m3u') == 'C:\\My Lists\\tv.m3u'
+    assert playlist._file_path('file://localhost/C:/tv.m3u') == 'C:\\tv.m3u'
+    assert playlist._file_path('file://nas/share/tv.m3u') == '\\\\nas\\share\\tv.m3u'
+
+
+def test_a_file_address_is_named_without_its_escapes():
+    assert playlist_name('file:///home/me/My%20Lists/Sports%20TV.m3u') == 'Sports TV'
 
 
 def test_provider_headers_apply_to_download_and_streams():
@@ -391,3 +423,39 @@ def test_xtream_connections_asks_the_account(monkeypatch):
     for location in ('http://example.com/list.m3u', 'http://xt.example/get.php?username=u', '/home/u/get.php'):
         assert xtream_connections(location) is None
     assert len(asked) == 6
+
+
+def test_providers_that_block_the_python_agent_still_load():
+    """Some providers (behind Cloudflare) answer 403 to the python-requests User-Agent."""
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            agent = self.headers.get('User-Agent') or ''
+            seen.append(agent)
+            if agent.startswith('python-requests'):
+                self.send_response(403)
+                self.end_headers()
+                return
+            if self.path.startswith('/player_api.php'):
+                body = b'[{"stream_id": 1, "name": "One"}]' if 'get_live_streams' in self.path else b'{}'
+            else:
+                body = b'#EXTM3U\n#EXTINF:-1,A\nhttp://x/a.ts\n'
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f'http://127.0.0.1:{server.server_address[1]}'
+    try:
+        assert [entry.name for entry in load_xtream(xtream_playlist_url(base, 'u', 'p')).entries] == ['One']
+        assert [entry.name for entry in load_playlist(f'{base}/list.m3u').entries] == ['A']
+        assert seen and all(agent == 'TVHplayer' for agent in seen)
+    finally:
+        server.shutdown()
+        server.server_close()

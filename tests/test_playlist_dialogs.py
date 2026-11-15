@@ -58,14 +58,16 @@ class FakeAdmin:
         self.muxes[uuid] = dict(conf, scan_state=0, scan_result=1)
         return uuid
 
-    def list_services(self, _mux_uuids, fields=None):
+    def list_services(self, _mux_uuids, fields=None, network_uuid=""):
         return []
 
     def scan_network(self, _network_uuid):
         pass
 
     def save(self, nodes):
-        pass
+        for node in nodes:
+            if node.get('uuid') in self.muxes:
+                self.muxes[node['uuid']].update({key: value for key, value in node.items() if key != 'uuid'})
 
     def delete(self, uuids):
         pass
@@ -105,8 +107,8 @@ class FakeHost:
     def playlist_sources(self):
         return [PlaylistSource.from_dict(data) for data in self.stored]
 
-    def store_playlist_source(self, data):
-        source = PlaylistSource.from_dict(data)
+    def store_playlist_source(self, data, replaces=None):
+        source = PlaylistSource.from_dict(replaces if replaces is not None else data)
         self.stored = [
             item for item in self.stored
             if not same_source(PlaylistSource.from_dict(item), source)
@@ -333,7 +335,7 @@ def test_xtream_settings_rotate_password_without_duplicating_source(app, monkeyp
     dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=original)
     assert dialog.windowTitle() == 'Edit Source'
     assert not dialog.source_type_combo.isEnabled()
-    assert not dialog.username_input.isEnabled()
+    assert dialog.username_input.isEnabled() and dialog.location_input.isEnabled()
     assert not dialog.server_combo.isEnabled()
     dialog.password_input.setText('new')
     dialog.user_agent_input.setText('New App')
@@ -555,7 +557,7 @@ class _OneDead(FakeAdmin):
             self.muxes[uuid].update(scan_result=2)
         return uuid
 
-    def list_services(self, mux_uuids, fields=None):
+    def list_services(self, mux_uuids, fields=None, network_uuid=""):
         return [{'uuid': f's{uuid}', 'multiplex_uuid': uuid, 'enabled': True, 'channel': [f'c{uuid}']}
                 for uuid in self.muxes if uuid in set(mux_uuids)]
 
@@ -636,6 +638,14 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
 
         def set_plays_on_start(self, on):
             self.play = on
+
+        decoder = 'auto-safe'
+
+        def hardware_decoding(self):
+            return self.decoder
+
+        def set_hardware_decoding(self, mode):
+            self.decoder = mode
 
         def starts_channels_fast(self):
             return False
@@ -872,6 +882,10 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     assert not dialog.play_check.isChecked()
     dialog.play_check.click()
     assert host.play is True
+    assert dialog.hardware_decoding_combo.currentData() == 'auto-safe'
+    for mode in ('no', 'auto-copy', 'auto-safe'):
+        dialog.hardware_decoding_combo.setCurrentIndex(dialog.hardware_decoding_combo.findData(mode))
+        assert host.decoder == mode
     assert not dialog.fast_start_check.isChecked()
     dialog.fast_start_check.click()
     assert host.fast_start is True
@@ -1019,6 +1033,37 @@ def test_removing_a_playlist_being_updated_stops_the_update_first(app, tmp_path,
     assert dialog.status_label.text() == 'Removed the channels from news.'
 
 
+def test_removing_a_playlist_shows_no_check_text(app, tmp_path, monkeypatch):
+    # A playlist half way through its check: removing it must not read as checking.
+    import threading
+    release = threading.Event()
+    monkeypatch.setattr(dialogs, 'remove_playlist', lambda _admin, _source: release.wait(10))
+    monkeypatch.setattr(
+        dialogs.QMessageBox, 'question', lambda *_args, **_kwargs: dialogs.QMessageBox.StandardButton.Yes
+    )
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
+    source.health_totals = {'working': 10, 'checking': 500}
+    host.stored = [source.to_dict()]
+    dialog = dialogs.PlaylistsDialog(host)
+    dialog.show()
+    assert 'checking' in dialog.health_label.text()
+    dialog._show_check_hint()
+    try:
+        dialog.remove_btn.click()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and dialog.status_label.text() != 'Removing channels…':
+            app.processEvents()
+            time.sleep(0.02)
+        assert dialog.status_label.text() == 'Removing channels…'
+        visible = [label.text() for label in (dialog.health_label, dialog.hint_label) if label.isVisible()]
+        assert not [text for text in visible if 'check' in text.lower()]
+    finally:
+        release.set()
+        _wait_job(app, dialog)
+    assert dialog.status_label.text() == 'Removed the channels from news.'
+
+
 def test_playlists_dialog_lists_servers_and_their_playlists(app, tmp_path):
     other = {'name': 'Living Room', 'url': 'http://10.0.0.2:9981'}
     host = FakeHost([BUILTIN, other], current=other)
@@ -1072,12 +1117,16 @@ def test_choose_window_selects_groups_and_searches(app):
     plans = _grouped_plans()
     source = PlaylistSource('news', '/tmp/news.m3u', 'builtin', left_out=['name:B'])
     dialog = dialogs.ChooseChannelsDialog(plans, source)
-    assert [dialog.tree.topLevelItem(i).text(0) for i in range(2)] == ['News (2)', 'Sport (1)']
+    model = dialog.model
+    groups = [model.index(row, 0) for row in range(model.rowCount())]
+    assert [index.data() for index in groups] == ['News (2)', 'Sport (1)']
+    assert groups[0].data(dialogs.Qt.ItemDataRole.CheckStateRole) == dialogs.Qt.CheckState.PartiallyChecked
     assert dialog.chosen_keys() == ['name:A', 'name:C']
     assert dialog.count_label.text() == '2 of 3 selected'
 
     dialog.search_input.setText('sport')
-    assert dialog.tree.topLevelItem(0).isHidden()
+    app.processEvents()
+    assert [model.index(row, 0).data() for row in range(model.rowCount())] == ['Sport (1)']
     dialog.none_btn.click()
     assert dialog.chosen_keys() == ['name:A']
     dialog.search_input.setText('')
@@ -1086,10 +1135,42 @@ def test_choose_window_selects_groups_and_searches(app):
     assert not dialog.ok_btn.isEnabled()
     dialog.all_btn.click()
     assert dialog.chosen_keys() == ['name:A', 'name:B', 'name:C']
-    dialog.tree.topLevelItem(1).setCheckState(0, dialogs.Qt.CheckState.Unchecked)
-    app.processEvents()
+    sport = model.index(1, 0)
+    assert model.setData(sport, dialogs.Qt.CheckState.Unchecked.value, dialogs.Qt.ItemDataRole.CheckStateRole)
     assert dialog.chosen_keys() == ['name:A', 'name:B']
     assert dialog.count_label.text() == '2 of 3 selected'
+    news_b = model.index(1, 0, model.index(0, 0))
+    assert news_b.data() == 'B'
+    model.setData(news_b, dialogs.Qt.CheckState.Unchecked.value, dialogs.Qt.ItemDataRole.CheckStateRole)
+    assert dialog.chosen_keys() == ['name:A']
+    assert model.index(0, 0).data(dialogs.Qt.ItemDataRole.CheckStateRole) == dialogs.Qt.CheckState.PartiallyChecked
+
+
+def test_choose_window_stays_quick_with_a_huge_playlist(app):
+    # Opening it took 2 seconds for 50000 channels, and each click or key in
+    # Search a third of a second, because every row was a widget item.
+    from tvhplayer.core.playlist import ChannelPlan
+    plans = [ChannelPlan(f'id:{i}', f'Channel {i}', 'x', groups=[f'Group {i % 300}']) for i in range(50000)]
+    source = PlaylistSource('big', '/tmp/big.m3u', 'builtin')
+    started = time.perf_counter()
+    dialog = dialogs.ChooseChannelsDialog(plans, source)
+    dialog.show()
+    app.processEvents()
+    assert time.perf_counter() - started < 1.0
+    model = dialog.model
+    started = time.perf_counter()
+    for row in range(20):
+        model.setData(model.index(row, 0), dialogs.Qt.CheckState.Unchecked.value, dialogs.Qt.ItemDataRole.CheckStateRole)
+        app.processEvents()
+    assert (time.perf_counter() - started) / 20 < 0.05
+    assert dialog.count_label.text() == f'{50000 - 20 * 167} of 50000 selected'
+    started = time.perf_counter()
+    dialog._apply_filter()
+    dialog.search_input.setText('channel 4999')
+    dialog._apply_filter()
+    app.processEvents()
+    assert time.perf_counter() - started < 0.3
+    dialog.close()
 
 
 def test_job_adds_only_the_chosen_channels(app, tmp_path):
@@ -1125,3 +1206,132 @@ def test_refresh_says_when_no_chosen_channel_is_left(app, tmp_path):
     host = FakeHost([BUILTIN], current=BUILTIN)
     source = PlaylistSource('news', _playlist(tmp_path, GROUPS), 'builtin', chosen_groups=['Films'])
     assert _finish(app, dialogs.PlaylistJob(host, source, BUILTIN)) == [('failed', dialogs.NONE_CHOSEN)]
+
+
+def test_user_agent_offers_common_players_and_still_takes_typed_text(app):
+    dialog = dialogs.ImportPlaylistDialog(FakeHost([BUILTIN], current=BUILTIN))
+    combo = dialog.user_agent_combo
+    assert combo.itemText(0) == ''
+    assert [combo.itemText(i) for i in range(1, combo.count())] == list(dialogs.USER_AGENT_PRESETS)
+    combo.setCurrentIndex(1)
+    assert dialog.user_agent_input.text() == 'VLC/3.0.21 LibVLC/3.0.21'
+    dialog.user_agent_input.setText('My App')
+    assert combo.currentText() == 'My App'
+    dialog._set_running(True)
+    assert not combo.isEnabled()
+
+
+def test_edit_saves_new_agent_and_password_into_channels_without_reading_the_playlist(app, monkeypatch):
+    from tvhplayer.core.playlist import ffmpeg_input, parse_playlist
+
+    loaded = []
+
+    def load(location, cancelled=None, headers=None):
+        loaded.append(location)
+        playlist = parse_playlist('#EXTM3U\n#EXTINF:-1,News\nhttp://provider.example/live/user/old/1.ts\n')
+        for entry in playlist.entries:
+            entry.headers = dict(headers or {})
+        return playlist
+
+    monkeypatch.setattr(dialogs, 'load_xtream', load)
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    dialog = dialogs.ImportPlaylistDialog(host)
+    dialog.source_type_combo.setCurrentIndex(1)
+    dialog.location_input.setText('http://provider.example')
+    dialog.username_input.setText('user')
+    dialog.password_input.setText('old')
+    dialog.user_agent_input.setText('Old App')
+    _run(app, dialog)
+    assert len(loaded) == 1
+    imported = PlaylistSource.from_dict(host.stored[-1])
+    assert imported.network_uuid
+
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=imported)
+    assert dialog.import_btn.text() == '&Save'
+    # A refresh changes the saved playlist while the window is open.
+    refreshed = PlaylistSource.from_dict(host.stored[-1])
+    refreshed.tags = ['Refreshed']
+    host.store_playlist_source(refreshed.to_dict())
+    dialog.password_input.setText('new')
+    dialog.user_agent_combo.setCurrentIndex(1)
+    _run(app, dialog)
+    assert len(loaded) == 1
+    assert dialog.status_label.text().startswith('Saved. 1 channel from')
+    [mux] = FakeAdmin.servers[BUILTIN['url']]['muxes'].values()
+    assert ffmpeg_input(mux['iptv_url'][7:]) == (
+        'http://provider.example/live/user/new/1.ts', {'User-Agent': 'VLC/3.0.21 LibVLC/3.0.21'},
+    )
+    assert len(host.stored) == 1
+    saved = PlaylistSource.from_dict(host.stored[0])
+    assert saved.location.endswith('username=user&password=new')
+    assert saved.request_headers == {'User-Agent': 'VLC/3.0.21 LibVLC/3.0.21'}
+    assert saved.tags == ['Refreshed']
+    assert host.synced[-1][2] == 'http://provider.example/xmltv.php?username=user&password=new'
+
+
+def _imported_xtream(app, monkeypatch, fail_at=None):
+    """Import an Xtream Codes account once; returns the host, the source and the addresses read."""
+    from tvhplayer.core.playlist import parse_playlist, xtream_account
+
+    loaded = []
+
+    def load(location, cancelled=None, headers=None):
+        loaded.append(location)
+        if location == fail_at:
+            raise dialogs.PlaylistError('Could not download the playlist.')
+        base, user, password = xtream_account(location)
+        return parse_playlist(f'#EXTM3U\n#EXTINF:-1,News\n{base}/live/{user}/{password}/1.ts\n')
+
+    monkeypatch.setattr(dialogs, 'load_xtream', load)
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    dialog = dialogs.ImportPlaylistDialog(host)
+    dialog.source_type_combo.setCurrentIndex(1)
+    dialog.location_input.setText('http://old.example')
+    dialog.username_input.setText('user')
+    dialog.password_input.setText('pass')
+    _run(app, dialog)
+    return host, PlaylistSource.from_dict(host.stored[-1]), loaded
+
+
+def test_edit_moves_a_playlist_to_the_providers_new_address(app, monkeypatch):
+    from tvhplayer.core.playlist import ffmpeg_input
+
+    host, source, loaded = _imported_xtream(app, monkeypatch)
+    [uuid] = source.muxes.values()
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=source)
+    dialog.location_input.setText('http://new.example')
+    dialog.username_input.setText('renewed')
+    _run(app, dialog)
+    assert loaded[-1] == 'http://new.example/get.php?username=renewed&password=pass'
+    # One playlist, at the new address, with the same channel updated in place.
+    assert len(host.stored) == 1
+    saved = PlaylistSource.from_dict(host.stored[0])
+    assert saved.location == 'http://new.example/get.php?username=renewed&password=pass'
+    assert saved.network_uuid == source.network_uuid and list(saved.muxes.values()) == [uuid]
+    mux = FakeAdmin.servers[BUILTIN['url']]['muxes'][uuid]
+    assert ffmpeg_input(mux['iptv_url'][7:])[0] == 'http://new.example/live/renewed/pass/1.ts'
+    assert not host.busy
+
+
+def test_edit_to_an_address_that_does_not_work_changes_nothing(app, monkeypatch):
+    bad = 'http://wrong.example/get.php?username=user&password=pass'
+    host, source, _loaded = _imported_xtream(app, monkeypatch, fail_at=bad)
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=source)
+    dialog.location_input.setText('http://wrong.example')
+    _run(app, dialog)
+    assert 'Could not download the playlist.' in dialog.status_label.text()
+    assert [PlaylistSource.from_dict(item).location for item in host.stored] == [source.location]
+    assert not host.busy
+
+
+def test_edit_cannot_take_the_address_of_another_playlist(app, monkeypatch):
+    host, source, loaded = _imported_xtream(app, monkeypatch)
+    other = PlaylistSource('Other', 'http://taken.example/get.php?username=user&password=x', 'builtin',
+                           source_type='xc')
+    host.stored.append(other.to_dict())
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=source)
+    dialog.location_input.setText('http://taken.example')
+    dialog.import_btn.click()
+    assert dialog._job is None
+    assert dialog.status_label.text().startswith('Other already reads from this address')
+    assert len(loaded) == 1
