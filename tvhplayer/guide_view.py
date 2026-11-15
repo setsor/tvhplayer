@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import textwrap
 
 from PyQt6.QtCore import QByteArray, QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPalette, QPen
@@ -96,6 +97,26 @@ TICK_MS = 30000
 _NO_SERVER_YET = object()
 # Typed letters within this many seconds of each other jump to a channel together.
 TYPEAHEAD_SECONDS = 1.0
+
+
+def programme_description(event):
+    """Preserve both EPG synopsis fields without repeating duplicated text."""
+    subtitle = (event.subtitle or '').strip()
+    description = (event.description or '').strip()
+    summary = (event.summary or '').strip()
+    parts = [subtitle] if subtitle else []
+    if description and summary:
+        if description in summary:
+            parts.append(summary)
+        elif summary in description:
+            parts.append(description)
+        else:
+            parts.extend((description, summary))
+    elif description or summary:
+        parts.append(description or summary)
+    return '\n\n'.join(parts) or 'No description.'
+
+
 
 
 def _blend(base, over, amount):
@@ -570,8 +591,9 @@ class GuideGrid(QAbstractScrollArea):
             row, cell, on_channel = self._hit(event.pos())
             if cell is not None:
                 lines = [cell.event.title or 'No title', timing_text(cell.event, int(time.time()))]
-                if cell.event.subtitle:
-                    lines.append(cell.event.subtitle)
+                synopsis = programme_description(cell.event)
+                if synopsis != 'No description.':
+                    lines.extend(textwrap.wrap(synopsis.replace('\n', ' '), width=88, break_long_words=False))
                 QToolTip.showText(event.globalPos(), '\n'.join(lines), self.viewport())
             elif row is not None and on_channel:
                 QToolTip.showText(event.globalPos(), self.channels[row].name, self.viewport())
@@ -1220,8 +1242,7 @@ class GuideWindow(QDialog):
             timing += " · Recording scheduled"
         self.title_label.setText(event.title or "No title")
         self.timing_label.setText(timing)
-        text = "\n\n".join(part for part in (event.subtitle, event.description) if part)
-        self._set_description(text or "No description.")
+        self._set_description(programme_description(event))
         ended = event.stop <= now
         if state == RECORDING:
             self.record_btn.setText("Stop Re&cording")
