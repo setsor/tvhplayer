@@ -1,8 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .subtitle_preferences import normalize_subtitle_language
-
 
 PROTOCOL_HTTP = 'http'
 PROTOCOL_HTSP = 'htsp'
@@ -17,8 +15,6 @@ class ServerConfig:
     protocol: str = PROTOCOL_HTSP
     htsp_port: int = 9982
     builtin: bool = False
-    subtitle_language: str = ''
-    remember_subtitle_selection: bool = False
 
     @classmethod
     def from_dict(cls, data):
@@ -39,8 +35,6 @@ class ServerConfig:
             protocol=protocol,
             htsp_port=htsp_port,
             builtin=bool(data.get('builtin')),
-            subtitle_language=normalize_subtitle_language(data.get('subtitle_language')),
-            remember_subtitle_selection=data.get('remember_subtitle_selection') is True,
         )
 
     def to_dict(self):
@@ -52,8 +46,6 @@ class ServerConfig:
             'protocol': self.protocol,
             'htsp_port': self.htsp_port,
             'builtin': self.builtin,
-            'subtitle_language': self.subtitle_language,
-            'remember_subtitle_selection': self.remember_subtitle_selection,
         }
 
 
@@ -385,30 +377,6 @@ class DvrEntry:
             if candidate and str(candidate).strip().casefold() == target:
                 return True
         return False
-
-
-QUICK_RECORD_COMMENT = 'Instant recording via TVHplayer'
-
-
-def is_quick_recording(entry):
-    """Only Quick Record jobs initiated by the player have this explicit marker.
-
-    Never infer recording type from channel or title: an EPG-scheduled
-    recording can share both.
-    """
-    return (entry.raw or {}).get('comment') == QUICK_RECORD_COMMENT
-
-
-def quick_recordings_for_channel(entries, channel):
-    """Running Quick Record jobs on this channel, excluding EPG schedules."""
-    if channel is None:
-        return []
-    return [
-        entry for entry in entries
-        if entry.category() == 'recording'
-        and entry.matches_channel(channel)
-        and is_quick_recording(entry)
-    ]
 
 
 def recordings_to_stop(entries, channel=None):

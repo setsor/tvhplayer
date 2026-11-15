@@ -580,7 +580,9 @@ class _Frame(QObject):
         pass
 
     def eventFilter(self, obj, event):
-        if obj is self.window:
+        # A window Python's garbage collector frees loses this frame's
+        # attributes before the window itself goes, which still sends it events.
+        if obj is getattr(self, 'window', None):
             kind = event.type()
             if kind == QEvent.Type.Paint:
                 self._paint()
@@ -798,6 +800,13 @@ class DialogFramer(QObject):
         super().__init__(app)
         self._button_layout = desktop_button_layout() if button_layout is None else button_layout
         app.installEventFilter(self)
+        # At exit PyQt deletes the windows while it walks its wrappers. This
+        # filter would then run for every widget going, making new wrappers
+        # mid-walk, and Python crashed as TVHplayer closed (seen on Wayland).
+        app.aboutToQuit.connect(self._stop)
+
+    def _stop(self):
+        QApplication.instance().removeEventFilter(self)
 
     def wants(self, widget):
         return (

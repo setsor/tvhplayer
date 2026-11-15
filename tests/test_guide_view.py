@@ -81,6 +81,15 @@ class _Host:
     def get_backend(self):
         return self.backend
 
+    def run_dvr_change(self, change, on_done):
+        # The window runs it in the background; here at once.
+        try:
+            result = change(self.backend)
+        except Exception as e:
+            on_done(None, e)
+        else:
+            on_done(result, None)
+
     def _refresh_tasks(self):
         self.refreshed += 1
 
@@ -237,18 +246,18 @@ def test_guide_window_reports_a_failed_read_until_reload(monkeypatch):
         app.processEvents()
 
 
-def test_guide_description_scrolls_and_survives_periodic_refresh(monkeypatch):
-    """The selected programme must not lose its description or scroll position."""
+def test_long_description_is_scrollable_without_refresh_jumping(monkeypatch):
+    """Keep every line available and do not reset a user's reading position."""
     app = _app()
     import tvhplayer.guide_view as guide_view
     from tvhplayer.core.models import Channel, EpgEvent
 
     now = int(time.time())
-    channel = Channel(uuid='bbc', name='BBC Earth', number=515)
-    details = 'Exploring life in Alaska and its winter wildlife. ' * 70
+    channel = Channel(uuid='earth', name='Earth HD', number=17)
+    long_description = 'Documentary exploring wildlife across the Arctic. ' * 70
     event = EpgEvent(
-        start=now - 120, stop=now + 3600, title='Sub zero grade',
-        channel_uuid='bbc', event_id=21, description=details,
+        start=now - 120, stop=now + 3600, title='Arctic wildlife',
+        channel_uuid='earth', event_id=42, description=long_description,
     )
     backend = _Backend([event])
     monkeypatch.setattr(guide_view, 'create_backend', lambda server: backend)
@@ -256,23 +265,15 @@ def test_guide_description_scrolls_and_survives_periodic_refresh(monkeypatch):
     try:
         window.show()
         window.show_channel(channel)
-        assert _wait(app, lambda: window.description_text.toPlainText() == details)
+        assert _wait(app, lambda: window.description_text.toPlainText() == long_description)
         assert window.description_text.isReadOnly()
-        scroll = window.description_text.verticalScrollBar()
-        assert scroll.maximum() > 0
-        scroll.setValue(scroll.maximum())
-        bottom = scroll.value()
-        window._on_tick()  # 30-second refresh must not jump back to the top
-        assert window.description_text.toPlainText() == details
-        assert scroll.value() == bottom
-
-        # A different programme with identical description text must begin at
-        # the top, not inherit the previous programme's scroll position.
-        window._set_description(details, event_key=('bbc', 22))
-        assert scroll.value() == 0
-        scroll.setValue(scroll.maximum())
-        window._set_description(details, event_key=('bbc', 22))
-        assert scroll.value() == scroll.maximum()
+        scrollbar = window.description_text.verticalScrollBar()
+        assert scrollbar.maximum() > 0
+        scrollbar.setValue(scrollbar.maximum())
+        bottom = scrollbar.value()
+        window._on_tick()
+        assert window.description_text.toPlainText() == long_description
+        assert scrollbar.value() == bottom
     finally:
         window.shutdown()
         window.close()

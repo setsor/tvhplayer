@@ -89,7 +89,7 @@ You can add internet TV channels from an M3U playlist or an Xtream Codes provide
 
 1. Choose **File → Import Playlist…** (Ctrl+I).
 2. Choose **M3U playlist** and paste its web address or pick a file, or choose **Xtream Codes** and enter the provider server, username, and password.
-3. If the provider requires them, add its user agent and other HTTP headers. These are used both to fetch the channel list and to open its streams; headers attached to an individual M3U entry take precedence.
+3. If the provider requires them, add its user agent and other HTTP headers. These are used both to fetch the channel list and to open its streams; headers attached to an individual M3U entry take precedence. If a provider accepts only well-known players, pick VLC or Chrome from the **User agent** list.
 4. If you have more than one server, choose where the channels go. The built-in server is chosen for you.
 5. Click **Import**.
 
@@ -98,7 +98,7 @@ The channels appear in the channel list when the import finishes.
 The server keeps the channels, so TVHplayer does not read the playlist again by itself. When your provider adds or removes channels, or changes their addresses, refresh it. To manage your playlists, choose **File → Manage Playlists…**:
 
 - **Refresh** reads the playlist again now: new channels are added, channels that left the playlist are removed, and channels whose address changed are tested again.
-- **Settings…** changes provider headers or an Xtream Codes password, then refreshes the same playlist without adding it twice.
+- **Edit…** changes the playlist's address, Xtream Codes server, username, password, user agent, or other headers. A new password or new headers are written into the playlist's channels on the server without reading the playlist again; use **Settings → Channels → Check channels now** to test the channels with them. A new address or username, for example when your provider moves to a new domain, is read from there and the existing channels are updated, keeping their recordings and guide. If the new address does not work, nothing is changed.
 - **Health…** shows the latest saved Tvheadend check result and completion time for every channel.
 - **Remove** removes the playlist and its channels.
 
@@ -174,6 +174,8 @@ TVHplayer plays with **mpv** (libmpv), drawing into the window on Wayland and X1
 While a channel plays, the bar's seek bar, pause, and ±10 s buttons move within what mpv has buffered. **LIVE** shows how far behind you are; click it to catch up. The same commands are in the **Playback** menu. mpv keeps about a minute of HD in memory. **Settings → Playback → Keep the timeshift buffer on disk** sets `--cache-on-disk` for much longer, until the chosen disk limit is reached, then buffering continues in memory. The limit is checked every half-second, so writes can slightly exceed it. The file is deleted when the channel stops. Applies the next time a channel starts.
 
 **Settings → Playback → Start channels faster** sets mpv's `--demuxer-lavf-analyzeduration=0.5`, for a slightly quicker picture. Turn it off if sound or a sound track goes missing. Applies the next time a channel starts.
+
+**Settings → Playback → Hardware decoding** offers Auto (the default), Copy-back, and Disabled. If video has artifacts, try Disabled, then reopen the channel. If that helps, try Copy-back to use hardware decoding through a more compatible path. Disabled uses the CPU and may increase power use. Changes apply when the next stream starts; Playback Statistics shows the decoder actually in use.
 
 ## Keyboard shortcuts
 

@@ -14,6 +14,7 @@ import shlex
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit, urlunsplit
+from urllib.request import url2pathname
 
 import requests
 
@@ -59,7 +60,14 @@ _VLC_HEADERS = {
     'http-cookie': 'Cookie',
 }
 _SPAWN_ESCAPES = {'b': '\b', 'f': '\f', 'n': '\n', 'r': '\r', 't': '\t'}
+# Read ordinary text in spans instead of visiting every character in Python.
+# Only a literal space separates spawn arguments; tabs and newlines are text.
+_SPAWN_PART = re.compile(r'''\\[\s\S]?|[^ \\"']+|[ "']''')
 _QUOTE_ESCAPES = {'\\': '\\\\', '"': '\\"', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t'}
+# A big playlist quotes a few hundred thousand arguments; these do it in C.
+_NEEDS_QUOTE = re.compile('[ "\'\\\\\b\f\n\r\t]')
+_QUOTE_TABLE = str.maketrans(_QUOTE_ESCAPES)
+_EXTINF_STOP = re.compile('[,"\']')
 
 
 @dataclass
@@ -114,6 +122,19 @@ def is_web_address(location: str) -> bool:
     return (location or '').strip().lower().startswith(('http://', 'https://'))
 
 
+def _file_path(location: str) -> str:
+    """The local path of a ``file://`` address.
+
+    On Windows ``file:///C:/list.m3u`` is ``C:\\list.m3u``, and a host
+    names a network share.
+    """
+    parts = urlsplit(location)
+    path = parts.path
+    if parts.netloc and parts.netloc.lower() != 'localhost':
+        path = '//' + parts.netloc + path
+    return url2pathname(path)
+
+
 def load_playlist(
     location: str,
     cancelled: Optional[Callable[[], bool]] = None,
@@ -128,7 +149,7 @@ def load_playlist(
     if is_web_address(location):
         data = _download(location, cancelled or (lambda: False), headers)
     else:
-        path = unquote(location[7:]) if location.startswith('file://') else location
+        path = _file_path(location) if location.lower().startswith('file://') else location
         try:
             with open(path, 'rb') as handle:
                 data = handle.read(MAX_PLAYLIST_BYTES + 1)
@@ -194,8 +215,15 @@ def load_xtream(
         connections = max(0, int((account.get('user_info') or {}).get('max_connections') or 0))
     except (AttributeError, TypeError, ValueError):
         pass
-    guide_url = f'{base}/xmltv.php?{urlencode(auth)}'
-    return Playlist(entries, guide_url=guide_url, max_connections=connections)
+    return Playlist(entries, guide_url=xtream_guide_url(location), max_connections=connections)
+
+
+def xtream_guide_url(location: str) -> str:
+    """The program guide of an Xtream Codes account, or an empty string."""
+    base, username, password = xtream_account(location)
+    if not base or not username or not password:
+        return ''
+    return f'{base}/xmltv.php?{urlencode({"username": username, "password": password})}'
 
 
 def xtream_playlist_url(server: str, username: str, password: str) -> str:
@@ -278,7 +306,7 @@ def playlist_name(location: str) -> str:
         if host.startswith('www.'):
             host = host[4:]
         return stem if stem.lower() not in _GENERIC_STEMS else (host or 'Playlist')
-    path = location[7:] if location.startswith('file://') else location
+    path = _file_path(location) if location.lower().startswith('file://') else location
     stem = posixpath.splitext(posixpath.basename(path.replace('\\', '/').rstrip('/')))[0]
     return stem or 'Playlist'
 
@@ -348,6 +376,8 @@ def parse_playlist(text: str) -> Playlist:
 
 
 def _is_vod(url: str) -> bool:
+    if '/movie/' not in url and '/series/' not in url:
+        return False
     try:
         return bool(_VOD_PATH.match(urlsplit(url).path))
     except ValueError:
@@ -446,43 +476,31 @@ def ffmpeg_input(command: str) -> Optional[Tuple[str, Dict[str, str]]]:
 
 def tvh_split(command: str) -> List[str]:
     """Split a pipe command the way Tvheadend's ``spawn_parse_args`` does."""
-    chars = list(command or '')
     args = []
-    pos = 0
-    while pos < len(chars) and len(args) < MAX_PIPE_ARGS:
-        while pos < len(chars) and chars[pos] == ' ':
-            pos += 1
-        start = pos
-        quote = None
-        while pos < len(chars):
-            char = chars[pos]
-            if char == '\\':
-                escaped = _SPAWN_ESCAPES.get(chars[pos + 1] if pos + 1 < len(chars) else '')
-                if escaped:
-                    chars[pos] = escaped
-                    del chars[pos + 1]
-                    pos += 1
-                else:
-                    del chars[pos]
-                    if pos < len(chars):
-                        pos += 1
-            elif quote:
-                if char == quote:
-                    del chars[pos]
-                    quote = None
-                else:
-                    pos += 1
-            elif char in ('"', "'"):
-                quote = char
-                del chars[pos]
-            elif char == ' ':
-                break
+    parts = []
+    quote = None
+    for match in _SPAWN_PART.finditer(command or ''):
+        part = match.group()
+        if part.startswith('\\'):
+            if len(part) > 1:
+                parts.append(_SPAWN_ESCAPES.get(part[1], part[1]))
+        elif part in ('"', "'"):
+            if quote is None:
+                quote = part
+            elif quote == part:
+                quote = None
             else:
-                pos += 1
-        if start != pos:
-            args.append(''.join(chars[start:pos]))
-            if pos < len(chars):
-                pos += 1
+                parts.append(part)
+        elif part == ' ' and quote is None:
+            if parts:
+                args.append(''.join(parts))
+                if len(args) == MAX_PIPE_ARGS:
+                    return args
+                parts.clear()
+        else:
+            parts.append(part)
+    if parts:
+        args.append(''.join(parts))
     return args
 
 
@@ -574,9 +592,9 @@ def _output_args(name, provider):
 
 
 def _quote(arg: str) -> str:
-    if arg and not any(char in arg for char in ' "\'\\\b\f\n\r\t'):
+    if arg and not _NEEDS_QUOTE.search(arg):
         return arg
-    return '"' + ''.join(_QUOTE_ESCAPES.get(char, char) for char in arg) + '"'
+    return '"' + arg.translate(_QUOTE_TABLE) + '"'
 
 
 def _attributes(text: str) -> Dict[str, str]:
@@ -589,16 +607,19 @@ def _attributes(text: str) -> Dict[str, str]:
 
 def _extinf(text: str) -> Tuple[Dict[str, str], str]:
     """Attributes and the name after the first comma outside quotes."""
-    quote = None
-    for index, char in enumerate(text):
-        if quote:
-            if char == quote:
-                quote = None
-        elif char in ('"', "'"):
-            quote = char
-        elif char == ',':
+    position = 0
+    while True:
+        found = _EXTINF_STOP.search(text, position)
+        if found is None:
+            return _attributes(text), ''
+        if found.group() == ',':
+            index = found.start()
             return _attributes(text[:index]), text[index + 1:].strip()
-    return _attributes(text), ''
+        # Jump over the quoted text; one never closed leaves no name.
+        close = text.find(found.group(), found.end())
+        if close < 0:
+            return _attributes(text), ''
+        position = close + 1
 
 
 def _split_url(line: str) -> Tuple[str, Dict[str, str]]:

@@ -44,6 +44,16 @@ def test_source_checkout_looks_beside_the_repo():
     assert repo / 'build' / 'tvheadend' in bundled_binary_candidates()
 
 
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='System and AppImage paths are Linux paths')
+def test_a_system_python_does_not_pick_the_hosts_tvheadend(monkeypatch):
+    # Run from a source checkout with /usr/bin/python3, the app took the
+    # distribution's /usr/bin/tvheadend over the fork build beside the repo.
+    monkeypatch.setattr(builtin_server.sys, 'executable', '/usr/bin/python3')
+    assert Path('/usr/bin/tvheadend') not in bundled_binary_candidates()
+    monkeypatch.setattr(builtin_server.sys, 'executable', '/tmp/.mount_TVHabc/usr/bin/python3')
+    assert Path('/tmp/.mount_TVHabc/usr/bin/tvheadend') in bundled_binary_candidates()
+
+
 def test_command_stays_in_the_foreground_without_a_pid_file():
     args = command_args('/app/bin/tvheadend', '/tmp/tvhplayer/tvheadend', 24111, 24112)
     assert args[0] == '/app/bin/tvheadend'
@@ -396,6 +406,43 @@ def test_launched_server_stops_when_the_app_dies(tmp_path):
     assert args[-4:] == ['42', '/bin/tvheadend', '-c', 'x']
 
 
+def _gone(pid) -> bool:
+    try:
+        with open(f'/proc/{pid}/stat') as handle:
+            return handle.read().rsplit(')', 1)[1].split()[0] == 'Z'
+    except FileNotFoundError:
+        return True
+
+
+@pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Linux parent-death signal')
+def test_hung_server_dies_with_a_killed_app(tmp_path):
+    """A server stuck in shutdown dies the moment a force-quit app does."""
+    import signal
+    import subprocess
+
+    pid_file = tmp_path / 'pid'
+    # A stand-in Tvheadend that ignores SIGTERM, as a hung one does in practice.
+    hung_server = 'import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'
+    app = (
+        'import os, signal, subprocess, sys, time\n'
+        'from tvhplayer.core.builtin_server import launch_command\n'
+        f'program, args = launch_command([sys.executable, "-c", {hung_server!r}])\n'
+        'child = subprocess.Popen([program] + args)\n'
+        f'open({str(pid_file)!r}, "w").write(str(child.pid))\n'
+        'time.sleep(1)\n'
+        'os.kill(os.getpid(), signal.SIGKILL)\n'
+    )
+    subprocess.run([sys.executable, '-c', app], cwd=str(Path(__file__).resolve().parents[1]))
+    child = int(pid_file.read_text())
+    for _ in range(10):
+        if _gone(child):
+            break
+        time.sleep(0.1)
+    else:
+        os.kill(child, signal.SIGKILL)
+        pytest.fail('a server that ignores SIGTERM outlived the killed app')
+
+
 def test_builtin_server_gets_its_ready_to_use_defaults():
     from urllib.parse import parse_qs
 
@@ -656,3 +703,35 @@ def test_linux_http_alone_is_not_ready_when_htsp_is_unreachable(qapp, tmp_path, 
     supervisor._checked.connect(lambda *args: answers.append(args))
     supervisor._check_ready(1, 1234, 'user', 'password', '', None)
     assert answers[0][1] is False
+
+
+def test_prefetch_config_hints_every_file_in_server_load_order(tmp_path):
+    for rel in ('superuser', 'epgdb.v3', 'dvr/config/a', 'channel/config/c1',
+                'channel/tag/t1', 'input/iptv/networks/n/muxes/m1/config',
+                'input/iptv/networks/n/config', 'bouquet/b1', 'epggrab/config'):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}')
+    (tmp_path / 'link').symlink_to(tmp_path / 'superuser')
+    seen = []
+
+    assert builtin_server.prefetch_config(tmp_path, advise=seen.append) == 9
+    folders = [Path(p).relative_to(tmp_path).parts[0] for p in seen]
+    assert folders[:6] == ['input', 'input', 'channel', 'channel', 'bouquet', 'epggrab']
+    assert folders[6] == 'dvr'
+    assert sorted(folders[7:]) == ['epgdb.v3', 'superuser']
+
+
+def test_prefetch_config_skips_files_it_cannot_open(tmp_path):
+    (tmp_path / 'channel').mkdir()
+    (tmp_path / 'channel' / 'a').write_text('{}')
+    (tmp_path / 'channel' / 'b').write_text('{}')
+
+    def advise(path):
+        if path.endswith('a'):
+            raise OSError('gone')
+
+    assert builtin_server.prefetch_config(tmp_path, advise=advise) == 1
+    assert builtin_server.prefetch_config(tmp_path / 'missing') == 0
+    # Read-ahead hints exist only where the system has posix_fadvise (Linux).
+    assert builtin_server.prefetch_config(tmp_path) == (2 if hasattr(os, 'posix_fadvise') else 0)

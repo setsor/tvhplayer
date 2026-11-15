@@ -8,10 +8,9 @@ window, so the splash, spinner and fullscreen bar can sit on top as plain widget
 from __future__ import annotations
 
 import ctypes
-import sys
 
 from PyQt6.QtCore import QT_VERSION_STR, Qt, pyqtSignal
-from PyQt6.QtGui import QGuiApplication, QOpenGLContext, QSurfaceFormat
+from PyQt6.QtGui import QGuiApplication, QOpenGLContext
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
 GL_COLOR_BUFFER_BIT = 0x4000
@@ -50,18 +49,6 @@ def use_live_resize(choice, qt_version=None):
     return bool(choice)
 
 
-def configure_macos_opengl(platform_name=None):
-    """Request macOS OpenGL 3.2 Core before Qt creates shared contexts."""
-    platform_name = sys.platform if platform_name is None else platform_name
-    if platform_name != 'darwin':
-        return None
-    fmt = QSurfaceFormat.defaultFormat()
-    fmt.setVersion(3, 2)
-    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
-    QSurfaceFormat.setDefaultFormat(fmt)
-    return fmt
-
-
 class MpvVideoWidget(QOpenGLWidget):
     """The picture surface. ``MpvPlayer.attach()`` binds the engine to it."""
 
@@ -87,10 +74,6 @@ class MpvVideoWidget(QOpenGLWidget):
         return QGuiApplication.platformName()
 
     def initializeGL(self):
-        fmt = self.context().format()
-        print(f"Debug: Negotiated video OpenGL {fmt.majorVersion()}.{fmt.minorVersion()} profile={fmt.profile().name}")
-        if sys.platform == 'darwin' and (fmt.majorVersion(), fmt.minorVersion()) < (3, 2):
-            print("Debug: WARNING: Qt negotiated legacy OpenGL; VideoToolbox cannot use this context")
         self.context().aboutToBeDestroyed.connect(self.release)
         self._create_render_context()
 
@@ -115,6 +98,10 @@ class MpvVideoWidget(QOpenGLWidget):
         ratio = self.devicePixelRatioF()
         self._render_context.render(
             flip_y=True,
+            # Painting shares the UI thread with the startup spinner. Even with
+            # video-timing-offset=0, mpv's default waits for its VO thread to
+            # present the frame. Never make Qt wait for that handshake.
+            block_for_target_time=False,
             opengl_fbo={
                 'w': round(self.width() * ratio),
                 'h': round(self.height() * ratio),

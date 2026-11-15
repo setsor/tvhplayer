@@ -13,7 +13,7 @@ import pytest
 
 from tvhplayer.core.builtin_server import find_bundled_binary
 from tvhplayer.core.errors import PlaylistError, TvhAuthError, TvhConnectionError
-from tvhplayer.core.playlist import SkippedEntry, parse_playlist, plan_channels
+from tvhplayer.core.playlist import SkippedEntry, ffmpeg_command, ffmpeg_input, parse_playlist, plan_channels
 from tvhplayer.core.playlist_sync import (
     failed_channels,
     retest_entry,
@@ -28,6 +28,7 @@ from tvhplayer.core.playlist_sync import (
     error_message,
     ffmpeg_for_server,
     find_source,
+    provider_changes,
     health_counts,
     mux_conf,
     remove_playlist,
@@ -36,7 +37,9 @@ from tvhplayer.core.playlist_sync import (
     show_all_channels,
     sync_playlist,
     unique_name,
+    update_provider,
     wait_for_checks,
+    BUSY_SERVER_SECONDS,
 )
 from tvhplayer.core.tvh_admin import TvhAdmin
 from tvhplayer.core.xmltv import load_guide
@@ -117,7 +120,7 @@ class FakeAdmin:
     def mux_state(self, uuid):
         return dict(self.muxes.get(uuid) or {})
 
-    def list_services(self, mux_uuids, fields=None):
+    def list_services(self, mux_uuids, fields=None, network_uuid=""):
         return [dict(row, uuid=uuid) for uuid, row in self.services.items() if row['multiplex_uuid'] in mux_uuids]
 
     def scan_network(self, network_uuid):
@@ -190,6 +193,41 @@ FIRST = (
 )
 
 
+def test_a_big_import_saves_its_channel_map_every_few_seconds_not_every_few_channels():
+    # Each save copies the whole map and wrote the settings on the UI thread:
+    # every 50 channels made a big import stutter more the further it got.
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    text = '#EXTM3U\n' + ''.join(f'#EXTINF:-1 tvg-id="c{i}",C{i}\nhttp://x/{i}.ts\n' for i in range(2000))
+    now = [0.0]
+
+    def clock():
+        # Each mux takes a millisecond to create.
+        now[0] += 0.001
+        return now[0]
+
+    checkpoints = []
+    sync_playlist(admin, source, _plans(text), checkpoint=lambda: checkpoints.append(len(source.muxes)), clock=clock)
+    during = [count for count in checkpoints if 0 < count < 2000]
+    # About 4 seconds of creating: none in between, and the full map at the end.
+    assert len(during) == 0
+    assert checkpoints[-1] == 2000
+
+    now[0] = 0.0
+    slow = [0.0]
+
+    def slow_clock():
+        slow[0] += 0.01
+        return slow[0]
+
+    other = PlaylistSource('Other', 'http://x/other.m3u', 'builtin')
+    checkpoints.clear()
+    sync_playlist(admin, other, _plans(text), checkpoint=lambda: checkpoints.append(len(other.muxes)), clock=slow_clock)
+    during = [count for count in checkpoints if 0 < count < 2000]
+    # About 20 seconds of creating: a save every 5 seconds or so.
+    assert 2 <= len(during) <= 5
+
+
 def test_first_import_creates_network_and_muxes():
     admin = FakeAdmin()
     source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
@@ -236,6 +274,82 @@ def test_unchanged_refresh_writes_nothing():
     result = sync_playlist(admin, source, _plans(FIRST))
     assert (result.added, result.updated, result.removed) == (0, 0, 0)
     assert admin.saved == []
+
+
+def test_large_url_edit_saves_batches_before_reporting_progress():
+    from tvhplayer.core.tvh_admin import SAVE_BATCH
+
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://old.example/list.m3u', 'builtin')
+    count = SAVE_BATCH * 2 + 3
+    text = '#EXTM3U\n' + ''.join(
+        f'#EXTINF:-1 tvg-id="c{i}",C{i}\nhttp://old.example/{i}.ts\n' for i in range(count)
+    )
+    sync_playlist(admin, source, _plans(text), check=False)
+    original = dict(source.muxes)
+    admin.saved.clear()
+    progress = []
+
+    def saved_progress(done, total):
+        progress.append((done, total))
+        assert len(admin.saved) == done
+        assert all('new.example' in admin.muxes[node['uuid']]['iptv_url'] for node in admin.saved)
+
+    source.location = source.location.replace('old.example', 'new.example')
+    result = sync_playlist(
+        admin, source, _plans(text.replace('old.example', 'new.example')),
+        check=False, progress=saved_progress,
+    )
+    assert (result.added, result.updated, result.removed) == (0, count, 0)
+    assert source.muxes == original
+    assert progress == [(SAVE_BATCH, count), (SAVE_BATCH * 2, count), (count, count)]
+
+
+def test_a_slow_small_import_shows_progress_while_it_adds_channels():
+    # Each channel is a request of its own; on a slow server a list shorter
+    # than one save batch must not sit at nothing until the end.
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    text = '#EXTM3U\n' + ''.join(f'#EXTINF:-1 tvg-id="c{i}",C{i}\nhttp://x/{i}.ts\n' for i in range(20))
+    now = [0.0]
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    progress = []
+    sync_playlist(admin, source, _plans(text), check=False, clock=clock,
+                  progress=lambda done, total: progress.append(done))
+    assert len([done for done in progress if done < 20]) >= 5
+    assert progress[-1] == 20
+
+
+def test_a_refresh_that_fails_part_way_retests_the_addresses_it_saved():
+    # The saved streams match the playlist afterwards, so the next refresh
+    # would not test them; they must not keep the old address's verdict.
+    from tvhplayer.core.tvh_admin import SAVE_BATCH
+
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    count = SAVE_BATCH * 2
+    text = '#EXTM3U\n' + ''.join(f'#EXTINF:-1 tvg-id="c{i}",C{i}\nhttp://x/{i}.ts\n' for i in range(count))
+    sync_playlist(admin, source, _plans(text), check=False)
+    admin.scanned.clear()
+    saves = [0]
+    save = admin.save
+
+    def failing_save(nodes):
+        saves[0] += 1
+        if saves[0] == 2:
+            raise TvhConnectionError('gone')
+        save(nodes)
+
+    admin.save = failing_save
+    with pytest.raises(TvhConnectionError):
+        sync_playlist(admin, source, _plans(text.replace('http://x/', 'http://y/')))
+    moved = [uuid for uuid, mux in admin.muxes.items() if 'http://y/' in mux['iptv_url']]
+    assert len(moved) == SAVE_BATCH
+    assert sorted(admin.scanned) == sorted(moved)
 
 
 def test_channels_that_fail_the_scan_are_hidden():
@@ -656,6 +770,9 @@ def _first_bytes(port, channel_uuid, size=188 * 200):
         return response.read(size)
 
 
+# About 30 seconds with a real Tvheadend, and its stream checks can time out
+# when other tests keep the computer busy: run it alone, with --run-slow.
+@pytest.mark.slow
 @pytest.mark.skipif(not (FFMPEG and TVHEADEND), reason='needs ffmpeg and a Tvheadend build')
 def test_import_plays_refreshes_and_removes(tvheadend, media, monkeypatch):
     port = tvheadend
@@ -869,7 +986,7 @@ def test_sync_removes_channels_no_longer_chosen():
 def test_admin_grids_read_every_page(monkeypatch):
     import tvhplayer.core.tvh_admin as tvh_admin
 
-    monkeypatch.setattr(tvh_admin, 'ADMIN_GRID_LIMIT', 2)
+    monkeypatch.setattr(tvh_admin, 'GRID_PAGE', 2)
     rows = [{'uuid': str(n), 'network_uuid': 'net'} for n in range(5)]
     calls = []
 
@@ -881,3 +998,172 @@ def test_admin_grids_read_every_page(monkeypatch):
         monkeypatch.setattr(admin, '_request', request)
         assert [row['uuid'] for row in admin.list_muxes('net')] == ['0', '1', '2', '3', '4']
     assert calls == [(0, 2), (2, 2), (4, 2)]
+
+
+def test_admin_asks_only_for_the_networks_rows_in_pages(monkeypatch):
+    # A server with a big playlist sent every mux and service it has in one
+    # reply, which Python reads while the window waits.
+    import tvhplayer.core.tvh_admin as tvh_admin
+
+    calls = []
+
+    def request(path, data=None, params=None):
+        calls.append((path, dict(params or {})))
+        if path == 'api/idnode/load':
+            return {'entries': [{'class': 'iptv_network', 'params': [{'id': 'networkname', 'value': 'My List'}]}]}
+        return {'total': 1, 'entries': [{'uuid': 'm1', 'network_uuid': 'n' * 32, 'multiplex_uuid': 'm1'}]}
+
+    with TvhAdmin({'url': 'http://127.0.0.1:9981'}) as admin:
+        monkeypatch.setattr(admin, '_request', request)
+        admin.list_muxes('n' * 32, fields=('name',))
+        admin.list_services(['m1'], fields=('enabled',), network_uuid='n' * 32)
+        admin.list_services(['m1'], fields=('enabled',))
+    muxes, _load, services, unfiltered = calls
+    assert json.loads(muxes[1]['filter']) == [{'type': 'string', 'field': 'network_uuid', 'value': f'^{"n" * 32}$'}]
+    assert muxes[1]['limit'] == tvh_admin.GRID_PAGE <= 5000
+    assert json.loads(services[1]['filter']) == [{'type': 'string', 'field': 'network', 'value': '^My List$'}]
+    assert 'filter' not in unfiltered[1]
+
+
+def test_a_network_name_with_regex_characters_is_not_filtered_on(monkeypatch):
+    calls = []
+
+    def request(path, data=None, params=None):
+        calls.append(dict(params or {}))
+        if path == 'api/idnode/load':
+            return {'entries': [{'params': [{'id': 'networkname', 'value': 'Sport (HD)+'}]}]}
+        return {'total': 0, 'entries': []}
+
+    with TvhAdmin({'url': 'http://127.0.0.1:9981'}) as admin:
+        monkeypatch.setattr(admin, '_request', request)
+        admin.list_services(['m1'], network_uuid='n' * 32)
+    assert 'filter' not in calls[-1]
+
+
+def test_provider_changes_swap_headers_and_password_in_place():
+    old = {'User-Agent': 'Old App', 'X-Token': 'shared'}
+    new = {'User-Agent': 'VLC/3.0.21 LibVLC/3.0.21'}
+    live = 'http://xc.example/live/u%40x/old/1.ts'
+    rows = [
+        # Got the provider's defaults.
+        {'uuid': 'a', 'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', live, old, 'One', 'XC')},
+        # The playlist gave this channel its own agent.
+        {'uuid': 'b', 'iptv_url': ffmpeg_command(
+            '/usr/bin/ffmpeg', 'http://other/2.ts', dict(old, **{'User-Agent': 'Own'}), 'Two', 'XC')},
+        # A program from the playlist is left alone.
+        {'uuid': 'c', 'iptv_url': 'pipe:///bin/sh -c "streamer | ffmpeg -i pipe:0"'},
+    ]
+    changes = {row['uuid']: row['iptv_url'] for row in provider_changes(
+        rows, old, new,
+        'http://xc.example/get.php?username=u%40x&password=old',
+        'http://xc.example/get.php?username=u%40x&password=new',
+    )}
+    assert set(changes) == {'a', 'b'}
+    assert ffmpeg_input(changes['a'][7:]) == (
+        'http://xc.example/live/u%40x/new/1.ts', {'User-Agent': 'VLC/3.0.21 LibVLC/3.0.21'},
+    )
+    assert ffmpeg_input(changes['b'][7:]) == ('http://other/2.ts', {'User-Agent': 'Own'})
+    # The rest of the command is what an import would write.
+    assert changes['a'] == ffmpeg_command(
+        '/usr/bin/ffmpeg', 'http://xc.example/live/u%40x/new/1.ts', new, 'One', 'XC',
+    )
+
+
+def test_provider_changes_move_xtream_channels_left_on_an_old_server():
+    # A move to a new server stopped after a few channels. The playlist already
+    # has the new address, so saving it again is what moves the rest.
+    location = 'http://new.example/get.php?username=u%40x&password=pw'
+    rows = [
+        {'uuid': 'a', 'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', 'http://old.example/live/u%40x/pw/1.ts', {}, 'One')},
+        {'uuid': 'b', 'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', 'http://new.example/live/u%40x/pw/2.ts', {}, 'Two')},
+        # Another account's stream is not this playlist's to move.
+        {'uuid': 'c', 'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', 'http://old.example/live/them/pw/3.ts', {}, 'Three')},
+    ]
+    changes = {row['uuid']: row['iptv_url'] for row in provider_changes(
+        rows, {}, {}, location, location, xtream=True,
+    )}
+    assert set(changes) == {'a'}
+    assert ffmpeg_input(changes['a'][7:])[0] == 'http://new.example/live/u%40x/pw/1.ts'
+    # An M3U playlist names its own stream addresses; they are not moved.
+    assert provider_changes(rows, {}, {}, location, location) == []
+
+
+def test_update_provider_moves_xtream_channels_to_the_saved_server():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://new.example/get.php?username=u&password=pw', 'builtin')
+    source.source_type = 'xc'
+    source.network_uuid = admin.create_network({})
+    uuid = admin.create_mux(source.network_uuid, {
+        'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', 'http://old.example/live/u/pw/1.ts', {}, 'One'),
+        'iptv_sname': 'One',
+    })
+    source.muxes = {'one': uuid}
+    assert update_provider(admin, source, {}, source.location) == 1
+    assert ffmpeg_input(admin.muxes[uuid]['iptv_url'][7:])[0] == 'http://new.example/live/u/pw/1.ts'
+
+
+def test_provider_changes_leave_unchanged_channels_alone():
+    headers = {'User-Agent': 'App'}
+    rows = [{'uuid': 'a', 'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', 'http://x/1.ts', headers, 'One')}]
+    assert provider_changes(rows, headers, dict(headers)) == []
+    # Adding a header where there was none.
+    plain = [{'uuid': 'a', 'iptv_url': ffmpeg_command('/usr/bin/ffmpeg', 'http://x/1.ts', {}, 'One')}]
+    [change] = provider_changes(plain, {}, headers)
+    assert change['iptv_url'] == rows[0]['iptv_url']
+
+
+def test_a_check_waits_while_the_server_is_too_busy_to_answer():
+    # A Tvheadend mapping 50000 services to channels answered nothing for
+    # minutes, and the first timeout ended the check with "Could not reach".
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+    real = admin.list_muxes
+    silent = [3]
+
+    def busy(network_uuid, fields=None):
+        if silent[0]:
+            silent[0] -= 1
+            raise TvhConnectionError('Read timed out. (read timeout=30)')
+        for row in admin.muxes.values():
+            row.update(scan_state=0, scan_result=1)
+        return real(network_uuid, fields)
+
+    admin.list_muxes = busy
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    wait_for_checks(admin, source, result, sleep=sleep, clock=lambda: now[0])
+    assert silent[0] == 0
+    assert result.working == 2 and not result.check_stopped
+
+
+def test_a_check_gives_up_on_a_server_silent_for_too_long():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    result = sync_playlist(admin, source, _plans(FIRST))
+
+    def gone(_network_uuid, fields=None):
+        raise TvhConnectionError('Connection refused')
+
+    admin.list_muxes = gone
+    now = [0.0]
+
+    def sleep(seconds):
+        now[0] += seconds
+
+    with pytest.raises(TvhConnectionError):
+        wait_for_checks(admin, source, result, sleep=sleep, clock=lambda: now[0])
+    assert now[0] >= BUSY_SERVER_SECONDS
+
+    # Stopping while it waits ends the check without an error.
+    stop = [False]
+
+    def stopping(seconds):
+        now[0] += seconds
+        stop[0] = True
+
+    wait_for_checks(admin, source, result, sleep=stopping, clock=lambda: now[0], cancelled=lambda: stop[0])
+    assert result.check_stopped

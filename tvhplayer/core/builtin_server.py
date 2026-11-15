@@ -82,12 +82,18 @@ def builtin_requests_ready(server, running: bool) -> bool:
     return bool(running) and bool((server.get('url') or '').strip())
 
 
+HOST_BIN_DIRS = {'/bin', '/usr/bin', '/usr/local/bin', '/sbin', '/usr/sbin'}
+
+
 def bundled_binary_candidates() -> list[Path]:
     """Binaries this package may have shipped. A host install is not included."""
     # Flatpak, then the deb and rpm packages' private copy.
     candidates = [Path('/app/bin/tvheadend'), Path('/usr/libexec/tvhplayer/tvheadend')]
+    # The AppImage carries Tvheadend beside its Python. A system Python's
+    # folder holds the host's Tvheadend, which is not ours to run.
     executable = Path(sys.executable).resolve()
-    candidates.append(executable.with_name('tvheadend'))
+    if str(executable.parent) not in HOST_BIN_DIRS:
+        candidates.append(executable.with_name('tvheadend'))
     frozen_root = getattr(sys, '_MEIPASS', None)
     if frozen_root:
         candidates.append(Path(frozen_root) / 'tvheadend')
@@ -172,12 +178,86 @@ def command_args(binary, config_dir, http_port: int, htsp_port: int) -> list[str
     ]
 
 
-# Run by the app's Python before Tvheadend: ask Linux to send SIGTERM when
-# TVHplayer exits, even when it crashes or is killed, then become Tvheadend.
+# Folders in the order Tvheadend loads them at startup; the rest follow.
+PREFETCH_ORDER = ('input', 'channel', 'bouquet', 'epggrab')
+
+
+def _config_files(folder: Path) -> list[tuple[int, str]]:
+    """``(inode, path)`` of every file below ``folder``, without a stat per file."""
+    found = []
+    pending = [str(folder)]
+    while pending:
+        try:
+            entries = os.scandir(pending.pop())
+        except OSError:
+            continue
+        with entries:
+            for entry in entries:
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(entry.path)
+                    elif entry.is_file(follow_symlinks=False):
+                        found.append((entry.inode(), entry.path))
+                except OSError:
+                    continue
+    return found
+
+
+def prefetch_config(config_dir, advise=None) -> int:
+    """Ask the kernel to read the server's settings into memory ahead of Tvheadend.
+
+    Tvheadend reads one small file per channel, service and stream, one at a
+    time, in name order. A big playlist makes that over 100,000 files scattered
+    across the disk, and from cold the server then spends most of its startup
+    waiting on single reads. Read-ahead hints in inode order let the disk work
+    on many of them at once. Nothing is changed; returns how many files were hinted.
+    """
+    if advise is None:
+        if not hasattr(os, 'posix_fadvise'):
+            return 0
+        advise = _willneed
+    root = Path(config_dir)
+    try:
+        with os.scandir(root) as entries:
+            top_files = sorted(
+                (entry.inode(), entry.path) for entry in entries
+                if entry.is_file(follow_symlinks=False)
+            )
+    except OSError:
+        return 0
+    others = sorted(
+        entry.name for entry in os.scandir(root)
+        if entry.is_dir(follow_symlinks=False) and entry.name not in PREFETCH_ORDER
+    )
+    groups = [_config_files(root / name) for name in (*PREFETCH_ORDER, *others)]
+    hinted = 0
+    for files in [*groups, top_files]:
+        for _inode, path in sorted(files):
+            try:
+                advise(path)
+            except OSError:
+                continue
+            hinted += 1
+    return hinted
+
+
+def _willneed(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_CLOEXEC', 0))
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_WILLNEED)
+    finally:
+        os.close(fd)
+
+
+# Run by the app's Python before Tvheadend: ask Linux to kill Tvheadend the
+# moment TVHplayer's process ends, even when it crashes or is force quit, then
+# become Tvheadend. SIGKILL, not SIGTERM: a hung Tvheadend ignores SIGTERM and,
+# in the Flatpak, keeps the sandbox and the server settings busy for the next
+# launch. A normal quit still stops it cleanly first (``BuiltinServerSupervisor.stop``).
 # Qt has no process flag for this, and the Flatpak has no setpriv.
 PARENT_DEATH_LAUNCHER = (
     'import ctypes, os, signal, sys\n'
-    'ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGTERM, 0, 0, 0)\n'
+    'ctypes.CDLL(None, use_errno=True).prctl(1, signal.SIGKILL, 0, 0, 0)\n'
     'if os.getppid() != int(sys.argv[1]):\n'
     '    sys.exit(1)\n'
     'os.execv(sys.argv[2], sys.argv[2:])\n'
@@ -185,7 +265,7 @@ PARENT_DEATH_LAUNCHER = (
 
 
 def launch_command(argv, parent_pid=None, python=None):
-    """``(program, args)`` that start ``argv`` so it stops when this app stops.
+    """``(program, args)`` that start ``argv`` so it dies when this app dies.
 
     Linux only, and only when this app runs on a Python interpreter; a frozen
     build starts Tvheadend directly.

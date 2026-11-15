@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import time
 
-from PyQt6.QtCore import QEvent, QObject, Qt, QThread, QTimer, pyqtSignal
+from PyQt6.QtCore import QAbstractItemModel, QEvent, QModelIndex, QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -26,8 +26,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
@@ -36,7 +35,7 @@ try:
     from .a11y import announce_label, buddy_label, describe, set_item_access
     from .core.playlist import (
         load_playlist, load_xtream, plan_channels, playlist_commands, playlist_name,
-        xtream_account, xtream_connections, xtream_playlist_url,
+        xtream_account, xtream_connections, xtream_guide_url, xtream_playlist_url,
     )
     from .core.playlist_sync import (
         NETWORK_GONE,
@@ -53,9 +52,11 @@ try:
         plan_group,
         remove_playlist,
         result_message,
+        same_source,
         server_key,
         show_all_channels,
         sync_playlist,
+        update_provider,
         unique_name,
         wait_for_checks,
     )
@@ -66,7 +67,7 @@ except ImportError:
     from a11y import announce_label, buddy_label, describe, set_item_access
     from core.playlist import (
         load_playlist, load_xtream, plan_channels, playlist_commands, playlist_name,
-        xtream_account, xtream_connections, xtream_playlist_url,
+        xtream_account, xtream_connections, xtream_guide_url, xtream_playlist_url,
     )
     from core.playlist_sync import (
         NETWORK_GONE,
@@ -83,10 +84,12 @@ except ImportError:
         plan_group,
         remove_playlist,
         result_message,
+        same_source,
         server_key,
         show_all_channels,
         sync_playlist,
         unique_name,
+        update_provider,
         wait_for_checks,
     )
     from core.errors import PlaylistError, TvhError
@@ -120,6 +123,12 @@ BUSY = 'This playlist is being updated. Try again in a moment.'
 NONE_CHOSEN = 'None of the channels you chose are in this playlist any more. Use Choose Channels to pick others.'
 NO_GROUP = 'No group'
 BUSY_POLL_MS = 1000
+# Agents of common players, for providers that serve only known apps.
+USER_AGENT_PRESETS = (
+    'VLC/3.0.21 LibVLC/3.0.21',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Chrome/131.0.0.0 Safari/537.36',
+)
 # How often a running stream test saves the verdicts it has so far.
 VERDICT_SAVE_SECONDS = 30
 REMOVED_SERVERS = 'Removed servers'
@@ -156,7 +165,12 @@ class PlaylistJob(QObject):
     returns False to stop; without it the saved choice is used.
 
     ``action`` is SYNC (import or refresh), REMOVE, CHECK (test every
-    stream now), or SHOW (show every channel again). A sync and a check
+    stream now), SHOW (show every channel again), or SAVE (give the
+    channels the source's new headers or password without reading the
+    playlist; ``previous`` is the source as it was).
+    ``replaces`` is the saved source a SYNC takes the place of when its
+    address or account changed. It is replaced once the playlist has been
+    read from the new address, so an address that does not work changes nothing. A sync and a check
     both wait for the server's stream test and save its verdicts, which the
     channel list marks; channels that fail are hidden too while the host
     hides them.
@@ -165,7 +179,7 @@ class PlaylistJob(QObject):
     the server's stream test is left, which can take hours.
     """
 
-    SYNC, REMOVE, CHECK, SHOW = 'add', 'remove', 'check', 'show'
+    SYNC, REMOVE, CHECK, SHOW, SAVE = 'add', 'remove', 'check', 'show', 'update'
 
     status = pyqtSignal(str)
     progress = pyqtSignal(int, int)
@@ -174,9 +188,12 @@ class PlaylistJob(QObject):
     failed = pyqtSignal(str)
 
     def __init__(
-        self, host, source, server, first_import=False, ask_commands=None, choose=None, action=SYNC, parent=None
+        self, host, source, server, first_import=False, ask_commands=None, choose=None, action=SYNC, parent=None,
+        previous=None, replaces=None,
     ):
         super().__init__(parent)
+        self._previous = previous
+        self._replaces = replaces
         self._host = host
         self.source = source
         self.server = server
@@ -193,8 +210,12 @@ class PlaylistJob(QObject):
         self._checking = False
         self._cancelled = False
 
+    def _claimed(self):
+        # Until it is replaced, the saved source is the one other jobs know.
+        return self._replaces if self._replaces is not None else self.source
+
     def start(self):
-        if not self._host.claim_playlist(self.source):
+        if not self._host.claim_playlist(self._claimed()):
             self.failed.emit(BUSY)
             return
         self._busy = True
@@ -242,7 +263,7 @@ class PlaylistJob(QObject):
 
     def _release(self):
         self._busy = False
-        self._host.release_playlist(self.source)
+        self._host.release_playlist(self._claimed())
 
     def _stop_with(self, message):
         self._release()
@@ -265,6 +286,10 @@ class PlaylistJob(QObject):
             self.status.emit('Showing channels…')
             self._run(self._show_all, self._shown)
             return
+        if self.action == self.SAVE:
+            self.status.emit('Saving…')
+            self._run(self._save, self._saved)
+            return
         self.status.emit('Reading the playlist…')
         location = self.source.location
         loader = load_xtream if self.source.source_type == 'xc' else load_playlist
@@ -280,6 +305,12 @@ class PlaylistJob(QObject):
         if self._cancelled:
             self._stop_with('Import stopped.')
             return
+        if self._replaces is not None:
+            # The new address works: the saved source takes it, and the job holds it under its new name.
+            old, self._replaces = self._replaces, None
+            self._host.store_playlist_source(self.source.to_dict(), replaces=old.to_dict())
+            self._host.release_playlist(old)
+            self._host.claim_playlist(self.source)
         commands = playlist_commands(playlist)
         if commands and not self.source.allow_commands and self._ask_commands is not None:
             self.source.allow_commands = bool(self._ask_commands(len(commands), self.server.get('name', '')))
@@ -404,6 +435,35 @@ class PlaylistJob(QObject):
         self._release()
         self.finished.emit(f'Every channel from {self.source.name} is shown.', [])
 
+    def _save(self, task):
+        previous = self._previous or self.source
+        with TvhAdmin(self.server) as admin:
+            changed = update_provider(admin, self.source, previous.request_headers, previous.location)
+            guide_url = xtream_guide_url(self.source.location) if self.source.source_type == 'xc' else ''
+            if guide_url and guide_url != xtream_guide_url(previous.location) and not is_local_server(self.server):
+                # The server's guide grabber has the old password in its address.
+                admin.use_url_grabber(guide_url)
+        if changed:
+            task.channels_changed.emit()
+        return changed, guide_url
+
+    def _saved(self, saved):
+        changed, guide_url = saved
+        self._host.store_playlist_source(self.source.to_dict())
+        previous = self._previous or self.source
+        if guide_url and guide_url != xtream_guide_url(previous.location):
+            self._host.after_playlist_sync(self.server, self.source, guide_url, SyncResult())
+        self._release()
+        if changed:
+            channels = '1 channel' if changed == 1 else f'{changed} channels'
+            message = (
+                f'Saved. {channels} from {self.source.name} will use the new settings. To test them now, '
+                'choose Settings → Channels → Check channels now.'
+            )
+        else:
+            message = 'Saved.'
+        self.finished.emit(message, [])
+
     def _delete(self, _task):
         with TvhAdmin(self.server) as admin:
             admin.check_admin()
@@ -456,10 +516,194 @@ def ask_to_choose(parent, plans, source, accept_text='A&dd Channels'):
     return True
 
 
+class ChannelChoiceModel(QAbstractItemModel):
+    """The playlist's channels under their groups, each with a check box.
+
+    A playlist can list a hundred thousand channels. The model keeps the
+    check marks in a list and counts them as they change, so a click or a
+    search never walks every row through Qt.
+    """
+
+    _GROUP = 0
+
+    def __init__(self, plans, chosen, parent=None):
+        super().__init__(parent)
+        self._plans = list(plans)
+        self._names = [plan.name.casefold() for plan in self._plans]
+        self._checked = bytearray(1 if plan.key in chosen else 0 for plan in self._plans)
+        self.checked_total = sum(self._checked)
+        members = {}
+        for index, plan in enumerate(self._plans):
+            members.setdefault(plan_group(plan), []).append(index)
+        self._groups = list(members)
+        self._group_keys = [group.casefold() for group in self._groups]
+        self._members = [members[group] for group in self._groups]
+        self._group_checked = [sum(self._checked[index] for index in rows) for rows in self._members]
+        self.flat = len(self._groups) < 2
+        self._shown_groups = list(range(len(self._groups)))
+        self._shown = [list(rows) for rows in self._members]
+        self.needle = ''
+
+    def filter(self, text):
+        """Show only channels whose name, or whose group's name, contains ``text``."""
+        needle = text.strip().casefold()
+        self.beginResetModel()
+        self.needle = needle
+        shown_groups, shown = [], []
+        for group, rows in enumerate(self._members):
+            if not needle or needle in self._group_keys[group]:
+                kept = list(rows)
+            else:
+                kept = [index for index in rows if needle in self._names[index]]
+            shown.append(kept)
+            if kept or self.flat:
+                shown_groups.append(group)
+        self._shown_groups, self._shown = shown_groups, shown
+        self.endResetModel()
+
+    def set_all(self, state, shown_only=False):
+        """Check or clear every channel, or only those the search shows."""
+        value = 1 if state == Qt.CheckState.Checked else 0
+        groups = self._shown_groups if shown_only else range(len(self._groups))
+        for group in groups:
+            rows = self._shown[group] if shown_only else self._members[group]
+            self._set_rows(group, rows, value)
+        self._changed_everything()
+
+    def chosen_keys(self):
+        return [plan.key for plan, checked in zip(self._plans, self._checked) if checked]
+
+    def _set_rows(self, group, rows, value):
+        checked = self._checked
+        change = 0
+        for index in rows:
+            if checked[index] != value:
+                checked[index] = value
+                change += 1 if value else -1
+        self._group_checked[group] += change
+        self.checked_total += change
+
+    def _changed_everything(self):
+        if self.flat:
+            rows = self.rowCount()
+            if rows:
+                self.dataChanged.emit(self.index(0, 0), self.index(rows - 1, 0), [Qt.ItemDataRole.CheckStateRole])
+            return
+        for row, group in enumerate(self._shown_groups):
+            parent = self.index(row, 0)
+            self.dataChanged.emit(parent, parent, [Qt.ItemDataRole.CheckStateRole])
+            children = len(self._shown[group])
+            if children:
+                self.dataChanged.emit(
+                    self.index(0, 0, parent), self.index(children - 1, 0, parent), [Qt.ItemDataRole.CheckStateRole]
+                )
+
+    # Rows: in a flat list, the channels; otherwise groups, each with its channels.
+    # A channel's internal id is its group's place in the shown groups plus one.
+
+    def _leaf(self, index):
+        if self.flat:
+            return self._shown[self._shown_groups[0]][index.row()] if self._shown_groups else None
+        if index.internalId() == self._GROUP:
+            return None
+        group = self._shown_groups[index.internalId() - 1]
+        return self._shown[group][index.row()]
+
+    def _group_of(self, index):
+        if self.flat:
+            return self._shown_groups[0]
+        if index.internalId() == self._GROUP:
+            return self._shown_groups[index.row()]
+        return self._shown_groups[index.internalId() - 1]
+
+    def index(self, row, column=0, parent=QModelIndex()):
+        if column != 0 or row < 0:
+            return QModelIndex()
+        if not parent.isValid():
+            if row >= self.rowCount():
+                return QModelIndex()
+            return self.createIndex(row, 0, self._GROUP)
+        if self.flat or parent.internalId() != self._GROUP:
+            return QModelIndex()
+        if row >= len(self._shown[self._shown_groups[parent.row()]]):
+            return QModelIndex()
+        return self.createIndex(row, 0, parent.row() + 1)
+
+    def parent(self, index=QModelIndex()):
+        if not index.isValid() or self.flat or index.internalId() == self._GROUP:
+            return QModelIndex()
+        return self.createIndex(index.internalId() - 1, 0, self._GROUP)
+
+    def rowCount(self, parent=QModelIndex()):
+        if not parent.isValid():
+            if self.flat:
+                return len(self._shown[self._shown_groups[0]]) if self._shown_groups else 0
+            return len(self._shown_groups)
+        if self.flat or parent.internalId() != self._GROUP or parent.column() != 0:
+            return 0
+        return len(self._shown[self._shown_groups[parent.row()]])
+
+    def columnCount(self, parent=QModelIndex()):
+        return 1
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid():
+            return None
+        leaf = self._leaf(index)
+        if role == Qt.ItemDataRole.DisplayRole:
+            if leaf is not None:
+                return self._plans[leaf].name
+            group = self._group_of(index)
+            return f'{self._groups[group] or NO_GROUP} ({len(self._members[group])})'
+        if role == Qt.ItemDataRole.CheckStateRole:
+            if leaf is not None:
+                return Qt.CheckState.Checked if self._checked[leaf] else Qt.CheckState.Unchecked
+            group = self._group_of(index)
+            count = self._group_checked[group]
+            if count == 0:
+                return Qt.CheckState.Unchecked
+            if count == len(self._members[group]):
+                return Qt.CheckState.Checked
+            return Qt.CheckState.PartiallyChecked
+        return None
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if not index.isValid() or role != Qt.ItemDataRole.CheckStateRole:
+            return False
+        state = Qt.CheckState(value) if not isinstance(value, Qt.CheckState) else value
+        checked = 1 if state == Qt.CheckState.Checked else 0
+        group = self._group_of(index)
+        leaf = self._leaf(index)
+        if leaf is not None:
+            self._set_rows(group, [leaf], checked)
+            self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+            if not self.flat:
+                parent = index.parent()
+                self.dataChanged.emit(parent, parent, [Qt.ItemDataRole.CheckStateRole])
+            return True
+        # A group: all of its channels, as a check box with a tristate group does.
+        self._set_rows(group, self._members[group], checked)
+        self.dataChanged.emit(index, index, [Qt.ItemDataRole.CheckStateRole])
+        children = self.rowCount(index)
+        if children:
+            self.dataChanged.emit(
+                self.index(0, 0, index), self.index(children - 1, 0, index), [Qt.ItemDataRole.CheckStateRole]
+            )
+        return True
+
+
+# Playlists this big filter as the user stops typing, not on every key.
+FILTER_AT_ONCE = 5000
+FILTER_DELAY_MS = 200
+
+
 class ChooseChannelsDialog(QDialog):
     """The playlist's channels by group, each with a check box."""
-
-    _KEY = Qt.ItemDataRole.UserRole
 
     def __init__(self, plans, source, parent=None, accept_text='A&dd Channels'):
         super().__init__(parent)
@@ -478,19 +722,25 @@ class ChooseChannelsDialog(QDialog):
         self.search_input.setPlaceholderText('Channel or group name')
         self.search_input.setClearButtonEnabled(True)
         describe(self.search_input, description='Show only channels whose name or group contains this text.')
-        self.search_input.textChanged.connect(self._filter)
         layout.addWidget(buddy_label('&Search:', self.search_input))
         layout.addWidget(self.search_input)
 
-        self.tree = QTreeWidget()
+        self.model = ChannelChoiceModel(plans, chosen, self)
+        self.tree = QTreeView()
         self.tree.setHeaderHidden(True)
         self.tree.setUniformRowHeights(True)
+        self.tree.setModel(self.model)
+        if self.model.flat:
+            self.tree.setRootIsDecorated(False)
         describe(self.tree, 'Channels', 'Channels of the playlist by group. Selected channels are imported.')
         layout.addWidget(buddy_label('&Channels:', self.tree))
         layout.addWidget(self.tree, 1)
-        self._leaves = []
-        self._groups = []
-        self._fill(plans, chosen)
+
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(FILTER_DELAY_MS if len(plans) > FILTER_AT_ONCE else 0)
+        self._filter_timer.timeout.connect(self._apply_filter)
+        self.search_input.textChanged.connect(lambda _text: self._filter_timer.start())
 
         row = QHBoxLayout()
         self.all_btn = QPushButton('Select &All')
@@ -514,79 +764,29 @@ class ChooseChannelsDialog(QDialog):
         self.buttons.rejected.connect(self.reject)
         layout.addWidget(self.buttons)
 
-        # Selecting a group changes all its channels; count once they have changed.
-        self._count_timer = QTimer(self)
-        self._count_timer.setSingleShot(True)
-        self._count_timer.timeout.connect(self._count)
-        self.tree.itemChanged.connect(lambda _item, _column: self._count_timer.start(0))
+        self.model.dataChanged.connect(lambda *_args: self._count())
         self._count()
 
-    def _fill(self, plans, chosen):
-        by_group = {}
-        for plan in plans:
-            by_group.setdefault(plan_group(plan), []).append(plan)
-        flat = len(by_group) < 2
-        for group, members in by_group.items():
-            if flat:
-                parent = self.tree.invisibleRootItem()
-            else:
-                parent = QTreeWidgetItem([f'{group or NO_GROUP} ({len(members)})'])
-                parent.setFlags(
-                    parent.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsAutoTristate
-                )
-                parent.setData(0, self._KEY, group.casefold())
-                self._groups.append(parent)
-            leaves = []
-            for plan in members:
-                item = QTreeWidgetItem([plan.name])
-                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setData(0, self._KEY, plan.key)
-                item.setCheckState(0, Qt.CheckState.Checked if plan.key in chosen else Qt.CheckState.Unchecked)
-                leaves.append(item)
-                self._leaves.append(item)
-            parent.addChildren(leaves)
-        self.tree.addTopLevelItems(self._groups)
-
-    def _filter(self, text):
-        needle = text.strip().casefold()
-        for group in self._groups or [self.tree.invisibleRootItem()]:
-            whole = bool(needle) and needle in (group.data(0, self._KEY) or '')
-            shown = 0
-            for index in range(group.childCount()):
-                item = group.child(index)
-                hide = bool(needle) and not whole and needle not in item.text(0).casefold()
-                item.setHidden(hide)
-                shown += not hide
-            if group is not self.tree.invisibleRootItem():
-                group.setHidden(shown == 0)
-                group.setExpanded(bool(needle) and shown > 0)
+    def _apply_filter(self):
+        self._filter_timer.stop()
+        self.model.filter(self.search_input.text())
+        if self.model.needle and not self.model.flat:
+            self.tree.expandAll()
 
     def _select_shown(self, state):
-        self.tree.blockSignals(True)
-        if self.search_input.text().strip():
-            for item in self._leaves:
-                if not item.isHidden():
-                    item.setCheckState(0, state)
-        elif self._groups:
-            for group in self._groups:
-                group.setCheckState(0, state)
-        else:
-            for item in self._leaves:
-                item.setCheckState(0, state)
-        self.tree.blockSignals(False)
+        # A search still waiting to run decides what is shown.
+        if self._filter_timer.isActive():
+            self._apply_filter()
+        self.model.set_all(state, shown_only=bool(self.search_input.text().strip()))
         self._count()
 
     def _count(self):
-        selected = len(self.chosen_keys())
-        total = len(self._leaves)
-        self.count_label.setText(f'{selected} of {total} selected')
+        selected = self.model.checked_total
+        self.count_label.setText(f'{selected} of {len(self.model._plans)} selected')
         self.ok_btn.setEnabled(selected > 0)
 
     def chosen_keys(self):
-        return [
-            item.data(0, self._KEY) for item in self._leaves
-            if item.checkState(0) == Qt.CheckState.Checked
-        ]
+        return self.model.chosen_keys()
 
 
 def show_skipped(parent, skipped):
@@ -726,11 +926,19 @@ class ImportPlaylistDialog(QDialog):
         layout.addWidget(self.password_label)
         layout.addWidget(self.password_input)
 
-        self.user_agent_input = QLineEdit()
+        # Editable, with common players' agents for providers that accept only those.
+        self.user_agent_combo = QComboBox()
+        self.user_agent_combo.setEditable(True)
+        self.user_agent_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.user_agent_combo.addItems(['', *USER_AGENT_PRESETS])
+        self.user_agent_input = self.user_agent_combo.lineEdit()
         self.user_agent_input.setPlaceholderText('Optional provider user agent')
-        describe(self.user_agent_input, description='User-Agent sent to the provider and its streams.')
-        layout.addWidget(buddy_label('User &agent:', self.user_agent_input))
-        layout.addWidget(self.user_agent_input)
+        describe(
+            self.user_agent_combo,
+            description='User-Agent sent to the provider and its streams. Type one or pick a common player.',
+        )
+        layout.addWidget(buddy_label('User &agent:', self.user_agent_combo))
+        layout.addWidget(self.user_agent_combo)
         self.headers_input = QLineEdit()
         self.headers_input.setPlaceholderText('{"Referer":"https://example.com/"}')
         describe(self.headers_input, description='Optional HTTP headers as a JSON object.')
@@ -772,7 +980,7 @@ class ImportPlaylistDialog(QDialog):
 
         self.buttons = QDialogButtonBox()
         self.import_btn = self.buttons.addButton(
-            '&Save and Refresh' if self._source is not None else '&Import',
+            '&Save' if self._source is not None else '&Import',
             QDialogButtonBox.ButtonRole.AcceptRole,
         )
         self.details_btn = self.buttons.addButton('&Details', QDialogButtonBox.ButtonRole.HelpRole)
@@ -804,15 +1012,12 @@ class ImportPlaylistDialog(QDialog):
             self.location_input.setText(base)
             self.username_input.setText(username)
             self.password_input.setText(password)
-            # Server and account identify the existing source; password and headers are editable.
-            self.location_input.setEnabled(False)
-            self.username_input.setEnabled(False)
         else:
             self.location_input.setText(source.location)
-            self.location_input.setEnabled(False)
         headers = dict(source.request_headers)
         self.user_agent_input.setText(headers.pop('User-Agent', ''))
         self.headers_input.setText(json.dumps(headers, separators=(',', ':')) if headers else '')
+        # Changing these means a new import: other channels, or another server.
         self.source_type_combo.setEnabled(False)
         self.server_combo.setEnabled(False)
 
@@ -829,15 +1034,12 @@ class ImportPlaylistDialog(QDialog):
     def _set_running(self, running):
         for widget in (
             self.source_type_combo, self.location_input, self.browse_btn, self.username_input,
-            self.password_input, self.user_agent_input, self.headers_input,
+            self.password_input, self.user_agent_combo, self.headers_input,
         ):
             widget.setEnabled(not running)
         if not running and self._source is not None:
             self.source_type_combo.setEnabled(False)
-            self.location_input.setEnabled(False)
             self.server_combo.setEnabled(False)
-            if self._source.source_type == 'xc':
-                self.username_input.setEnabled(False)
         else:
             self.server_combo.setEnabled(not running)
         self.import_btn.setEnabled(not running)
@@ -882,7 +1084,8 @@ class ImportPlaylistDialog(QDialog):
         sources = self._host.playlist_sources()
         if self._source is not None:
             server = self._host.server_for_playlist(self._source)
-            existing = self._source
+            # The saved copy, which a refresh may have changed while this window was open.
+            existing = next((item for item in sources if same_source(item, self._source)), self._source)
             if server is None:
                 self._set_status('This playlist\'s server is no longer available.')
                 return
@@ -897,14 +1100,28 @@ class ImportPlaylistDialog(QDialog):
         source.location = location
         source.source_type = source_type
         source.request_headers = normalize_request_headers(headers)
+        # A new address or account is read from there; the channels stay and are updated.
+        moved = self._source is not None and not same_source(existing, source)
+        if moved:
+            other = find_source(sources, location, key, source_type)
+            if other is not None and not same_source(other, existing):
+                self._set_status(f'{other.name} already reads from this address on {server.get("name", "this server")}.')
+                self.location_input.setFocus()
+                return
         self.details_btn.hide()
         self.show_btn.hide()
         self.progress_bar.setRange(0, 0)
         self._set_running(True)
+        # An edit of the password or headers keeps the channels and rewrites them, without
+        # reading the playlist. Anything else, or channels never added, needs a refresh.
+        save_only = self._source is not None and bool(source.network_uuid) and not moved
         self._job = PlaylistJob(
             self._host,
             source,
             server,
+            action=PlaylistJob.SAVE if save_only else PlaylistJob.SYNC,
+            previous=existing if save_only else None,
+            replaces=existing if moved else None,
             first_import=existing is None,
             ask_commands=lambda count, name: ask_to_run_commands(self, count, name),
             choose=(lambda plans, chosen: ask_to_choose(self, plans, chosen)) if existing is None else None,
@@ -1019,12 +1236,12 @@ class PlaylistsDialog(QDialog):
         header.addLayout(heading, 1)
         self.refresh_btn = QPushButton('&Refresh')
         self.choose_btn = QPushButton('&Choose Channels…')
-        self.edit_btn = QPushButton('Se&ttings…')
+        self.edit_btn = QPushButton('&Edit…')
         self.health_btn = QPushButton('&Health…')
         self.remove_btn = QPushButton('Re&move')
         describe(self.refresh_btn, 'Refresh', 'Read the playlist again and update its channels.')
         describe(self.choose_btn, 'Choose channels', 'Choose which channels of the playlist are added.')
-        describe(self.edit_btn, 'Source settings', 'Change provider credentials and HTTP headers.')
+        describe(self.edit_btn, 'Edit', 'Change the provider address, account, and HTTP headers.')
         describe(self.health_btn, 'Stream health', 'Show the latest check result for every channel.')
         describe(self.remove_btn, 'Remove', 'Remove the playlist and its channels from the server.')
         self.refresh_btn.clicked.connect(lambda: self._run(remove=False))
@@ -1147,7 +1364,8 @@ class PlaylistsDialog(QDialog):
         sources = self._sources_for(server) if has_row else []
         for source in sources:
             item = QListWidgetItem(self._label(source))
-            item.setData(Qt.ItemDataRole.UserRole, source.to_dict())
+            # The source itself, not a dict: reading a dict back copied its whole channel map, every second.
+            item.setData(Qt.ItemDataRole.UserRole, source)
             self.playlist_list.addItem(item)
         if sources:
             self.playlist_list.setCurrentRow(min(max(selected, 0), len(sources) - 1))
@@ -1174,14 +1392,14 @@ class PlaylistsDialog(QDialog):
     def _follow_busy(self):
         for row in range(self.playlist_list.count()):
             item = self.playlist_list.item(row)
-            text = self._label(PlaylistSource.from_dict(item.data(Qt.ItemDataRole.UserRole)))
+            text = self._label(item.data(Qt.ItemDataRole.UserRole))
             if item.text() != text:
                 item.setText(text)
         self._sync_buttons()
 
     def _selected(self):
         item = self.playlist_list.currentItem()
-        return PlaylistSource.from_dict(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+        return item.data(Qt.ItemDataRole.UserRole) if item is not None else None
 
     def _sync_buttons(self):
         source = self._selected()
@@ -1199,8 +1417,12 @@ class PlaylistsDialog(QDialog):
         self.playlist_list.setEnabled(not running)
         self.server_list.setEnabled(not running)
         self.import_btn.setEnabled(not running and self._selected_server() is not None)
+        # A removal is not a check: the health of channels on their way out would read as one.
+        removing = self._stopping is not None or (
+            running and self._job is not None and self._job.action == PlaylistJob.REMOVE
+        )
         self.health_label.setText(f'Stream health: {health_text(source)}' if source is not None else '')
-        self.health_label.setVisible(source is not None)
+        self.health_label.setVisible(source is not None and not removing)
 
     def _show_health(self):
         source = self._selected()
@@ -1263,6 +1485,7 @@ class PlaylistsDialog(QDialog):
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
+        self.hint_label.hide()
         if not busy:
             self._run(remove=True)
             return

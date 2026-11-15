@@ -105,8 +105,8 @@ modules:
       - /share/zsh
     sources:
       - type: archive
-        url: https://github.com/mpv-player/mpv/archive/v0.41.0.tar.gz
-        sha256: ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209
+        url: https://github.com/mpv-player/mpv/archive/v0.42.0.tar.gz
+        sha256: bcfebbfa2b65a6d88dc97ea18117831072373e38b5785a2afb874ed4df5070dd
         x-checker-data:
           type: anitya
           project-id: 5348
@@ -170,7 +170,7 @@ modules:
       - type: git
         # TVHplayer's fork; see docs/tvheadend-source.md.
         url: https://github.com/mfat/tvheadend.git
-        commit: 40e88d4cef2c81e44474e75fd2f1edb232575ceb
+        commit: 57610597563a3f49ac1d132c4735cb0bee6d4364
         # Tags let support/version name the build (git describe).
         disable-shallow-clone: true
       - type: archive
@@ -189,6 +189,8 @@ modules:
   - name: tvhplayer
     buildsystem: simple
     build-commands:
+      # The C decoder for HTSP messages, next to the code copied below.
+      - python3 packaging/build-native.py
       - mkdir -p /app/share/tvhplayer/icons
       - cp -r tvhplayer/* /app/share/tvhplayer/
       - cp -r icons/* /app/share/tvhplayer/icons/

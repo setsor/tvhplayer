@@ -23,8 +23,19 @@ The deb and rpm builds download `<repo>/archive/<commit>.tar.gz`, and the deb bu
 | `e507a3ca2` | idnode: map a large bouquet to channels quickly | not yet |
 | `afa7ce08d` | idnode: save pending changes before services are torn down | not yet |
 | `40e88d4ce` | htsp: send a tag's members once after many channels join it | not yet |
+| `fb4c98deb` | htsmsg: reject different field prefixes before string comparison | not yet |
+| `f02aee227` | startup: development-only monotonic stage and EPG/HTSP timing | not yet |
+| `cab97c72d` | idnode: faster sorted-set insertion with binary search and memmove | not yet |
+| `576105975` | settings: reuse directories during configuration loading | not yet |
 
 Base: upstream `51ec612fa`.
+
+For startup investigation, enable the existing stderr/main trace with `-d --trace main`
+on a disposable, disk-backed copy of the configuration. Stage timing is emitted
+only at trace level. HTSP enqueue timing is separate from the client's receipt of
+`initialSyncCompleted`. See [the measured investigation](cold-startup-profile.md)
+for cache conditions, data-preservation checks, the limited EPG-stage improvement,
+and the larger loading changes that still need design.
 
 ## Changing the pin
 
@@ -35,3 +46,21 @@ Base: upstream `51ec612fa`.
 5. Update the table above.
 
 When the branch has no fixes left on top of upstream, point all three files back to `https://github.com/tvheadend/tvheadend` at that upstream commit.
+
+The earlier local sorted-set and settings-directory optimizations are now published
+and pinned as well. The normal source checkout should track the fork’s `tvhplayer`
+branch; a separate temporary publishing checkout is no longer required.
+
+The unshipped descriptor-relative loader candidate `47207c800` is retained as a
+[reviewable patch](startup-optimization/0001-filebundle-directory-relative.patch).
+Its Linux/Flatpak SDK checks and limited synthetic loader measurements are recorded
+in the [startup investigation](cold-startup-profile.md#continuation-descriptor-relative-configuration-loading).
+It has not changed the production pins; large-profile startup/EPG/DVR verification
+is still required before considering it for packaging.
+
+The subsequent [read-only SQLite experiment](startup-optimization/0002-sqlite-startup-prototype.patch),
+local commit `79f13bdbf`, uses a consistent disposable copy of the real large
+configuration. It provides startup/data-equivalence evidence, but does not
+implement transactional writes, migration or recovery. Its private database stays
+in ignored benchmark work. See the [results and limitations](cold-startup-profile.md#sqlite-experiment-after-recovering-a-real-fixture);
+neither experiment is enabled by release packaging.

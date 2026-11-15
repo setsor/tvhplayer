@@ -7,13 +7,13 @@ the OpenGL context and asks this engine for a render context once it has one.
 from __future__ import annotations
 
 import locale
-import sys
 from pathlib import Path
 from time import monotonic
 
 from .buffer_recorder import BufferRecorder
 from .player import (
-    BufferRecordingPoint, DEINTERLACE_AUTO, DEINTERLACE_MODES, DEINTERLACE_OFF, DEINTERLACE_ON, NO_TRACK, Player, Timeshift,
+    BufferRecordingPoint, DEINTERLACE_AUTO, DEINTERLACE_MODES, DEINTERLACE_OFF, DEINTERLACE_ON,
+    HARDWARE_DECODING_MODES, NO_TRACK, Player, Timeshift,
 )
 from .proxy import hide_http_proxy, stream_proxy
 
@@ -28,8 +28,8 @@ MPV_OPTIONS = {
     'idle': True,
     'keep_open': False,
     'audio_client_name': 'TVHplayer',
-    # mpv hands a frame over this long before its display time, and the widget's
-    # paint then waits out the rest. Every repaint of a resize waited up to a frame.
+    # Deliver frames at their display time: the Qt widget explicitly disables
+    # the render API's blocking timing wait to keep the UI responsive.
     'video_timing_offset': 0,
 }
 # mpv's built-in Lua scripts, which load_scripts does not cover. A libmpv built
@@ -60,6 +60,7 @@ class MpvPlayer(Player):
 
         self._mpv_module = mpv
         self._surface = None
+        self._hardware_decoding = MPV_OPTIONS['hwdec']
         self._deinterlace = DEINTERLACE_AUTO
         self._last_buffered = None
         self._live_clock = None
@@ -74,14 +75,7 @@ class MpvPlayer(Player):
         hide_http_proxy()
         # QApplication sets the numeric locale from the desktop; libmpv refuses anything but C.
         locale.setlocale(locale.LC_NUMERIC, 'C')
-        options = dict(MPV_OPTIONS)
-        # Ventura 13 Intel test package: the Qt OpenGL / VideoToolbox
-        # decoding path has not yet been validated. Keep the successful
-        # software-decoding configuration for this bundled macOS build only.
-        if sys.platform == 'darwin' and getattr(sys, 'frozen', False):
-            options['hwdec'] = 'no'
-            print("Debug: Ventura bundle uses software decoding (hwdec=no)")
-        self._mpv = mpv.MPV(log_handler=_log, loglevel='warn', **options)
+        self._mpv = mpv.MPV(log_handler=_log, loglevel='warn', **MPV_OPTIONS)
         # Set after creation: an unknown option at creation leaves a running mpv behind.
         for name, value in LUA_SCRIPT_OPTIONS.items():
             try:
@@ -137,6 +131,7 @@ class MpvPlayer(Player):
         self._last_buffered = None
         self._live_clock = None
         self._timeshift_active = False
+        self._mpv['hwdec'] = self._hardware_decoding
         self._mpv.loadfile(url)
 
     def stop(self):
@@ -213,6 +208,12 @@ class MpvPlayer(Player):
         except Exception:
             return True
         return 'auto' in choices
+
+    def set_hardware_decoding(self, mode):
+        if mode not in HARDWARE_DECODING_MODES:
+            raise ValueError(f'Unknown hardware decoding mode: {mode}')
+        # Defer changing the decoder: a runtime change can seek a live stream.
+        self._hardware_decoding = mode
 
     def set_fast_start(self, on):
         self._mpv['demuxer-lavf-analyzeduration'] = FAST_START_ANALYZE_SECONDS if on else 0

@@ -7,6 +7,7 @@ length with no sign-extension; -1 must occupy 8 bytes.
 
 from __future__ import annotations
 
+import os
 import struct
 from typing import Any, Dict, List, Union
 
@@ -98,15 +99,32 @@ def serialize(msg: dict) -> bytes:
 
 def deserialize(body: bytes, type_id: int = HMF_MAP) -> Message:
     """Deserialize a body (no 4-byte length prefix)."""
+    if _native is not None:
+        return _native.deserialize(body, type_id == HMF_LIST)
+    return python_deserialize(body, type_id)
+
+
+def python_deserialize(body: bytes, type_id: int = HMF_MAP) -> Message:
+    """The same as deserialize, in Python: used when the C decoder is not built."""
     body = bytes(body)
     return _decode_body(body, 0, len(body), type_id == HMF_LIST)
 
 
+# Field names repeat in every message (channelName, services, ...): decode
+# each spelling once. Bounded, in case a server sends ever-new names.
+_NAMES: Dict[bytes, str] = {}
+_NAMES_MAX = 4096
+
+
 def _decode_body(body: bytes, offset: int, end: int, is_list: bool) -> Message:
     # Nested maps and lists are read in place: copying each one out took
-    # most of the time of a list of tens of thousands of channels.
+    # most of the time of a list of tens of thousands of channels. This loop
+    # runs for every field of every channel, so it avoids function calls
+    # for the common types.
     msg: Message = [] if is_list else {}
     unpack = _FIELD_HEADER.unpack_from
+    names = _NAMES
+    from_bytes = int.from_bytes
     while offset + 6 <= end:
         field_type, name_len, data_len = unpack(body, offset)
         offset += 6
@@ -117,7 +135,12 @@ def _decode_body(body: bytes, offset: int, end: int, is_list: bool) -> Message:
         if field_type == HMF_STR:
             item = body[start:stop].decode('utf-8', 'replace')
         elif field_type == HMF_S64:
-            item = _decode_s64(body[start:stop])
+            if data_len == 0:
+                item = 0
+            else:
+                item = from_bytes(body[start:stop], 'little')
+                if data_len == 8 and item >= 0x8000000000000000:
+                    item -= 0x10000000000000000
         elif field_type == HMF_MAP or field_type == HMF_LIST:
             item = _decode_body(body, start, stop, field_type == HMF_LIST)
         else:
@@ -125,7 +148,13 @@ def _decode_body(body: bytes, offset: int, end: int, is_list: bool) -> Message:
         if is_list:
             msg.append(item)
         else:
-            msg[body[offset:start].decode('utf-8', 'replace')] = item
+            raw_name = body[offset:start]
+            name = names.get(raw_name)
+            if name is None:
+                name = raw_name.decode('utf-8', 'replace')
+                if len(names) < _NAMES_MAX:
+                    names[raw_name] = name
+            msg[name] = item
         offset = stop
     if offset != end:
         raise ValueError('Trailing bytes in HTSMSG body')
@@ -164,3 +193,16 @@ def read_message(recv_exact):
     if len(body) != size:
         raise ConnectionError('Connection closed while reading HTSMSG body')
     return deserialize(body, HMF_MAP)
+
+
+# The C decoder (_htsmsg.c), built into the packages by setup.py build_ext.
+# Decoding a large channel list in Python took seconds during which the
+# window had to wait for the interpreter lock. TVHPLAYER_PYTHON_HTSMSG=1
+# keeps the Python decoder, for comparing the two.
+try:
+    if os.environ.get('TVHPLAYER_PYTHON_HTSMSG'):
+        raise ImportError
+    from . import _htsmsg as _native
+    _native.set_binary_type(Binary)
+except ImportError:
+    _native = None

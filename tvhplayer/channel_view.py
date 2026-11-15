@@ -8,6 +8,7 @@ and cached on disk, so a long list fills in without holding up the window.
 from __future__ import annotations
 
 import hashlib
+import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,8 @@ from PyQt6.QtWidgets import (
     QTableView,
 )
 
+log = logging.getLogger(__name__)
+
 try:
     from .core.channel_info import (
         COLUMN_NAME,
@@ -41,6 +44,7 @@ try:
         channel_key,
         progress,
     )
+    from .core.backend import channel_sort_key
     from .core.config import default_cache_dir
     from .core.proxy import configure_session
     from .core.urls import http_auth
@@ -60,6 +64,7 @@ except ImportError:
         channel_key,
         progress,
     )
+    from core.backend import channel_sort_key
     from core.config import default_cache_dir
     from core.proxy import configure_session
     from core.urls import http_auth
@@ -153,49 +158,6 @@ def programme_text(event, now, with_start=False):
     if event.summary and event.summary != event.subtitle:
         lines.append(event.summary)
     return text, '\n'.join(lines), ', '.join(lines[:3])
-
-
-def embossed_logo(pixmap, palette=None, size=LOGO_SIZE):
-    """A fine light edge and dark shadow around the original alpha silhouette.
-
-    No filled rectangle is added. The image on disk and its original colors
-    remain untouched.
-    """
-    if pixmap is None or pixmap.isNull():
-        return QPixmap()
-    palette = palette or QApplication.palette()
-    dark = palette.color(QPalette.ColorRole.Base).lightness() < 128
-    area = QSize(max(1, size.width() - 4), max(1, size.height() - 4))
-    image = pixmap.scaled(
-        area, Qt.AspectRatioMode.KeepAspectRatio,
-        Qt.TransformationMode.SmoothTransformation,
-    )
-
-    def silhouette(color):
-        mask = QPixmap(image.size())
-        mask.fill(Qt.GlobalColor.transparent)
-        p = QPainter(mask)
-        p.drawPixmap(0, 0, image)
-        p.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-        p.fillRect(mask.rect(), color)
-        p.end()
-        return mask
-
-    outline = silhouette(QColor(255, 255, 255, 55) if dark else QColor(0, 0, 0, 55))
-    light = silhouette(QColor(255, 255, 255, 105))
-    shadow = silhouette(QColor(0, 0, 0, 110))
-    result = QPixmap(size)
-    result.fill(Qt.GlobalColor.transparent)
-    p = QPainter(result)
-    x = (size.width() - image.width()) // 2
-    y = (size.height() - image.height()) // 2
-    for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-        p.drawPixmap(x + dx, y + dy, outline)
-    p.drawPixmap(x + 1, y + 1, shadow)
-    p.drawPixmap(x - 1, y - 1, light)
-    p.drawPixmap(x, y, image)
-    p.end()
-    return result
 
 
 def row_height(density, line_spacing, two_line=False):
@@ -307,10 +269,130 @@ class ChannelTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._channels = list(channels)
         self._keys = [channel_key(channel) for channel in self._channels]
+        # The order without a sorted column: by number, then name, as the
+        # backends list channels. Rows added later go in their place.
+        self._natural = [channel_sort_key(channel) for channel in self._channels]
+        self._position_by_key = {key: i for i, key in enumerate(self._keys)}
+        self._free_positions = []
         self._logo_refs = list(logo_refs) if logo_refs is not None else [''] * len(self._channels)
-        self._order = self._sorted(range(len(self._channels)))
+        # Without a sorted column, the list keeps the order it is given.
+        self._order = (list(range(len(self._channels))) if self._sort_column < 0
+                       else self._sorted(range(len(self._channels))))
         self._rows = self._filtered(self._order)
         self.endResetModel()
+
+    def update_channels(self, changes, logo_refs=None):
+        """Apply a batch of key -> channel/None deltas without resetting the model.
+
+        Source slots stay stable so selection and persistent indexes survive
+        updates. Deleted slots are reused, bounding memory during live churn.
+        """
+        if not changes:
+            return
+        if not hasattr(self, '_position_by_key'):
+            self._position_by_key = {}
+            self._free_positions = []
+        if not hasattr(self, '_natural'):
+            self._natural = [channel_sort_key(channel) if channel is not None else (0, '')
+                             for channel in self._channels]
+        if self._update_in_place(changes, logo_refs):
+            return
+        self.layoutAboutToBeChanged.emit()
+        old = self.persistentIndexList()
+        old_keys = [self._keys[self._rows[index.row()]] for index in old]
+        # Positions already in the order whose channel changed or went away.
+        moved = set()
+        added = []
+        for key, channel in changes.items():
+            position = self._position_by_key.get(key)
+            if channel is None:
+                if position is not None:
+                    del self._position_by_key[key]
+                    self._channels[position] = None
+                    self._free_positions.append(position)
+                    moved.add(position)
+                continue
+            if position is None:
+                if self._free_positions:
+                    position = self._free_positions.pop()
+                    moved.add(position)
+                else:
+                    position = len(self._channels)
+                    self._channels.append(None)
+                    self._keys.append('')
+                    self._logo_refs.append('')
+                    self._natural.append(None)
+                self._position_by_key[key] = position
+            else:
+                moved.add(position)
+            self._channels[position] = channel
+            self._keys[position] = key
+            self._logo_refs[position] = (logo_refs or {}).get(key, '')
+            self._natural[position] = channel_sort_key(channel)
+            added.append(position)
+        if self._sort_column < 0:
+            # The order is kept sorted: merge the batch in instead of sorting
+            # every channel again. A list that is still arriving keeps its
+            # rows in their final places.
+            natural = self._natural.__getitem__
+            kept = [p for p in self._order if p not in moved] if moved else self._order
+            added = sorted(dict.fromkeys(added), key=natural)
+            self._order = sorted(kept + added, key=natural)
+        else:
+            self._order = self._sorted(self._position_by_key.values())
+        self._rows = self._filtered(self._order)
+        if old:
+            row_of = {self._keys[position]: row for row, position in enumerate(self._rows)}
+            new = [self.index(row_of[key], index.column()) if key in row_of else QModelIndex()
+                   for index, key in zip(old, old_keys)]
+            self.changePersistentIndexList(old, new)
+        self.layoutChanged.emit()
+        self._changed(range(len(COLUMN_TITLES)))
+
+    def _update_in_place(self, changes, logo_refs):
+        """Apply changes that move no row, redrawing only their rows. False when one would move.
+
+        Tvheadend sends a channel update whenever a channel's programme
+        changes. With tens of thousands of channels that is a steady stream,
+        and sorting and filtering every channel again for each kept the
+        window busy almost half the time.
+        """
+        updates = []
+        for key, channel in changes.items():
+            position = self._position_by_key.get(key)
+            if channel is None or position is None:
+                return False
+            old = self._channels[position]
+            if old is None or channel_sort_key(channel) != self._natural[position]:
+                return False
+            if self._search and (channel.name != old.name or channel.number != old.number):
+                return False
+            updates.append((position, channel, old))
+        if self._sort_column >= 0:
+            # Sorted by a column: the channel keeps its row if its value there stays.
+            for position, channel, old in updates:
+                before = self._sort_value(position)
+                self._channels[position] = channel
+                try:
+                    after = self._sort_value(position)
+                finally:
+                    self._channels[position] = old
+                if before != after:
+                    return False
+        refs = logo_refs or {}
+        rows = []
+        for position, channel, _old in updates:
+            self._channels[position] = channel
+            self._logo_refs[position] = refs.get(self._keys[position], '')
+            try:
+                rows.append(self._rows.index(position))
+            except ValueError:
+                # Not shown: the search or group leaves it out.
+                pass
+        last = len(COLUMN_TITLES) - 1
+        for row in rows:
+            self.dataChanged.emit(self.index(row, 0), self.index(row, last), [])
+        return True
 
     def set_filter(self, search, members=None):
         """Keep the channels whose name or number holds ``search``, and in ``members`` when given."""
@@ -375,17 +457,9 @@ class ChannelTableModel(QAbstractTableModel):
         pixmap = self._pixmaps.get(reference)
         if pixmap is None:
             return self._placeholder
-        palette = QApplication.palette()
-        dark = palette.color(QPalette.ColorRole.Base).lightness() < 128
-        key = (pixmap.cacheKey(), dark)
         cached = self._icons.get(reference)
-        if cached is None or cached[0] != key:
-            artwork = embossed_logo(pixmap, palette)
-            icon = QIcon()
-            for mode in (QIcon.Mode.Normal, QIcon.Mode.Selected, QIcon.Mode.Active,
-                         QIcon.Mode.Disabled):
-                icon.addPixmap(artwork, mode)
-            cached = self._icons[reference] = (key, icon)
+        if cached is None or cached[0] != pixmap.cacheKey():
+            cached = self._icons[reference] = (pixmap.cacheKey(), QIcon(pixmap))
         return cached[1]
 
     # Reading rows
@@ -408,7 +482,7 @@ class ChannelTableModel(QAbstractTableModel):
 
     def is_listed(self, matches):
         """Whether any channel matches, shown or left out by the filter."""
-        return any(matches(channel) for channel in self._channels)
+        return any(matches(channel) for channel in self._channels if channel is not None)
 
     def is_playing(self, channel):
         playing = self._playing
@@ -529,9 +603,22 @@ class ChannelTableModel(QAbstractTableModel):
         value = self._display(position, column)
         return str(value or '').casefold()
 
+    def row_of_key(self, key):
+        """Row showing the channel with ``key``, or -1."""
+        position = getattr(self, '_position_by_key', {}).get(key)
+        if position is None:
+            return -1
+        try:
+            return self._rows.index(position)
+        except ValueError:
+            return -1
+
     def _sorted(self, positions):
         positions = list(positions)
         if self._sort_column < 0:
+            natural = getattr(self, '_natural', None)
+            if natural is not None and len(natural) == len(self._channels):
+                return sorted(positions, key=natural.__getitem__)
             return positions
         return sorted(
             positions,
@@ -918,7 +1005,9 @@ class LogoLoader(QObject):
         """Load ``reference`` from the disk cache, or fetch ``url`` when it is not there.
 
         Nothing happens while it is queued, or after it failed before. An
-        empty ``url`` only reads the cache.
+        empty ``url`` only reads the cache. ``url`` may be a function giving
+        the address: it is called only when the logo is not in the cache, in
+        the background, since finding it can mean logging in to the server.
         """
         key = (server.get('url') or '', reference)
         with self._lock:
@@ -972,6 +1061,14 @@ class LogoLoader(QObject):
         if image is not None:
             self._finish((server_url, reference), reference, image, generation)
             return
+        if callable(url):
+            try:
+                url = url() or ''
+            except Exception as exc:
+                log.debug('No address for logo %s: %s', reference, exc)
+                url = ''
+            if not url.startswith(('http://', 'https://')):
+                url = ''
         if not url:
             with self._lock:
                 if generation == self._generation:
