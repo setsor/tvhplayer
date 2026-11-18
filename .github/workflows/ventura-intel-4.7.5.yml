@@ -41,7 +41,7 @@ jobs:
           src = Path('tvhplayer/tvhplayer.py').read_text()
           assert 'version="4.7.5"' in Path('setup.py').read_text()
           assert 'def run_dvr_change(' in src
-          assert 'def start_recording(self):' in src
+          assert 'def start_recording(self, channel=None):' in src
           assert 'def stop_recording(self):' in src
           assert Path('packaging/build-native.py').is_file()
           assert Path('macos/audit-native-minos.py').is_file()
