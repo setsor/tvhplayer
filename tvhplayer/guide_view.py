@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import textwrap
 
 from PyQt6.QtCore import QByteArray, QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QKeySequence, QPainter, QPainterPath, QPalette, QPen
@@ -100,6 +101,26 @@ _NO_SERVER_YET = object()
 TYPEAHEAD_SECONDS = 1.0
 
 
+def programme_description(event):
+    """Preserve both EPG synopsis fields without repeating duplicated text."""
+    subtitle = (event.subtitle or '').strip()
+    description = event.description or ''
+    summary = event.summary or ''
+    parts = [subtitle] if subtitle else []
+    if description and summary:
+        if description in summary:
+            parts.append(summary)
+        elif summary in description:
+            parts.append(description)
+        else:
+            parts.extend((description, summary))
+    elif description or summary:
+        parts.append(description or summary)
+    return '\n\n'.join(parts) or 'No description.'
+
+
+
+
 def _blend(base, over, amount):
     return QColor(
         round(base.red() + (over.red() - base.red()) * amount),
@@ -173,6 +194,47 @@ class GuideFetch(QObject):
                 except Exception:
                     pass
             self._emit(self.finished, self)
+
+
+class GuideDetailFetch(QObject):
+    """Fetch a selected programme's full metadata without blocking Qt."""
+
+    loaded = pyqtSignal(object, object)
+    finished = pyqtSignal(object)
+
+    def __init__(self, server, event_id, parent=None):
+        super().__init__(parent)
+        self.server = dict(server)
+        self.event_id = int(event_id)
+        self._stopped = threading.Event()
+        self._thread = threading.Thread(target=self._run, name='guide-detail', daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self._stopped.set()
+
+    def _run(self):
+        backend = None
+        try:
+            backend = create_backend(self.server)
+            event = backend.get_event(self.event_id)
+            if not self._stopped.is_set():
+                self.loaded.emit(self, event)
+        except Exception as exc:
+            # The grid synopsis remains usable when the detail endpoint fails.
+            print(f"Debug: Could not load programme details: {type(exc).__name__}: {exc}")
+        finally:
+            if backend is not None:
+                try:
+                    backend.close()
+                except Exception:
+                    pass
+            try:
+                self.finished.emit(self)
+            except RuntimeError:
+                pass
 
 
 class GuideGrid(QAbstractScrollArea):
@@ -572,8 +634,9 @@ class GuideGrid(QAbstractScrollArea):
             row, cell, on_channel = self._hit(event.pos())
             if cell is not None:
                 lines = [cell.event.title or 'No title', timing_text(cell.event, int(time.time()))]
-                if cell.event.subtitle:
-                    lines.append(cell.event.subtitle)
+                synopsis = programme_description(cell.event)
+                if synopsis != 'No description.':
+                    lines.extend(textwrap.wrap(synopsis.replace('\n', ' '), width=88, break_long_words=False))
                 QToolTip.showText(event.globalPos(), '\n'.join(lines), self.viewport())
             elif row is not None and on_channel:
                 QToolTip.showText(event.globalPos(), self.channels[row].name, self.viewport())
@@ -816,6 +879,8 @@ class GuideWindow(QDialog):
         self.resize(1100, 680)
         self._server = _NO_SERVER_YET
         self._fetch = None
+        self._detail_fetch = None
+        self._detail_cache = {}
         self._queue = []
         self._error = ''
         self._server_message = ''
@@ -998,6 +1063,10 @@ class GuideWindow(QDialog):
     # ------------------------------------------------------------ fetching
 
     def _restart(self, server=None):
+        if self._detail_fetch is not None:
+            self._detail_fetch.stop()
+            self._detail_fetch = None
+        self._detail_cache.clear()
         if self._fetch is not None:
             self._fetch.stop()
             self._fetch = None
@@ -1172,6 +1241,46 @@ class GuideWindow(QDialog):
         self.grid.viewport().update()
         self._show_details()
 
+    def _load_details(self, event):
+        """Read full programme metadata once; never perform network I/O on Qt."""
+        if event is None or event.event_id is None or self._server is None:
+            return
+        event_id = event.event_id
+        if event_id in self._detail_cache:
+            return
+        if self._detail_fetch is not None:
+            return
+        server = self._current_server()
+        if not server:
+            return
+        fetch = GuideDetailFetch(server, event_id, self)
+        self._detail_fetch = fetch
+        fetch.loaded.connect(self._on_detail_loaded)
+        fetch.finished.connect(self._on_detail_finished)
+        fetch.start()
+
+    def _on_detail_loaded(self, fetch, event):
+        if fetch is not self._detail_fetch or event is None:
+            return
+        if event.event_id == fetch.event_id:
+            self._detail_cache[event.event_id] = event
+            selected = self.grid.current_event()
+            if selected is not None and selected.event_id == event.event_id:
+                self._show_details()
+
+    def _on_detail_finished(self, fetch):
+        fetch.deleteLater()
+        if fetch is not self._detail_fetch:
+            return
+        self._detail_fetch = None
+        # Cache a failed detail read too, to avoid retrying at every timer tick.
+        if fetch.event_id not in self._detail_cache:
+            self._detail_cache[fetch.event_id] = None
+        selected = self.grid.current_event()
+        if (selected is not None and selected.event_id != fetch.event_id
+                and selected.event_id not in self._detail_cache):
+            self._load_details(selected)
+
     # ------------------------------------------------------------ details and actions
 
     def _state(self, event):
@@ -1221,8 +1330,10 @@ class GuideWindow(QDialog):
             timing += " · Recording scheduled"
         self.title_label.setText(event.title or "No title")
         self.timing_label.setText(timing)
-        text = "\n\n".join(part for part in (event.subtitle, event.description) if part)
-        self._set_description(text or "No description.")
+        detailed = self._detail_cache.get(event.event_id)
+        self._set_description(programme_description(detailed or event))
+        if detailed is None:
+            self._load_details(event)
         ended = event.stop <= now
         if state == RECORDING:
             self.record_btn.setText("Stop Re&cording")
@@ -1392,6 +1503,9 @@ class GuideWindow(QDialog):
         super().closeEvent(event)
 
     def shutdown(self):
+        if self._detail_fetch is not None:
+            self._detail_fetch.stop()
+            self._detail_fetch = None
         if self._fetch is not None:
             self._fetch.stop()
             self._fetch = None
