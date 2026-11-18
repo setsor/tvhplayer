@@ -19,9 +19,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: tvhplayer-ventura-intel-${{ github.ref }}
-  cancel-in-progress: true
+# Do not cancel queued Intel jobs when a PR is updated or retried.
+# Dedicated Ventura builds can wait for macos-15-intel runner capacity.
 
 jobs:
   preflight:
