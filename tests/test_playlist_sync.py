@@ -276,7 +276,8 @@ def test_unchanged_refresh_writes_nothing():
     assert admin.saved == []
 
 
-def test_large_url_edit_saves_batches_before_reporting_progress():
+@pytest.mark.parametrize("save_seconds, processing_seconds", [(0, 0), (1, 0), (1, 0.3)])
+def test_large_url_edit_saves_batches_before_reporting_progress(save_seconds, processing_seconds):
     from tvhplayer.core.tvh_admin import SAVE_BATCH
 
     admin = FakeAdmin()
@@ -287,8 +288,23 @@ def test_large_url_edit_saves_batches_before_reporting_progress():
     )
     sync_playlist(admin, source, _plans(text), check=False)
     original = dict(source.muxes)
+    admin.finish_scans()
     admin.saved.clear()
     progress = []
+    now = [0.0]
+    batches = []
+    save = admin.save
+
+    def slow_save(nodes):
+        batches.append(len(nodes))
+        save(nodes)
+        now[0] += save_seconds
+
+    admin.save = slow_save
+
+    def clock():
+        now[0] += processing_seconds
+        return now[0]
 
     def saved_progress(done, total):
         progress.append((done, total))
@@ -298,12 +314,99 @@ def test_large_url_edit_saves_batches_before_reporting_progress():
     source.location = source.location.replace('old.example', 'new.example')
     result = sync_playlist(
         admin, source, _plans(text.replace('old.example', 'new.example')),
-        check=False, progress=saved_progress,
+        check=False, progress=saved_progress, clock=clock,
     )
     assert (result.added, result.updated, result.removed) == (0, count, 0)
     assert source.muxes == original
+    assert batches == [SAVE_BATCH, SAVE_BATCH, 3]
     assert progress == [(SAVE_BATCH, count), (SAVE_BATCH * 2, count), (count, count)]
 
+
+
+def test_update_without_checks_cancels_old_scans_only_in_this_playlist():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', 'http://x/list.m3u', 'builtin')
+    sync_playlist(admin, source, _plans(FIRST), check=False)
+    other = PlaylistSource('Other', 'http://x/other.m3u', 'builtin')
+    sync_playlist(admin, other, _plans(FIRST), check=False)
+    admin.muxes[source.muxes['id:a']]['scan_state'] = 3  # Active scan, not just pending.
+    original = dict(source.muxes)
+    admin.saved.clear()
+    result = sync_playlist(admin, source, _plans(FIRST), check=False)
+    assert (result.added, result.updated, result.removed) == (0, 0, 0)
+    assert source.muxes == original
+    assert admin.saved == [{'uuid': uuid, 'scan_state': 0} for uuid in original.values()]
+    assert all(admin.muxes[uuid]['scan_state'] == 0 for uuid in original.values())
+    assert all(admin.muxes[uuid]['scan_state'] == 1 for uuid in other.muxes.values())
+    assert admin.scanned == []
+
+
+def test_xtream_renames_after_5200_channels_reuse_existing_muxes():
+    count = 6000
+    old_text = '#EXTM3U\n' + ''.join(
+        f'#EXTINF:-1,Channel {i}\nhttp://old.example/live/user/pass/{i}.ts\n'
+        for i in range(count)
+    )
+    new_text = '#EXTM3U\n' + ''.join(
+        f'#EXTINF:-1,{"Renamed" if i >= 5200 else "Channel"} {i}\n'
+        f'http://new.example/live/user/newpass/{i}.m3u8\n'
+        for i in range(count)
+    )
+    admin = FakeAdmin()
+    source = PlaylistSource('List', '', 'builtin', source_type='xc')
+    sync_playlist(admin, source, _plans(old_text), check=False)
+    original = dict(source.muxes)
+    source.health['name:Channel 5200'] = {'status': 'failed', 'scan_result': 2}
+    result = sync_playlist(admin, source, _plans(new_text), check=False)
+    assert (result.added, result.updated, result.removed) == (0, count, 0)
+    assert len(admin.muxes) == count
+    for i in range(count):
+        key = f'name:{"Renamed" if i >= 5200 else "Channel"} {i}'
+        assert source.muxes[key] == original[f'name:Channel {i}']
+    assert source.health['name:Renamed 5200']['status'] == 'failed'
+    assert 'name:Channel 5200' not in source.health
+
+
+@pytest.mark.parametrize('ambiguous_side', ['old', 'new', 'm3u'])
+def test_stream_id_fallback_does_not_guess_for_ambiguous_or_m3u_entries(ambiguous_side):
+    def text(names):
+        return '#EXTM3U\n' + ''.join(
+            f'#EXTINF:-1,{name}\nhttp://x/live/u/p/1.ts\n' for name in names
+        )
+    admin = FakeAdmin()
+    source = PlaylistSource('List', '', 'builtin', source_type='m3u' if ambiguous_side == 'm3u' else 'xc')
+    sync_playlist(admin, source, _plans(text(['Old', 'Other'] if ambiguous_side == 'old' else ['Old'])), check=False)
+    original = set(source.muxes.values())
+    result = sync_playlist(admin, source, _plans(text(['New', 'Extra'] if ambiguous_side == 'new' else ['New'])), check=False)
+    assert result.added == (2 if ambiguous_side == 'new' else 1)
+    assert not original.intersection(source.muxes.values())
+
+
+def test_partial_update_batch_does_not_hide_progress_during_new_channel_creation():
+    admin = FakeAdmin()
+    source = PlaylistSource('List', '', 'builtin')
+    sync_playlist(admin, source, _plans(FIRST), check=False)
+    admin.finish_scans()
+    admin.saved.clear()
+    new = FIRST.replace('http://x/a.ts', 'http://x/new-a.ts') + ''.join(
+        f'#EXTINF:-1,New {i}\nhttp://x/{i}.ts\n' for i in range(20)
+    )
+    now = [0.0]
+    progress = []
+
+    def clock():
+        now[0] += 0.2
+        return now[0]
+
+    def report(done, total):
+        # One unchanged channel, new channels already created, and saved edits.
+        assert done <= 1 + len(admin.muxes) - 2 + len(admin.saved)
+        progress.append(done)
+
+    result = sync_playlist(admin, source, _plans(new), check=False, clock=clock, progress=report)
+    assert (result.updated, result.added) == (1, 20)
+    assert len([done for done in progress if done < 22]) >= 5
+    assert progress[-1] == 22
 
 def test_a_slow_small_import_shows_progress_while_it_adds_channels():
     # Each channel is a request of its own; on a slow server a list shorter
@@ -759,6 +862,41 @@ def tvheadend():
             process.kill()
         shutil.rmtree(config, ignore_errors=True)
 
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(not TVHEADEND, reason='needs a Tvheadend build')
+def test_real_server_refresh_clears_scan_backlog_and_keeps_update_batches(tvheadend):
+    from tvhplayer.core.tvh_admin import SAVE_BATCH
+
+    count = SAVE_BATCH * 2 + 3
+    text = '#EXTM3U\n' + ''.join(
+        f'#EXTINF:-1 tvg-id="c{i}",C{i}\nhttp://127.0.0.1:9/live/user/old/{i}.ts\n'
+        for i in range(count)
+    )
+    source = PlaylistSource('Batch test', '', 'builtin', source_type='xc')
+    with TvhAdmin({'url': f'http://127.0.0.1:{tvheadend}'}) as admin:
+        source.network_uuid = admin.create_network(dict(NETWORK_CONF, networkname=source.name))
+        for plan in _plans(text):
+            source.muxes[plan.key] = admin.create_mux(source.network_uuid, dict(mux_conf(plan), scan_result=1))
+        original = dict(source.muxes)
+        admin.scan_muxes(list(source.muxes.values()))
+        batches = []
+        save = admin.save
+
+        def record_save(nodes):
+            if nodes and 'iptv_url' in nodes[0]:
+                batches.append(len(nodes))
+            save(nodes)
+
+        admin.save = record_save
+        result = sync_playlist(admin, source, _plans(text.replace('/old/', '/new/').replace('tvg-id="c', 'tvg-id="renamed')), check=False)
+        assert (result.added, result.updated, result.removed) == (0, count, 0)
+        assert source.muxes == {f'id:renamed{i}': original[f'id:c{i}'] for i in range(count)}
+        assert batches == [SAVE_BATCH, SAVE_BATCH, 3]
+        rows = admin.list_muxes(source.network_uuid, fields=('scan_state', 'iptv_url'))
+        assert len(rows) == count
+        assert all(row['scan_state'] == 0 and '/new/' in row['iptv_url'] for row in rows)
 
 def _channels(port):
     return {row['name']: row for row in _api(port, 'channel/grid?limit=1000')['entries']}

@@ -33,7 +33,8 @@ try:
     from .core.errors import TvhError
     from .core.guide_feeds import UPDATE_HOURS, GuideError, build_index, find_guides, guide_name, is_web_address
     from .core.guide_match import Choice, assign, main_region
-    from .core.guide_update import server_channels, update_server_guide
+    from .core.guide_update import server_channels
+    from .core.guide_process import run_guide_update
     from .core.playlist_sync import error_message, server_key
     from .core.proxy import configure_session
     from .core.tvh_admin import TvhAdmin
@@ -43,7 +44,8 @@ except ImportError:
     from core.errors import TvhError
     from core.guide_feeds import UPDATE_HOURS, GuideError, build_index, find_guides, guide_name, is_web_address
     from core.guide_match import Choice, assign, main_region
-    from core.guide_update import server_channels, update_server_guide
+    from core.guide_update import server_channels
+    from core.guide_process import run_guide_update
     from core.playlist_sync import error_message, server_key
     from core.proxy import configure_session
     from core.tvh_admin import TvhAdmin
@@ -56,6 +58,34 @@ SOURCES_HELP = (
     'when its guide ID is in one; others can be matched by name under Match Channels.'
 )
 TEXT_TIMEOUT = (30, 120)
+
+# Workers of closed dialogs, kept until they return: Qt must not destroy a running thread.
+_LEFT_RUNNING = set()
+
+
+def _let_finish(task):
+    """Leave a closed dialog's worker to finish by itself, its answer unused.
+
+    Closing waited for the server to answer, up to 15 seconds, with the
+    whole app frozen.
+    """
+    if task is None or not task.isRunning():
+        return
+    for signal in (task.status, task.progress, task.succeeded, task.failed):
+        try:
+            signal.disconnect()
+        except TypeError:
+            pass
+    task.setParent(None)
+    _LEFT_RUNNING.add(task)
+
+
+    def gone():
+        # Finished is sent just before the thread ends; the wait is a moment at most.
+        task.wait()
+        _LEFT_RUNNING.discard(task)
+
+    task.finished.connect(gone)
 
 
 def _ago(stamp, now=None):
@@ -154,12 +184,11 @@ class GuideJob(QObject):
         force = self.force
 
         def work(task):
-            with TvhAdmin(server) as admin:
-                report = update_server_guide(
-                    admin, server, cache, sources, choices, force,
-                    status=task.status.emit, progress=task.progress.emit,
-                    cancelled=lambda: self._cancelled,
-                )
+            report = run_guide_update(
+                server, cache, sources, choices, force,
+                status=task.status.emit, progress=task.progress.emit,
+                cancelled=lambda: self._cancelled,
+            )
             return report, sources
 
         task = _Task(work, self)
@@ -594,9 +623,7 @@ class FindGuidesDialog(QDialog):
 
     def done(self, result):
         self._cancelled = True
-        task = self._task
-        if task is not None and task.isRunning():
-            task.wait(15000)
+        _let_finish(self._task)
         super().done(result)
 
 
@@ -953,7 +980,5 @@ class MatchChannelsDialog(QDialog):
             announce_label(self.status_label, 'No guide channel has that name or ID.')
 
     def done(self, result):
-        task = self._task
-        if task is not None and task.isRunning():
-            task.wait(15000)
+        _let_finish(self._task)
         super().done(result)

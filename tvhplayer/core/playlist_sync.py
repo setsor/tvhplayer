@@ -5,10 +5,9 @@ without a scan (Service ID 1), and the network's bouquet maps them to
 channels. An entry keeps its mux across refreshes through its key, so a
 changed stream address or name edits the channel instead of replacing it.
 
-Tvheadend still scans each new mux once, and a refresh scans the muxes
-whose stream address changed. Only a mux whose scan passed keeps its
-service enabled; disabling a service makes the bouquet delete its channel,
-so dead streams never show. Checking a playlist scans all its muxes again.
+Imports and refreshes can skip stream checks. An explicit playlist check
+scans all its muxes. Failed services can then be disabled, making the
+bouquet remove their channels; untested channels remain visible.
 
 Tvheadend 4.2 has no network bouquet, so there TVHplayer does its work:
 ``map_channels`` gives each enabled service a channel and deletes the
@@ -571,6 +570,56 @@ def mux_conf(plan: ChannelPlan) -> dict:
     }
 
 
+
+def _reuse_xtream_muxes(source: PlaylistSource, plans, rows) -> bool:
+    """Keep a renamed XC stream's mux when its old and new keys differ.
+
+    EPG IDs and display names can change between provider mirrors. The
+    account's stream ID is a better fallback, but only when it identifies
+    exactly one saved mux and one incoming channel. Never cross playlists.
+    """
+    if source.source_type != 'xc':
+        return False
+    wanted = {plan.key for plan in plans}
+    if not (set(source.muxes) - wanted) or all(plan.key in source.muxes for plan in plans):
+        return False
+
+    def stream_id(url):
+        address, _headers = _stream_source(url)
+        match = _XTREAM_STREAM.match(address)
+        if match is None or match['kind'] != 'live':
+            return None
+        # XC exposes the same numeric ID with .ts or .m3u8 playback.
+        number = match['rest'].split('.', 1)[0]
+        return number if number.isascii() and number.isdigit() else None
+
+    old_by_id = {}
+    new_by_id = {}
+    for key, uuid in source.muxes.items():
+        ident = stream_id(rows[uuid].get('iptv_url', ''))
+        if ident is not None:
+            old_by_id.setdefault(ident, []).append(key)
+    for plan in plans:
+        ident = stream_id(plan.url)
+        if ident is not None:
+            new_by_id.setdefault(ident, []).append(plan.key)
+
+    moved = {}
+    for ident, new_keys in new_by_id.items():
+        old_keys = old_by_id.get(ident, [])
+        if len(old_keys) != 1 or len(new_keys) != 1:
+            continue
+        old, new = old_keys[0], new_keys[0]
+        if old in wanted or new in source.muxes:
+            continue
+        source.muxes[new] = source.muxes.pop(old)
+        if old in source.health:
+            source.health[new] = source.health.pop(old)
+        moved[old] = new
+    if moved:
+        source.left_out = [moved.get(key, key) for key in source.left_out]
+    return bool(moved)
+
 def sync_playlist(
     admin,
     source: PlaylistSource,
@@ -589,7 +638,8 @@ def sync_playlist(
     reads the verdicts the server has; the others keep their last verdict
     until the playlist is checked. With ``hide`` too, channels known not to
     work are hidden, and without it every channel is shown. Without
-    ``check`` visibility is left alone.
+    ``check`` visibility is left alone and previously queued stream checks
+    are cancelled before updating the playlist.
     ``source`` is updated in place. ``checkpoint`` is called whenever its
     mux map changed, so a cancelled or failed import leaves the saved map
     matching the server.
@@ -618,11 +668,16 @@ def sync_playlist(
     bouquets = admin.has_network_bouquets(source.network_uuid)
 
     rows = {
-        row['uuid']: row for row in admin.list_muxes(source.network_uuid, fields=MUX_CONF_FIELDS) if row.get('uuid')
+        row['uuid']: row
+        for row in admin.list_muxes(source.network_uuid, fields=(*MUX_CONF_FIELDS, 'scan_state'))
+        if row.get('uuid')
     }
     known = {key: uuid for key, uuid in source.muxes.items() if uuid in rows}
     if known != source.muxes:
         source.muxes = known
+        checkpoint()
+
+    if _reuse_xtream_muxes(source, plans, rows):
         checkpoint()
 
     # Muxes in this network the saved map lost: an import that stopped before
@@ -646,6 +701,20 @@ def sync_playlist(
             admin.delete(leftover)
             result.removed += len(leftover)
         checkpoint()
+
+    if not check:
+        # A stopped import/refresh can leave thousands of scans queued on the
+        # server. Merely declining to enqueue more does not stop that work.
+        pending = [
+            {'uuid': uuid, 'scan_state': SCAN_IDLE}
+            for uuid in source.muxes.values()
+            if rows[uuid].get('scan_state', SCAN_IDLE) != SCAN_IDLE
+        ]
+        for start in range(0, len(pending), SAVE_BATCH):
+            if cancelled():
+                result.cancelled = True
+                return result
+            admin.save(pending[start:start + SAVE_BATCH])
 
     wanted = {plan.key for plan in plans}
     stale = [key for key in source.muxes if key not in wanted]
@@ -679,7 +748,7 @@ def sync_playlist(
         if uuid:
             if _differs(conf, rows[uuid]):
                 changes.append(dict(conf, uuid=uuid))
-                if _stream_source(conf['iptv_url']) != _stream_source(rows[uuid].get('iptv_url', '')):
+                if check and _stream_source(conf['iptv_url']) != _stream_source(rows[uuid].get('iptv_url', '')):
                     retest.append(uuid)
         else:
             source.muxes[plan.key] = admin.create_mux(source.network_uuid, conf)
@@ -691,14 +760,16 @@ def sync_playlist(
             checkpoint()
             created_since_checkpoint = 0
             last_checkpoint = now
-        # Changes reach the server in batches during the walk, and progress
-        # counts only what is there. Progress goes out once a batch or every
-        # PROGRESS_SECONDS, so a slow walk moves and a fast one does not
-        # flood the window with updates.
-        if done % SAVE_BATCH == 0 or now - last_progress >= PROGRESS_SECONDS:
+        # Flush edits by size even when processing is slow. Report completed
+        # work separately: a partial edit batch must not suppress progress
+        # while genuinely new channels are being created one at a time.
+        flushed = len(changes) >= SAVE_BATCH
+        if flushed:
             save_changes()
-            progress(done, total)
-            last_progress, reported = now, done
+        completed = done - len(changes)
+        if completed > reported and (flushed or now - last_progress >= PROGRESS_SECONDS):
+            progress(completed, total)
+            last_progress, reported = clock(), completed
     if created_since_checkpoint:
         checkpoint()
 

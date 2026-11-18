@@ -1,6 +1,9 @@
 # Proposal: Keep the built-in server running in the background
 
-- **Status:** Proposed; not implemented.
+- **Status:** Close-to-background implementation added; platform acceptance pending.
+  See [implemented behavior and validation](../background-mode.md). App login
+  startup is also implemented, off by default. Headless startup, controller
+  extraction, and periodic Windows snapshots remain future work.
 - **Date:** 2026-11-06
 - **Baseline:** v4.6.1, including the Windows startup and settings-storage changes.
 - **Decision:** Add an optional desktop background mode for Windows and Linux,
@@ -23,7 +26,7 @@ This proposal changes the relationship between the window and the app-owned
 server. It does not change ownership of user-added local or remote servers, add
 network exposure, or implement a macOS backend.
 
-## Current implementation
+## Original implementation (proposal baseline)
 
 The main window currently owns most application work. Its `closeEvent` saves
 configuration, calls `builtin.shut_down()`, cancels jobs, releases sleep
@@ -62,13 +65,13 @@ the built-in server settings:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | Start with TVHplayer | Existing preference | Start the server when the app starts normally. |
-| Keep the server running when the window closes | Off | Closing the player window leaves the app supervising the running server. |
-| Start the server in the background at login | Off | Request platform autostart without opening the player window. Requires background mode. |
+| Keep the server running when the window closes | On | Closing the player window leaves the app supervising the running server. |
+| Start TVHplayer at login | Off | Start the app at login. Server startup follows its separate Start with TVHplayer preference. |
 
-Enabling login startup must explain and enable the required server/background
-preferences together. Disabling background mode must also remove the app's login
-startup registration, or clearly require that dependent option to be disabled.
-Registration failure must not leave the checkbox claiming success.
+App login startup is independent of server startup and close behavior. A login
+launch stays hidden where permitted, and Flatpak can fall back to a visible
+window if only autostart is granted. Registration failure must not leave the
+checkbox claiming success. See the implementation document for current behavior.
 
 Close and quit have distinct behavior:
 
@@ -290,8 +293,9 @@ stable. Exactly one manager may own a given server/configuration at a time.
    Linux systemd service support. Neither blocks the initial platform rollout.
 
 These are dependency steps, not a promise to ship partially tested background
-mode. The capability remains off by default until its platform acceptance checks
-pass. The v4.6.1 startup release does not implicitly include this proposal.
+mode. Close-to-background is enabled by default, with Flatpak permission required
+before hiding. Platform acceptance checks remain required before release. The
+v4.6.1 startup release does not implicitly include this proposal.
 
 ## Acceptance checks
 

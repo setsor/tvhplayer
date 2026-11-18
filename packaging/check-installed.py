@@ -38,13 +38,26 @@ sys.path.insert(0, str(APP_DIR))
 modules = [
     'tvhplayer', 'builtin_supervisor', 'a11y', 'file_manager', 'player_bar', 'settings_dialog', 'settings_widgets',
     'sleep_inhibit', 'setup_wizard', 'guide_dialogs', 'ui_theme', 'about_dialog', 'system_color_scheme', 'cursor_debug',
-    'window_frame',
+    'window_frame', 'squeeze',
 ]
 modules += [f'core.{path.stem}' for path in sorted((APP_DIR / 'core').glob('*.py')) if path.stem != '__init__']
 for name in modules:
     module = importlib.import_module(name)
     if not str(getattr(module, '__file__', '')).startswith(str(APP_DIR)):
         sys.exit(f'Imported {name} from {module.__file__}, not the installed package')
+
+# htsmsg silently falls back to Python when an extension targets another ABI.
+# A package must carry a working decoder for the interpreter it depends on.
+from core import htsmsg  # noqa: E402
+
+if htsmsg._native is None:
+    sys.exit('The packaged C decoder could not be loaded by this Python')
+if not Path(htsmsg._native.__file__).is_relative_to(APP_DIR):
+    sys.exit(f'Loaded C decoder from {htsmsg._native.__file__}, not the installed package')
+message = {'channelName': 'Test ✓', 'channelNumber': -1, 'tags': [1, 2]}
+body = htsmsg.serialize(message)[4:]
+if htsmsg._native.deserialize(body, False) != message:
+    sys.exit('The packaged C decoder failed to decode an HTSP message')
 
 try:
     import pychromecast  # noqa: F401

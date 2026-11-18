@@ -1,8 +1,8 @@
 # The built-in server. These pins match packaging/tvheadend/pins.env;
 # tests/test_packaging_pins.py fails when they disagree.
 %global tvh_repo https://github.com/mfat/tvheadend
-%global tvh_commit 57610597563a3f49ac1d132c4735cb0bee6d4364
-%global tvh_version 4.3^2908.g576105975
+%global tvh_commit 21bc3036d986f403b8e7a9ab1662fbd42e0ecfdd
+%global tvh_version 4.3^2920.g21bc3036d
 %global scan_commit 31d6fb8f8b86e204518ada99bfb8cf6807c717e5
 %global dvbcsa_version 1.1.0
 %global hdhomerun_version 20250815
@@ -11,7 +11,7 @@
 %global mpv_wheel_sha256 dcf77f612e3f5ce49bd89393f37d286de7ac290db6b0800f1fdcfe0aeb5ba9b8
 
 Name:           tvhplayer
-Version:        4.6.7
+Version:        4.7.5
 Release:        1%{?dist}
 Summary:        Tvheadend desktop client with a built-in server
 
@@ -119,6 +119,31 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.mfat.tvhpla
 %{_metainfodir}/io.github.mfat.tvhplayer.metainfo.xml
 
 %changelog
+* Wed Nov 18 2026 mFat <newmfat@gmail.com> - 4.7.5-1
+- Performance improvements
+
+* Tue Nov 17 2026 mFat <newmfat@gmail.com> - 4.7.4-1
+- Adds system tray and a run in background option
+- Bug fixes
+
+* Mon Nov 16 2026 mFat <newmfat@gmail.com> - 4.7.3-1
+- Faster IPTV stream initialization
+
+* Mon Nov 16 2026 mFat <newmfat@gmail.com> - 4.7.2-1
+- Stability and performance improvements
+
+* Mon Nov 16 2026 mFat <newmfat@gmail.com> - 4.7.1-1
+- Bug fixes and performance improvements
+
+* Mon Nov 16 2026 mFat <newmfat@gmail.com> - 4.7.0-1
+- Bug fixes
+
+* Sun Nov 15 2026 mFat <newmfat@gmail.com> - 4.6.9-1
+- Fix EPG grabber locking builtin server
+
+* Sun Nov 15 2026 mFat <newmfat@gmail.com> - 4.6.8-1
+- Fix EPG grabber locking builtin server
+
 * Sun Nov 15 2026 mFat <newmfat@gmail.com> - 4.6.7-1
 - Performance improvements.
 - Better handling of large playlists.

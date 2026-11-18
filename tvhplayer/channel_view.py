@@ -45,6 +45,7 @@ try:
         progress,
     )
     from .core.backend import channel_sort_key
+    from .core.channel_edit import number_text
     from .core.config import default_cache_dir
     from .core.proxy import configure_session
     from .core.urls import http_auth
@@ -65,6 +66,7 @@ except ImportError:
         progress,
     )
     from core.backend import channel_sort_key
+    from core.channel_edit import number_text
     from core.config import default_cache_dir
     from core.proxy import configure_session
     from core.urls import http_auth
@@ -384,14 +386,16 @@ class ChannelTableModel(QAbstractTableModel):
         for position, channel, _old in updates:
             self._channels[position] = channel
             self._logo_refs[position] = refs.get(self._keys[position], '')
-            try:
-                rows.append(self._rows.index(position))
-            except ValueError:
-                # Not shown: the search or group leaves it out.
-                pass
+            row = self._row_of_position(position)
+            # -1: not shown, the search or group leaves it out.
+            if row >= 0:
+                rows.append(row)
         last = len(COLUMN_TITLES) - 1
-        for row in rows:
-            self.dataChanged.emit(self.index(row, 0), self.index(row, last), [])
+        if rows:
+            # A guide import can update thousands of rows per batch. One
+            # signal per row made Qt spend the whole UI turn handling model
+            # notifications. A range lets the view schedule one repaint.
+            self.dataChanged.emit(self.index(min(rows), 0), self.index(max(rows), last), [])
         return True
 
     def set_filter(self, search, members=None):
@@ -531,7 +535,7 @@ class ChannelTableModel(QAbstractTableModel):
         if column == COL_NAME:
             return channel.name
         if column == COL_NUMBER:
-            return channel.number
+            return number_text(channel)
         if column == COL_STATUS:
             return self._status(position)
         if column in (COL_NOW, COL_NEXT):
@@ -575,7 +579,7 @@ class ChannelTableModel(QAbstractTableModel):
                 return NOT_WORKING_TIP
             return None
         if column == COL_NUMBER:
-            return f'Channel {channel.number}' if role == _ACCESSIBLE_TEXT else 'Channel number'
+            return f'Channel {number_text(channel)}' if role == _ACCESSIBLE_TEXT else 'Channel number'
         if column == COL_NAME:
             if role == _ACCESSIBLE_TEXT:
                 return channel.name
@@ -599,7 +603,8 @@ class ChannelTableModel(QAbstractTableModel):
     def _sort_value(self, position):
         column = self._sort_column
         if column == COL_NUMBER:
-            return self._channels[position].number or 0
+            channel = self._channels[position]
+            return (channel.number or 0, channel.number_minor or 0)
         value = self._display(position, column)
         return str(value or '').casefold()
 
@@ -608,10 +613,20 @@ class ChannelTableModel(QAbstractTableModel):
         position = getattr(self, '_position_by_key', {}).get(key)
         if position is None:
             return -1
-        try:
-            return self._rows.index(position)
-        except ValueError:
-            return -1
+        return self._row_of_position(position)
+
+    def _row_of_position(self, position):
+        """Row showing the channel at ``position`` in _channels, or -1.
+
+        Looking through the rows took close to a second for 2,000 programme
+        changes on 60,000 channels, as on the hour. The map is made again
+        whenever the rows are, which always gives a new list.
+        """
+        cache = getattr(self, '_row_map', None)
+        if cache is None or cache[0] is not self._rows:
+            cache = (self._rows, {p: row for row, p in enumerate(self._rows)})
+            self._row_map = cache
+        return cache[1].get(position, -1)
 
     def _sorted(self, positions):
         positions = list(positions)
@@ -639,7 +654,7 @@ class ChannelTableModel(QAbstractTableModel):
                 continue
             if search:
                 channel = channels[position]
-                if search not in channel.name.lower() and search not in str(channel.number).lower():
+                if search not in channel.name.lower() and search not in number_text(channel):
                     continue
             kept.append(position)
         return kept

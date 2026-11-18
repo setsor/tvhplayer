@@ -170,7 +170,9 @@ class PlaylistJob(QObject):
     playlist; ``previous`` is the source as it was).
     ``replaces`` is the saved source a SYNC takes the place of when its
     address or account changed. It is replaced once the playlist has been
-    read from the new address, so an address that does not work changes nothing. A sync and a check
+    read from the new address, so an address that does not work changes nothing.
+    Refreshing or moving an existing playlist updates it without testing every stream;
+    use CHECK to test its addresses separately. First imports and explicit checks
     both wait for the server's stream test and save its verdicts, which the
     channel list marks; channels that fail are hidden too while the host
     hides them.
@@ -194,6 +196,7 @@ class PlaylistJob(QObject):
         super().__init__(parent)
         self._previous = previous
         self._replaces = replaces
+        self._check_streams = action == self.CHECK
         self._host = host
         self.source = source
         self.server = server
@@ -271,6 +274,8 @@ class PlaylistJob(QObject):
 
     def _server_ready(self, server):
         self.server = server
+        # Stream checks run only when explicitly requested.
+        self._check_streams = self.action == self.CHECK
         if self._cancelled:
             self._stop_with('Import stopped.')
             return
@@ -328,7 +333,7 @@ class PlaylistJob(QObject):
         if self._choose is not None and self._plans and not self._choose(self._plans, self.source):
             self._stop_with('Nothing was changed.')
             return
-        self.status.emit('Adding channels…')
+        self.status.emit('Adding channels…' if self._first_import else 'Updating channels…')
         self._run(self._sync, self._synced)
 
     def _sync(self, task):
@@ -351,7 +356,7 @@ class PlaylistJob(QObject):
                 progress=task.progress.emit,
                 cancelled=lambda: self._cancelled,
                 checkpoint=lambda: task.checkpoint.emit(source.to_dict()),
-                check=True,
+                check=self._check_streams,
                 hide=self._hides_failed(),
             )
             result.films = self._playlist.films
@@ -373,7 +378,7 @@ class PlaylistJob(QObject):
         if self.action == self.SYNC and not result.cancelled:
             guide_url = self._playlist.guide_url if self._playlist is not None else ''
             self._host.after_playlist_sync(self.server, self.source, guide_url, result)
-        if result.cancelled:
+        if result.cancelled or not self._check_streams:
             self._checked(result)
             return
         self._checking = True
@@ -411,6 +416,11 @@ class PlaylistJob(QObject):
             message = check_message(self.source.name, result)
         else:
             message = result_message(self.source.name, result, self._first_import)
+            if not self._check_streams and not result.cancelled and not self._first_import:
+                message += (
+                    ' Stream checks were skipped. To test the channels, choose '
+                    'Settings → Channels → Check channels now.'
+                )
         self.finished.emit(message, result.skipped)
 
     def _start_check(self, _task):
@@ -798,9 +808,7 @@ def show_skipped(parent, skipped):
     box.exec()
 
 
-def check_hint(hides: bool) -> str:
-    fate = 'are hidden' if hides else 'are marked'
-    return f'Channels were imported successfully. Those that do not work {fate} as the check finds them. You can close this window; checking goes on.'
+CHECK_HINT = 'Channels were imported successfully. You can close this window now; checking goes on in background.'
 
 
 class ImportPlaylistDialog(QDialog):
@@ -973,7 +981,7 @@ class ImportPlaylistDialog(QDialog):
         self.progress_bar.hide()
         describe(self.progress_bar, 'Import progress')
         layout.addWidget(self.progress_bar)
-        self.hint_label = QLabel(check_hint(True))
+        self.hint_label = QLabel(CHECK_HINT)
         self.hint_label.setWordWrap(True)
         self.hint_label.hide()
         layout.addWidget(self.hint_label)
@@ -1149,7 +1157,6 @@ class ImportPlaylistDialog(QDialog):
         self._show_check_hint()
 
     def _show_check_hint(self):
-        self.hint_label.setText(check_hint(self._host.hides_dead_channels()))
         self.hint_label.show()
 
     def _finished(self, message, skipped):
@@ -1282,7 +1289,7 @@ class PlaylistsDialog(QDialog):
         self.progress_bar.hide()
         describe(self.progress_bar, 'Progress')
         detail.addWidget(self.progress_bar)
-        self.hint_label = QLabel(check_hint(True))
+        self.hint_label = QLabel(CHECK_HINT)
         self.hint_label.setWordWrap(True)
         self.hint_label.hide()
         detail.addWidget(self.hint_label)
@@ -1303,6 +1310,7 @@ class PlaylistsDialog(QDialog):
 
         self.server_list.currentRowChanged.connect(lambda _row: self._show_server())
         self.playlist_list.currentRowChanged.connect(lambda _row: self._sync_buttons())
+        self.playlist_list.itemDoubleClicked.connect(lambda _item: self.edit_btn.click())
         self._load()
         # Updates started elsewhere (at startup, from Settings, or by an import
         # window that was closed) end on their own; follow them.
@@ -1530,7 +1538,6 @@ class PlaylistsDialog(QDialog):
         self._sync_buttons()
 
     def _show_check_hint(self):
-        self.hint_label.setText(check_hint(self._host.hides_dead_channels()))
         self.hint_label.show()
 
     def _progress(self, done, total):

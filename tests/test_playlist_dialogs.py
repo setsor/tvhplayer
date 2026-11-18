@@ -278,7 +278,10 @@ def test_import_again_refreshes_the_same_playlist(app, tmp_path):
     _run(app, dialog)
     _run(app, dialog)
     assert len(host.stored) == 1
-    assert dialog.status_label.text() == 'The channels from news are up to date.'
+    assert dialog.status_label.text() == (
+        'The channels from news are up to date. Stream checks were skipped. '
+        'To test the channels, choose Settings → Channels → Check channels now.'
+    )
 
 
 def test_xtream_provider_and_headers_reuse_the_playlist_pipeline(app, monkeypatch):
@@ -414,6 +417,37 @@ def _wait_job(app, dialog, timeout=10):
         app.processEvents()
 
 
+@pytest.mark.parametrize('state', ['ready', 'busy', 'removed_server'])
+def test_playlist_double_click_opens_editor_when_edit_is_available(app, monkeypatch, state):
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtTest import QTest
+
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    server = 'http://gone' if state == 'removed_server' else 'builtin'
+    sources = [PlaylistSource(name, f'http://example.com/{name}.m3u', server) for name in ('one', 'two')]
+    host.stored = [source.to_dict() for source in sources]
+    if state == 'busy':
+        host.busy.add(source_key(sources[1]))
+    opened = []
+    monkeypatch.setattr(
+        dialogs.ImportPlaylistDialog, 'exec',
+        lambda editor: opened.append((editor.windowTitle(), editor._source.location, editor._server)),
+    )
+    dialog = dialogs.PlaylistsDialog(host)
+    if state == 'removed_server':
+        dialog.server_list.setCurrentRow(1)
+    dialog.show()
+    app.processEvents()
+    try:
+        item = dialog.playlist_list.item(1)
+        position = dialog.playlist_list.visualItemRect(item).center()
+        QTest.mouseClick(dialog.playlist_list.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        QTest.mouseDClick(dialog.playlist_list.viewport(), Qt.MouseButton.LeftButton, pos=position)
+        assert opened == ([('Edit Source', sources[1].location, BUILTIN)] if state == 'ready' else [])
+    finally:
+        dialog.close()
+
+
 def test_playlists_dialog_refreshes_and_removes(app, tmp_path, monkeypatch):
     removed = []
     monkeypatch.setattr(dialogs, 'remove_playlist', lambda _admin, source: removed.append(source.name))
@@ -425,11 +459,14 @@ def test_playlists_dialog_refreshes_and_removes(app, tmp_path, monkeypatch):
     dialog = dialogs.PlaylistsDialog(host)
     assert dialog.playlist_list.count() == 1
     assert dialog.playlist_list.item(0).text() == 'news'
-    assert dialog.health_label.text().startswith('Stream health: 2 working')
+    assert dialog.health_label.text().startswith('Stream health: 2 untested')
     assert dialog.health_btn.isEnabled()
     dialog.refresh_btn.click()
     _wait_job(app, dialog)
-    assert dialog.status_label.text() == 'The channels from news are up to date.'
+    assert dialog.status_label.text() == (
+        'The channels from news are up to date. Stream checks were skipped. '
+        'To test the channels, choose Settings → Channels → Check channels now.'
+    )
 
     monkeypatch.setattr(
         dialogs.QMessageBox, 'question', lambda *_args, **_kwargs: dialogs.QMessageBox.StandardButton.Yes
@@ -480,56 +517,32 @@ def test_a_server_on_this_computer_gets_the_guide_as_a_guide_source(app, tmp_pat
     assert host.synced == [(BUILTIN['url'], 'news', 'http://127.0.0.1:1/guide.xml', 2)]
 
 
-def test_job_says_when_only_the_stream_test_is_left(app, tmp_path):
-    host = FakeHost([BUILTIN], current=BUILTIN)
-    source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
-    job = dialogs.PlaylistJob(host, source, BUILTIN)
-    events = []
-    job.checking.connect(lambda: events.append('checking'))
-    job.finished.connect(lambda message, _skipped: events.append(message))
-    job.start()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and job.is_running():
-        app.processEvents()
-        time.sleep(0.02)
-    app.processEvents()
-    assert events == ['checking', 'Updated the channels from news: 2 added.']
-
-
-def test_closing_while_checking_hands_the_job_to_the_host(app, tmp_path, monkeypatch):
-    class SlowScan(FakeAdmin):
+@pytest.mark.parametrize('hide_dead', [False, True])
+def test_import_finishes_without_testing_streams(app, tmp_path, monkeypatch, hide_dead):
+    class Unscanned(FakeAdmin):
         def create_mux(self, network_uuid, conf):
             uuid = super().create_mux(network_uuid, conf)
-            self.muxes[uuid].update(scan_state=1, scan_result=0)
+            self.muxes[uuid].update(scan_state=0, scan_result=0)
             return uuid
 
-    monkeypatch.setattr(dialogs, 'TvhAdmin', SlowScan)
-    host = FakeHost([BUILTIN], current=BUILTIN)
-    dialog = dialogs.ImportPlaylistDialog(host)
-    dialog.location_input.setText(_playlist(tmp_path, TWO))
-    dialog.import_btn.click()
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and dialog.hint_label.isHidden():
-        app.processEvents()
-        time.sleep(0.02)
-    assert dialog.hint_label.text() == dialogs.check_hint(host.hides_dead_channels())
-    assert dialog.close_btn.text() == 'Close'
+        def scan_network(self, _network_uuid):
+            pytest.fail('Import must not scan the playlist')
 
-    job = dialog._job
-    finished = []
-    dialog.close_btn.click()
-    assert host.kept == [job]
-    assert dialog._job is None
-    assert job.is_checking()
-    job.finished.connect(lambda message, _skipped: finished.append(message))
-    for mux in FakeAdmin.servers[BUILTIN['url']]['muxes'].values():
-        mux.update(scan_state=0, scan_result=1)
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and job.is_running():
-        app.processEvents()
-        time.sleep(0.02)
-    app.processEvents()
-    assert finished == ['Added 2 channels from news.']
+    monkeypatch.setattr(dialogs, 'TvhAdmin', Unscanned)
+    monkeypatch.setattr(dialogs, 'wait_for_checks', lambda *_a, **_kw: pytest.fail('Unexpected checks'))
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    host.hide_dead = hide_dead
+    source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
+    job = dialogs.PlaylistJob(host, source, BUILTIN, first_import=True)
+    assert _finish(app, job) == ['Added 2 channels from news.']
+    stored = PlaylistSource.from_dict(host.stored[-1])
+    assert len(stored.muxes) == 2
+    assert stored.health == {}
+    assert stored.health_totals['untested'] == 2
+    assert stored.last_checked == 0
+    network = FakeAdmin.servers[BUILTIN['url']]['networks']['net']
+    assert network['scan_create'] is False
+    assert network['skipinitscan'] is True
 
 
 def _finish(app, job, timeout=10):
@@ -565,14 +578,15 @@ class _OneDead(FakeAdmin):
         _OneDead.hidden.extend(node['uuid'] for node in nodes if node.get('enabled') is False)
 
 
-def test_import_without_hiding_still_tests_and_marks_failures(app, tmp_path, monkeypatch):
+def test_manual_check_without_hiding_tests_and_marks_failures(app, tmp_path, monkeypatch):
     monkeypatch.setattr(dialogs, 'TvhAdmin', _OneDead)
     _OneDead.hidden = []
     host = FakeHost([BUILTIN], current=BUILTIN)
     host.hide_dead = False
     source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
-    events = _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True))
-    assert events == ['checking', 'Added 2 channels from news. 1 is marked in the channel list because it is not working.']
+    _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True))
+    events = _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, action=dialogs.PlaylistJob.CHECK))
+    assert events == ['checking', 'Checked the channels from news: 1 working. 1 is marked in the channel list because it is not working.']
     assert _OneDead.hidden == []
     health = PlaylistSource.from_dict(host.stored[-1]).health
     assert [item['channels'] for item in health.values() if item['status'] == 'failed'] == [['cm2']]
@@ -589,7 +603,8 @@ def test_turning_hiding_off_during_the_test_marks_instead(app, tmp_path, monkeyp
     SlowScan.hidden = []
     host = FakeHost([BUILTIN], current=BUILTIN)
     source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
-    job = dialogs.PlaylistJob(host, source, BUILTIN, first_import=True)
+    _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True))
+    job = dialogs.PlaylistJob(host, source, BUILTIN, action=dialogs.PlaylistJob.CHECK)
 
     def finish_scans():
         host.hide_dead = False
@@ -598,7 +613,7 @@ def test_turning_hiding_off_during_the_test_marks_instead(app, tmp_path, monkeyp
 
     job.checking.connect(finish_scans)
     events = _finish(app, job)
-    assert events == ['checking', 'Added 2 channels from news. 1 is marked in the channel list because it is not working.']
+    assert events == ['checking', 'Checked the channels from news: 1 working. 1 is marked in the channel list because it is not working.']
     assert SlowScan.hidden == []
 
 
@@ -848,9 +863,12 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     assert host.updates is False
     dialog.updates_btn.click()
     assert host.update_checks == 1
-    # Appearance comes first and Settings opens on it.
-    assert dialog.nav.item(0).text() == 'Appearance'
-    assert dialog.pages.currentWidget().widget().findChild(QLabel, 'pageTitle').text() == 'Appearance'
+    # General opens first; Appearance controls remain available on the next page.
+    assert dialog.nav.item(0).text() == 'General'
+    assert dialog.pages.currentWidget().widget().findChild(QLabel, 'pageTitle').text() == 'General'
+    from tvhplayer.settings_widgets import StatusStrip
+    assert not dialog.findChildren(StatusStrip)
+    dialog.nav.setCurrentRow(1)
     assert dialog.title_bar_check.isVisibleTo(dialog)
     assert dialog._title_bar_row.description.text() == 'Takes effect the next time TVHplayer starts.'
     assert dialog.title_bar_check.accessibleDescription() == 'Takes effect the next time TVHplayer starts.'
@@ -876,7 +894,6 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     assert dialog.mark_check.isChecked()
     dialog.mark_check.click()
     assert host.mark is False
-    assert dialog.status_label.text() == 'Channels that do not work are no longer marked.'
     dialog.mark_check.click()
     assert host.mark is True
     assert not dialog.play_check.isChecked()
@@ -921,9 +938,9 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     host.picons = 24054
     host.picon_job.finished.emit(None, '')
     assert dialog.picon_btn.text() == 'Up&date Picons'
-    assert dialog.picon_status.text().startswith('24,054 picons are ready.')
+    assert dialog.picon_btn.toolTip().startswith('24,054 picons are ready.')
     dialog.picon_remove_btn.click()
-    assert dialog.picon_status.text() == 'No picons downloaded.'
+    assert dialog.picon_btn.toolTip() == 'No picons downloaded.'
     assert (dialog.early_spin.value(), dialog.late_spin.value(), dialog.space_spin.value()) == (2, 5, 5)
     dialog.late_spin.setValue(10)
     dialog.space_spin.setValue(0)
@@ -937,11 +954,11 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     dialog.options_edit.setText('-metadata "title=unclosed')
     dialog._options_edited()
     assert not hasattr(host, 'options')
-    assert 'not saved' in dialog.options_status.text()
+    assert 'not saved' in dialog.options_edit.toolTip()
     dialog.options_edit.setText(' -b:a 128k ')
     dialog._options_edited()
     assert host.options == '-b:a 128k'
-    assert dialog.options_status.text() == ''
+    assert 'not saved' not in dialog.options_edit.toolTip()
 
     assert not dialog.delete_check.isEnabled()
     dialog.convert_check.click()
@@ -951,21 +968,20 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     dialog.convert_edit.setText('-c:v nope')
     dialog._convert_edited()
     assert host.convert_text == '-c:v nope'
-    assert 'no nope encoder' in dialog.convert_status.text()
+    assert 'no nope encoder' in dialog.convert_edit.toolTip()
     dialog.convert_edit.setText('')
     dialog._convert_edited()
     assert host.convert_text == ''
     assert dialog.convert_edit.text() == '-c:v libx264 -crf 18'
-    assert dialog.convert_status.text() == ''
+    assert 'no nope encoder' not in dialog.convert_edit.toolTip()
     dialog.hide_check.click()
     assert host.hide is False
-    assert 'shown again' in dialog.status_label.text()
     dialog.check_btn.click()
     assert host.checks == 1
-    assert dialog.status_label.text() == 'There are no imported playlists to check.'
+    assert dialog.check_btn.toolTip() == 'There are no imported playlists to check.'
     host.sources = [PlaylistSource('old', 'http://x/old.m3u', 'http://gone')]
     dialog.check_btn.click()
-    assert dialog.status_label.text() == 'The server of 1 playlist was removed, so it cannot be checked.'
+    assert dialog.check_btn.toolTip() == 'The server of 1 playlist was removed, so it cannot be checked.'
 
 
 def test_a_playlist_being_updated_cannot_be_refreshed(app, tmp_path):
@@ -1008,7 +1024,8 @@ def test_removing_a_playlist_being_updated_stops_the_update_first(app, tmp_path,
     monkeypatch.setattr(dialogs.QMessageBox, 'question', yes)
     host = FakeHost([BUILTIN], current=BUILTIN)
     source = PlaylistSource('news', _playlist(tmp_path, TWO), 'builtin')
-    job = dialogs.PlaylistJob(host, source, BUILTIN, first_import=True)
+    _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True))
+    job = dialogs.PlaylistJob(host, source, BUILTIN, action=dialogs.PlaylistJob.CHECK)
     host.kept.append(job)
     job.start()
     deadline = time.monotonic() + 10
@@ -1183,7 +1200,7 @@ def test_job_adds_only_the_chosen_channels(app, tmp_path):
         return True
 
     events = _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True, choose=keep_news))
-    assert events == ['checking', 'Added 2 channels from news.']
+    assert events == ['Added 2 channels from news.']
     stored = PlaylistSource.from_dict(host.stored[-1])
     assert stored.chosen_groups == ['News']
     assert sorted(stored.muxes) == ['name:A', 'name:B']
@@ -1298,6 +1315,7 @@ def test_edit_moves_a_playlist_to_the_providers_new_address(app, monkeypatch):
 
     host, source, loaded = _imported_xtream(app, monkeypatch)
     [uuid] = source.muxes.values()
+    monkeypatch.setattr(dialogs, 'wait_for_checks', lambda *_a, **_kw: pytest.fail('Unexpected stream checks'))
     dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=source)
     dialog.location_input.setText('http://new.example')
     dialog.username_input.setText('renewed')
@@ -1312,6 +1330,77 @@ def test_edit_moves_a_playlist_to_the_providers_new_address(app, monkeypatch):
     assert ffmpeg_input(mux['iptv_url'][7:])[0] == 'http://new.example/live/renewed/pass/1.ts'
     assert not host.busy
 
+
+
+def test_edit_playlist_url_updates_existing_streams_without_checks(app, tmp_path, monkeypatch):
+    from tvhplayer.core.playlist import ffmpeg_input
+
+    old = tmp_path / 'old.m3u'
+    new = tmp_path / 'new.m3u'
+    for path, host_name in ((old, 'old.example'), (new, 'new.example')):
+        path.write_text('#EXTM3U\n' + ''.join(
+            f'#EXTINF:-1 tvg-id="{i}",Channel {i}\nhttp://{host_name}/{i}.ts\n'
+            for i in range(300)
+        ))
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    imported = dialogs.ImportPlaylistDialog(host)
+    imported.location_input.setText(str(old))
+    _run(app, imported)
+    source = PlaylistSource.from_dict(host.stored[-1])
+    assert len(source.muxes) == 300
+
+    def unexpected_check(*_args, **_kwargs):
+        raise AssertionError('Changing a playlist address must not test streams')
+
+    monkeypatch.setattr(FakeAdmin, 'scan_muxes', unexpected_check, raising=False)
+    monkeypatch.setattr(dialogs, 'wait_for_checks', unexpected_check)
+    # A previous scan still pending must not hold up this edit either.
+    for row in FakeAdmin.servers[BUILTIN['url']]['muxes'].values():
+        row['scan_state'] = 1
+    statuses = []
+    original_start = dialogs.PlaylistJob.start
+
+    def start(job):
+        job.status.connect(statuses.append)
+        original_start(job)
+
+    monkeypatch.setattr(dialogs.PlaylistJob, 'start', start)
+    dialog = dialogs.ImportPlaylistDialog(host, server=BUILTIN, source=source)
+    dialog.location_input.setText(str(new))
+    _run(app, dialog)
+    assert not dialog._job.is_running()
+    assert 'Stream checks were skipped.' in dialog.status_label.text()
+    assert 'Updating channels…' in statuses
+    assert 'Adding channels…' not in statuses
+    assert 'Checking channels…' not in statuses
+    assert len(host.stored) == 1
+    saved = PlaylistSource.from_dict(host.stored[0])
+    assert saved.location == str(new)
+    assert saved.network_uuid == source.network_uuid
+    assert saved.muxes == source.muxes
+    rows = FakeAdmin.servers[BUILTIN['url']]['muxes']
+    assert len(rows) == 300
+    for key, uuid in saved.muxes.items():
+        assert ffmpeg_input(rows[uuid]['iptv_url'][7:])[0] == f'http://new.example/{key[3:]}.ts'
+    assert not host.busy
+
+
+def test_refresh_existing_playlist_does_not_restart_stream_checks(app, tmp_path, monkeypatch):
+    host = FakeHost([BUILTIN], current=BUILTIN)
+    path = _playlist(tmp_path, TWO)
+    source = PlaylistSource('news', path, 'builtin')
+    _finish(app, dialogs.PlaylistJob(host, source, BUILTIN, first_import=True))
+    original = dict(source.muxes)
+    # Retry a previous refresh with pending server scans and new addresses.
+    for row in FakeAdmin.servers[BUILTIN['url']]['muxes'].values():
+        row['scan_state'] = 1
+    _playlist(tmp_path, TWO.replace('http://x/', 'http://new.example/'))
+    monkeypatch.setattr(dialogs, 'wait_for_checks', lambda *_a, **_kw: pytest.fail('Unexpected checks'))
+    job = dialogs.PlaylistJob(host, source, BUILTIN)
+    events = _finish(app, job)
+    assert len(events) == 1 and 'Stream checks were skipped.' in events[0]
+    assert source.muxes == original
+    assert all(row['scan_state'] == 0 for row in FakeAdmin.servers[BUILTIN['url']]['muxes'].values())
 
 def test_edit_to_an_address_that_does_not_work_changes_nothing(app, monkeypatch):
     bad = 'http://wrong.example/get.php?username=user&password=pass'

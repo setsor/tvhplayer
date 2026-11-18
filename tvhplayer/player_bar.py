@@ -26,8 +26,10 @@ from PyQt6.QtWidgets import (
 
 try:
     from .a11y import button_stylesheet, describe, keys_text, prefers_high_contrast, with_keys
+    from .squeeze import SqueezeRow
 except ImportError:
     from a11y import button_stylesheet, describe, keys_text, prefers_high_contrast, with_keys
+    from squeeze import SqueezeRow
 
 BAR_BACKGROUND = '#141414'
 FLOATING_BACKGROUND = QColor(20, 20, 20, 224)
@@ -138,7 +140,7 @@ def _menu_stylesheet():
     )
 
 
-class PlayerBar(QWidget):
+class PlayerBar(SqueezeRow):
     """Controls joined to the bottom of the picture.
 
     The window connects the buttons and reports state back through
@@ -159,6 +161,11 @@ class PlayerBar(QWidget):
         self._server = False
         self._local = False
         self._floating = False
+        # Visibility the bar's state asks for, and the controls hidden for want of room.
+        self._wanted = {}
+        self._dropped = set()
+        self._live_width = None
+        self._record_short = False
 
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 8, 12, 8)
@@ -250,16 +257,12 @@ class PlayerBar(QWidget):
                 "color: #ededed; background: transparent; font-weight: 500;"
             )
         inner.addWidget(self._record_text)
-        inner.addWidget(_icon_label(CHEVRON_SVG, '#c8c8c8', 10))
+        self._record_chevron = _icon_label(CHEVRON_SVG, '#c8c8c8', 10)
+        inner.addWidget(self._record_chevron)
         self.record_btn.setMinimumWidth(inner.sizeHint().width())
-        describe(
-            self.record_btn,
-            "Record",
-            "Open the record menu: record on the server or on this computer. "
-            "Keyboard: Ctrl+R records on the server, Ctrl+Shift+R on this computer.",
-        )
-        self.record_btn.setToolTip(keys_text("Record (Ctrl+R / Ctrl+Shift+R)"))
         layout.addWidget(self.record_btn)
+        # The built-in server saves on this computer: one kind of recording, no menu.
+        self._single = None
 
         # Shown while recording: a red pill. Stop on the left, the Record menu on the right.
         self.recording_group = QFrame()
@@ -360,7 +363,8 @@ class PlayerBar(QWidget):
         self.stop_menu.addSeparator()
         self.stop_menu.addAction("Cancel\tEsc")
 
-        self.record_btn.clicked.connect(lambda: self.popup_above(self.record_menu, self.record_btn))
+        self.record_btn.clicked.connect(self._record_clicked)
+        self.set_single_record(False)
         self.record_more_btn.clicked.connect(
             lambda: self.popup_above(self.record_menu, self.recording_group)
         )
@@ -416,12 +420,48 @@ class PlayerBar(QWidget):
                         self.cast_btn, self.mute_btn, self.volume_slider, self.fullscreen_btn):
             control.setFocusPolicy(Qt.FocusPolicy.TabFocus)
 
+        # Taken in this order as the bar gets narrower.
+        self.set_steps((
+            lambda on: self._drop((self.volume_slider,), on),
+            lambda on: self._drop((self.prev_btn, self.next_btn), on),
+            lambda on: self._drop((self.back_btn, self.forward_btn), on),
+            self._record_compact,
+        ))
+
         self.set_playing(False)
         self.set_timeshift(None)
         self.set_casting(False)
         self.set_muted(False)
         self.set_fullscreen(False)
         self._apply_background()
+
+    def _want(self, widget, visible):
+        """Show or hide a control for the bar's state; a narrow bar may still keep it hidden."""
+        visible = bool(visible)
+        if self._wanted.get(widget) == visible:
+            return
+        self._wanted[widget] = visible
+        widget.setVisible(visible and widget not in self._dropped)
+        self.refit()
+
+    def _drop(self, widgets, on):
+        for widget in widgets:
+            if on:
+                self._dropped.add(widget)
+            else:
+                self._dropped.discard(widget)
+            widget.setVisible(self._wanted.get(widget, True) and not on)
+
+    def _record_compact(self, on):
+        """Record and Stop recording as their icons alone."""
+        self._record_short = bool(on)
+        self._record_text.setVisible(not on)
+        inner = self.record_btn.layout()
+        inner.invalidate()
+        self.record_btn.setMinimumWidth(inner.sizeHint().width())
+        self.stop_record_btn.setText("" if on else " Stop recording")
+        self.recording_group.layout().invalidate()
+        self.recording_group.updateGeometry()
 
     def _icon_color(self):
         return '#000000' if self._contrast else ICON_LIGHT
@@ -485,7 +525,7 @@ class PlayerBar(QWidget):
         if visible != self._timeshift_visible:
             self._timeshift_visible = visible
             for control in self._timeshift_controls:
-                control.setVisible(visible)
+                self._want(control, visible)
         if state is None:
             self._paused = self._behind = None
             self._seek_span = 0
@@ -522,6 +562,41 @@ class PlayerBar(QWidget):
         self._behind = behind
         self.live_btn.setText(f"−{_clock(behind)}" if behind > 0 else "LIVE")
         self.live_btn.setEnabled(behind > 0)
+        if self.live_btn.sizeHint().width() != self._live_width:
+            self._live_width = self.live_btn.sizeHint().width()
+            self.refit()
+
+    def _record_clicked(self):
+        if self._single:
+            self.record_server_action.trigger()
+        else:
+            self.popup_above(self.record_menu, self.record_btn)
+
+    def set_single_record(self, single):
+        """One Record button for the built-in server, which saves on this computer too.
+
+        Its Record window offers recording from the timeshift position, so the
+        menu of two kinds of recording and Start another recording go away.
+        """
+        single = bool(single)
+        if single == self._single:
+            return
+        self._single = single
+        self._record_chevron.setVisible(not single)
+        self.record_more_btn.setVisible(not single)
+        self._record_compact(self._record_short)
+        self.refit()
+        if single:
+            describe(self.record_btn, "Record", "Record the channel. Keyboard: Ctrl+R.")
+            self.record_btn.setToolTip(keys_text("Record (Ctrl+R)"))
+        else:
+            describe(
+                self.record_btn,
+                "Record",
+                "Open the record menu: record on the server or on this computer. "
+                "Keyboard: Ctrl+R records on the server, Ctrl+Shift+R on this computer.",
+            )
+            self.record_btn.setToolTip(keys_text("Record (Ctrl+R / Ctrl+Shift+R)"))
 
     def set_recording(self, server, local, channel_name='', local_here=None):
         """Swap Record for Stop recording while either kind runs.
@@ -532,8 +607,8 @@ class PlayerBar(QWidget):
         local_here = bool(local) if local_here is None else bool(local_here)
         self._server, self._local = bool(server), bool(local)
         recording = self._server or self._local
-        self.record_btn.setVisible(not recording)
-        self.recording_group.setVisible(recording)
+        self._want(self.record_btn, not recording)
+        self._want(self.recording_group, recording)
         both = self._server and self._local
         if both:
             self.stop_record_btn.setToolTip("Stop recording… (asks which)")
@@ -542,6 +617,10 @@ class PlayerBar(QWidget):
                 "Stop recording",
                 "Recording on the server and on this computer. Asks which to stop.",
             )
+        elif self._single:
+            keys = "Ctrl+E" if self._server else "Ctrl+Shift+E"
+            self.stop_record_btn.setToolTip(keys_text(f"Stop the recording ({keys})"))
+            describe(self.stop_record_btn, "Stop recording", f"Stop the recording. Keyboard: {keys}.")
         elif self._server:
             self.stop_record_btn.setToolTip(keys_text("Stop the server recording (Ctrl+E)"))
             describe(self.stop_record_btn, "Stop recording", "Stop the recording on the server. Keyboard: Ctrl+E.")
@@ -553,7 +632,14 @@ class PlayerBar(QWidget):
                 "Stop the recording on this computer. Keyboard: Ctrl+Shift+E.",
             )
         name = channel_name or 'This channel'
-        self._stop_detail.setText(f"{name} is recording on the server and on this computer.")
+        if self._single:
+            self._stop_detail.setText(f"{name} has two recordings: one live, one from where you were watching.")
+            self.stop_server_action.setText(with_keys("Stop the live recording", "Ctrl+E"))
+            self.stop_local_action.setText(with_keys("Stop the timeshift recording", "Ctrl+Shift+E"))
+        else:
+            self._stop_detail.setText(f"{name} is recording on the server and on this computer.")
+            self.stop_server_action.setText(with_keys("Stop server recording", "Ctrl+E"))
+            self.stop_local_action.setText(with_keys("Stop local recording", "Ctrl+Shift+E"))
         if self._server:
             self.record_server_action.setText("Record on server\tRecording")
         else:

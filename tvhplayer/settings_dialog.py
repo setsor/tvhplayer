@@ -1,6 +1,6 @@
 """The Settings window: playback at startup, where recordings go, and imported channels that do not work.
 
-Layout: a sidebar of pages (Appearance, Playback, Channels, Recordings, Conversion, Sleep, Updates). Every setting is a
+Layout: a sidebar of pages (General, Appearance, Playback, Channels, Recordings, Conversion, Updates). Every setting is a
 row with its name and description on the left and the control on the right. The settings logic and
 the widget attribute names are unchanged from the tabbed version.
 """
@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QStackedWidget,
@@ -28,21 +29,21 @@ from PyQt6.QtWidgets import (
 )
 
 try:
-    from .a11y import announce_label, describe
+    from .a11y import describe
     from .core.recorder import RECORDING_FORMATS, parse_ffmpeg_options
     from .core.config import (
         SCHEME_CHOICES, SCHEME_DARK, SCHEME_LIGHT, SCHEME_SYSTEM, THEME_ORGANIC, THEME_TVHPLAYER, TIMESHIFT_MAX_GB,
     )
     from .ui_theme import accent_choices, accent_swatch, style_names, window_color_choices, window_swatch
-    from .settings_widgets import SettingRow, SettingsGroup, SettingsNav, SettingsPage, StatusStrip, ToggleSwitch
+    from .settings_widgets import SettingRow, SettingsGroup, SettingsNav, SettingsPage, ToggleSwitch
 except ImportError:
-    from a11y import announce_label, describe
+    from a11y import describe
     from core.recorder import RECORDING_FORMATS, parse_ffmpeg_options
     from core.config import (
         SCHEME_CHOICES, SCHEME_DARK, SCHEME_LIGHT, SCHEME_SYSTEM, THEME_ORGANIC, THEME_TVHPLAYER, TIMESHIFT_MAX_GB,
     )
     from ui_theme import accent_choices, accent_swatch, style_names, window_color_choices, window_swatch
-    from settings_widgets import SettingRow, SettingsGroup, SettingsNav, SettingsPage, StatusStrip, ToggleSwitch
+    from settings_widgets import SettingRow, SettingsGroup, SettingsNav, SettingsPage, ToggleSwitch
 
 THEME_SHORT = ("TVHplayer is the app's own look, and Organic its rounder, warmer one, as in Jottr. "
                "The others are the styles Qt offers on this computer.")
@@ -99,7 +100,7 @@ CONVERT_INTRO = (
 AWAKE_HELP = (
     'The computer never sleeps while it is recording. With this on, it also stays awake while a '
     'recording is scheduled on the built-in server or another server on this computer, so the '
-    'recording is not missed. TVHplayer has to be open for the built-in server to record.'
+    'recording is not missed. TVHplayer has to be running for the built-in server to record.'
 )
 PADDING_HELP = (
     'The built-in server starts each recording this many minutes before the programme and '
@@ -134,12 +135,12 @@ class SettingsDialog(QDialog):
     """``host`` is the main window: it keeps the setting and runs the checks."""
 
     PAGES = (
+        ('General', 'Startup, background, sleep'),
         ('Appearance', 'Theme, light or dark'),
         ('Playback', 'Startup, timeshift, panes'),
         ('Channels', 'Logos, imported playlists'),
         ('Recordings', 'Folder, format, padding'),
         ('Conversion', 'Edit-friendly copies'),
-        ('Sleep', 'Scheduled recordings'),
         ('Updates', 'New versions'),
     )
 
@@ -157,12 +158,12 @@ class SettingsDialog(QDialog):
         has_builtin = getattr(host, 'builtin', None) is not None
 
         pages = [
+            self._general_page(host),
             self._appearance_page(host),
             self._playback_page(host),
             self._channels_page(host),
             self._recordings_page(host, has_builtin),
             self._conversion_page(host),
-            self._sleep_page(host),
             self._updates_page(host),
         ]
 
@@ -184,12 +185,9 @@ class SettingsDialog(QDialog):
         footer.setObjectName('dialogFooter')
         footer_row = QHBoxLayout(footer)
         footer_row.setContentsMargins(20, 10, 16, 10)
-        note = QLabel('Changes are saved as you make them.')
-        note.setObjectName('footerNote')
         close = QPushButton('Close')
         close.setDefault(True)
         close.clicked.connect(self.reject)
-        footer_row.addWidget(note)
         footer_row.addStretch(1)
         footer_row.addWidget(close)
 
@@ -295,12 +293,16 @@ class SettingsDialog(QDialog):
         describe(self.picon_btn, 'Download Picons', PICON_HELP)
         button_row.addWidget(self.picon_remove_btn)
         button_row.addWidget(self.picon_btn)
-        logos.add_row(SettingRow('Picons', PICON_HELP, buttons))
-        strip = logos.add_strip(StatusStrip(progress=True))
-        self._picon_strip = strip
-        self.picon_progress = strip.progress
+        picon_controls = QWidget()
+        picon_layout = QVBoxLayout(picon_controls)
+        picon_layout.setContentsMargins(0, 0, 0, 0)
+        picon_layout.addWidget(buttons)
+        self.picon_progress = QProgressBar()
+        self.picon_progress.setTextVisible(False)
         self.picon_progress.setAccessibleName('Picon download')
-        self.picon_status = strip.label
+        self.picon_progress.hide()
+        picon_layout.addWidget(self.picon_progress)
+        logos.add_row(SettingRow('Picons', PICON_HELP, picon_controls))
 
         imported = page.add(SettingsGroup('Imported channels'))
         self.hide_check = ToggleSwitch('Hide channels that do not work')
@@ -315,7 +317,6 @@ class SettingsDialog(QDialog):
         describe(self.check_btn, 'Check Channels Now', CHECK_HELP)
         self.check_btn.setToolTip(CHECK_HELP)
         imported.add_row(SettingRow('Check channels now', CHECK_HELP, self.check_btn))
-        self.status_label = imported.add_strip(StatusStrip()).label
         page.finish()
         return page
 
@@ -336,10 +337,6 @@ class SettingsDialog(QDialog):
         folder_row.addWidget(self.folder_edit, 1)
         folder_row.addWidget(self.folder_btn)
         storage.add_row(SettingRow('&Save recordings in', folder_text, folder, stacked=True))
-        self.folder_status = QLabel()
-        self.folder_status.setWordWrap(True)
-        storage.add_row(self.folder_status)
-        self._folder_storage = storage
         supervisor = getattr(host, 'builtin', None)
         if supervisor is not None and hasattr(supervisor, 'recordings_dir_changed'):
             supervisor.recordings_dir_changed.connect(self._refresh_folder_status)
@@ -371,7 +368,6 @@ class SettingsDialog(QDialog):
         describe(self.options_edit, 'Extra ffmpeg options', OPTIONS_HELP)
         self.options_edit.setToolTip(OPTIONS_HELP)
         fmt.add_row(SettingRow('Extra ffmpeg &options', OPTIONS_HELP, self.options_edit, stacked=True))
-        self.options_status = fmt.add_strip(StatusStrip()).label
 
         self.early_spin = self.late_spin = None
         if has_builtin:
@@ -383,7 +379,6 @@ class SettingsDialog(QDialog):
             late_label = QLabel('End &late by')
             self.late_spin = self._minutes_spin(late, 'End recordings late by', late_label)
             padding.add_row(SettingRow(late_label, '', self.late_spin))
-            padding.add_strip(StatusStrip(PADDING_HELP))
         page.finish()
         return page
 
@@ -406,13 +401,34 @@ class SettingsDialog(QDialog):
         describe(self.delete_check, description=DELETE_HELP)
         self._delete_row = group.add_row(
             SettingRow('&Delete the original once a new recording is converted', DELETE_HELP, self.delete_check))
-        self.convert_status = group.add_strip(StatusStrip()).label
         page.finish()
         return page
 
-    def _sleep_page(self, host):
-        page = SettingsPage('Sleep')
-        group = page.add(SettingsGroup())
+    def _general_page(self, host):
+        page = SettingsPage('General')
+        background = getattr(host, 'background', None)
+        if background is not None:
+            startup = page.add(SettingsGroup('Application startup'))
+            self.login_check = ToggleSwitch('Start TVHplayer at login')
+            startup.add_row(SettingRow(
+                'Start TVHplayer at login',
+                'Start the app in the background when you sign in. The built-in server starts only '
+                'if Start with TVHplayer is enabled in Servers. Off by default.', self.login_check))
+            self.login_check.toggled.connect(background.set_starts_at_login)
+            background.changed.connect(self._sync_login_startup)
+            self._sync_login_startup()
+        if background is not None and getattr(host, 'builtin', None) is not None:
+            group = page.add(SettingsGroup('Run in background'))
+            self.background_check = ToggleSwitch('Keep the app running when the window closes')
+            self.background_check.setChecked(background.enabled)
+            group.add_row(SettingRow(
+                'Keep the app running when the window closes',
+                'Enable this to keep the app running in background when you close the window. '
+                'Recommended if you use the built-in server with many channels', self.background_check))
+            self.background_check.toggled.connect(background.set_enabled)
+            background.changed.connect(self._sync_background)
+            self._sync_background()
+        group = page.add(SettingsGroup('Keep computer awake'))
         self.awake_check = ToggleSwitch('Keep the computer awake for scheduled recordings')
         self.awake_check.setChecked(host.stays_awake_for_scheduled())
         describe(self.awake_check, description=AWAKE_HELP)
@@ -421,10 +437,6 @@ class SettingsDialog(QDialog):
             'Also stays awake while a recording is scheduled on the built-in server or another server '
             'on this computer, so the recording is not missed.',
             self.awake_check,
-        ))
-        group.add_strip(StatusStrip(
-            'The computer never sleeps while it is recording. '
-            'TVHplayer has to be open for the built-in server to record.'
         ))
         page.finish()
         return page
@@ -496,6 +508,37 @@ class SettingsDialog(QDialog):
 
     # Behaviour (unchanged from the tabbed dialog) --------------------------
 
+    def _feedback(self, control, text, notify=False):
+        """Keep feedback with its control, without adding a settings footer."""
+        control.setToolTip(text)
+        control.setAccessibleDescription(text)
+        statusbar = getattr(self._host, 'statusbar', None)
+        if notify and text and statusbar is not None:
+            statusbar.showMessage(text)
+
+    def _sync_login_startup(self):
+        background = self._host.background
+        self.login_check.blockSignals(True)
+        self.login_check.setChecked(background.starts_at_login)
+        self.login_check.setEnabled(not background.pending)
+        self.login_check.blockSignals(False)
+        self._feedback(self.login_check,
+            'Waiting for desktop permission…' if background.pending else
+            background.startup_problem or ('Enabled for your next login.' if background.starts_at_login
+                                           else 'TVHplayer will not start automatically at login.'))
+
+    def _sync_background(self):
+        background = self._host.background
+        self.background_check.blockSignals(True)
+        self.background_check.setChecked(background.enabled and not background.pending)
+        self.background_check.setEnabled(not background.pending)
+        self.background_check.blockSignals(False)
+        self._feedback(self.background_check,
+            'Waiting for desktop permission…' if background.pending else
+            'Enabled for this session.' if background.enabled and background.granted else
+            'Desktop permission will be requested before hiding the window.' if background.enabled else
+            'Closing the window quits TVHplayer.')
+
     def _theme_chosen(self, _index):
         # Once the list has closed: a theme change restyles every widget, the list's too.
         QTimer.singleShot(0, self._use_chosen_theme)
@@ -553,8 +596,7 @@ class SettingsDialog(QDialog):
         if text is None:
             text = (f'{count:,} picons are ready. Channels without a logo from the server use them.'
                     if count else 'No picons downloaded.')
-        announce_label(self.picon_status, text)
-        self._picon_strip.refresh()
+        self._feedback(self.picon_btn, text)
 
     def _download_picons(self):
         self._follow_picon_job(self._host.download_picons())
@@ -573,12 +615,14 @@ class SettingsDialog(QDialog):
             self.picon_progress.setValue(min(done, total))
             if done >= total:
                 self.picon_progress.setRange(0, 0)
-                self.picon_status.setText('Unpacking the picons…')
+                self._feedback(self.picon_btn, 'Unpacking the picons…')
 
     def _picons_done(self, _index, error):
         self._picon_job = None
         self.picon_progress.hide()
         self._show_picons(f'Could not download the picons: {error}' if error else None)
+        if error:
+            self._feedback(self.picon_btn, f'Could not download the picons: {error}', notify=True)
 
     def _remove_picons(self):
         self._host.remove_picons()
@@ -623,7 +667,6 @@ class SettingsDialog(QDialog):
 
     def _refresh_folder_status(self, *_args):
         self.folder_edit.setText(getattr(self._host, 'local_recording_display', self._host.local_recording_dir)())
-        self.folder_edit.setToolTip(self._host.local_recording_dir())
         supervisor = getattr(self._host, 'builtin', None)
         problem = getattr(self._host, 'recording_folder_problem', lambda: '')()
         text = f'Cannot save recordings here: {problem}' if problem else ''
@@ -635,8 +678,8 @@ class SettingsDialog(QDialog):
                             'TVHplayer cannot schedule new recordings until the folder can be applied.')
                 else:
                     text = 'The built-in server will check this folder when it starts.'
-        self.folder_status.setText(text)
-        self._folder_storage.set_row_visible(self.folder_status, bool(text))
+        folder = self._host.local_recording_dir()
+        self._feedback(self.folder_edit, f'{folder}\n{text}' if text else folder)
 
     def _show_format_help(self):
         description = RECORDING_FORMATS[self.format_combo.currentData()][1]
@@ -652,9 +695,9 @@ class SettingsDialog(QDialog):
         try:
             parse_ffmpeg_options(text)
         except ValueError as e:
-            announce_label(self.options_status, f'These options cannot be read ({e}); they were not saved.')
+            self._feedback(self.options_edit, f'These options cannot be read ({e}); they were not saved.', notify=True)
             return
-        self.options_status.setText('')
+        self._feedback(self.options_edit, OPTIONS_HELP)
         if text != self._host.recording_ffmpeg_options():
             self._host.set_recording_ffmpeg_options(text)
 
@@ -665,9 +708,9 @@ class SettingsDialog(QDialog):
     def _show_convert_problem(self, text):
         problem = self._host.conversion_problem(text)
         if problem:
-            announce_label(self.convert_status, f'{problem} Recordings cannot be converted with these options.')
+            self._feedback(self.convert_edit, f'{problem} Recordings cannot be converted with these options.')
         else:
-            self.convert_status.setText('')
+            self._feedback(self.convert_edit, 'ffmpeg options for the edit-friendly copy.')
         return problem
 
     def _convert_edited(self):
@@ -681,7 +724,7 @@ class SettingsDialog(QDialog):
         try:
             parse_ffmpeg_options(text)
         except ValueError as e:
-            announce_label(self.convert_status, f'These options cannot be read ({e}); they were not saved.')
+            self._feedback(self.convert_edit, f'These options cannot be read ({e}); they were not saved.', notify=True)
             return
         # A missing encoder is shown but the options are kept: it may be installed later.
         self._show_convert_problem(text)
@@ -700,18 +743,9 @@ class SettingsDialog(QDialog):
 
     def _toggled(self, on):
         self._host.set_hides_dead_channels(on)
-        if on:
-            announce_label(self.status_label, 'Channels that do not work are hidden from the next import or refresh on.')
-        else:
-            announce_label(self.status_label, 'Hidden channels are shown again.')
 
     def _mark_toggled(self, on):
         self._host.set_marks_dead_channels(on)
-        announce_label(
-            self.status_label,
-            'Channels that do not work are marked in the channel list.' if on
-            else 'Channels that do not work are no longer marked.',
-        )
 
     def _check(self):
         self._jobs = self._host.check_playlist_channels()
@@ -723,15 +757,15 @@ class SettingsDialog(QDialog):
                 else f'The servers of {orphans} playlists were removed, so they cannot be checked.'
             )
         if not self._jobs:
-            announce_label(self.status_label, not_checked or 'There are no imported playlists to check.')
+            self._feedback(self.check_btn, not_checked or 'There are no imported playlists to check.', notify=True)
             return
         for job in self._jobs:
             job.finished.connect(lambda *_args: self._sync())
             job.failed.connect(lambda *_args: self._sync())
         count = len(self._jobs)
         playlists = '1 playlist' if count == 1 else f'{count} playlists'
-        announce_label(
-            self.status_label,
+        self._feedback(
+            self.check_btn,
             f'Checking {playlists} in the background. Channels that do not work are hidden as they are found; '
             f'the status bar says when it is done. {not_checked}'.rstrip(),
         )
@@ -740,7 +774,4 @@ class SettingsDialog(QDialog):
     def _sync(self):
         running = bool(self._host.playlist_checks())
         self.check_btn.setEnabled(not running)
-        if running:
-            self.check_btn.setToolTip('Channels are being checked.')
-        else:
-            self.check_btn.setToolTip(CHECK_HELP)
+        self._feedback(self.check_btn, 'Channels are being checked.' if running else CHECK_HELP)

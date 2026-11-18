@@ -264,8 +264,9 @@ def summarize(path: str, cancelled: Callable[[], bool] = lambda: False) -> Guide
 class GuideCache:
     """Downloaded guides and their summaries, one pair per address."""
 
-    def __init__(self, folder):
+    def __init__(self, folder, work_folder=None):
         self.folder = Path(folder)
+        self.work_folder = Path(work_folder) if work_folder is not None else self.folder
 
     def _stem(self, location: str) -> Path:
         digest = hashlib.sha256(location.strip().encode('utf-8')).hexdigest()[:20]
@@ -311,7 +312,8 @@ class GuideCache:
         """
         previous = self.summary(location)
         self.folder.mkdir(parents=True, exist_ok=True)
-        handle, part = tempfile.mkstemp(prefix='download-', suffix='.part', dir=str(self.folder))
+        self.work_folder.mkdir(parents=True, exist_ok=True)
+        handle, part = tempfile.mkstemp(prefix='download-', suffix='.part', dir=str(self.work_folder))
         try:
             with os.fdopen(handle, 'wb') as out:
                 if is_web_address(location):
@@ -454,6 +456,7 @@ def write_server_guide(
 _CHUNK = 4 * 1024 * 1024
 _PROGRAMME = b'<programme'
 _PROGRAMME_END = b'</programme>'
+_PROGRAMME_CHANNEL = re.compile(rb'''<programme\s[^>]*?\bchannel\s*=\s*(["'])(.*?)\1''', re.DOTALL)
 _ENCODING = re.compile(rb'''^\s*<\?xml[^>]*\bencoding\s*=\s*["']([^"']+)''')
 
 
@@ -475,15 +478,13 @@ def wanted_programmes(path: str, wanted, cancelled: Callable[[], bool] = lambda:
                 if element.tag == 'programme' and (element.get('channel') or '') in wanted:
                     yield element
             return
-        # Only programmes of wanted channels match, so Python sees a few thousand, not a million.
-        ids = sorted({escape(channel_id, {'"': '&quot;', "'": '&apos;'}) for channel_id in wanted} | set(wanted), key=len, reverse=True)
+        # Keep the regex independent of the number of channels. A giant
+        # alternation tried thousands of IDs per unwanted programme while
+        # holding the GIL, starving the UI even on a worker thread.
+        ids = {value.encode('utf-8') for channel_id in wanted
+               for value in (channel_id, escape(channel_id, {'"': '&quot;', "'": '&apos;'}))}
         if not ids:
             return
-        pattern = re.compile(
-            rb'''<programme\s[^>]*?\bchannel\s*=\s*(["'])('''
-            + b'|'.join(re.escape(channel_id.encode('utf-8')) for channel_id in ids)
-            + rb''')\1'''
-        )
         buffer = head
         while True:
             if cancelled():
@@ -492,7 +493,11 @@ def wanted_programmes(path: str, wanted, cancelled: Callable[[], bool] = lambda:
             buffer = buffer + chunk if chunk else buffer
             position = 0
             waiting = None
-            for match in pattern.finditer(buffer):
+            for match in _PROGRAMME_CHANNEL.finditer(buffer):
+                if cancelled():
+                    raise GuideError('Stopped.')
+                if match.group(2) not in ids:
+                    continue
                 start = match.start()
                 tag_end = buffer.find(b'>', match.end())
                 if tag_end < 0:

@@ -31,6 +31,17 @@ from .models import (
     TimerecSpec,
 )
 
+# Events asked for in one request by load_events. A reply is decoded in one
+# go, with every other thread, the window's too, waiting: 59,000 events were
+# 28 MB and over 200 ms; 5,000 are a few milliseconds.
+EVENT_BATCH = 5000
+
+
+def in_batches(ids: List[int], size: int = EVENT_BATCH):
+    """``ids`` in lists of at most ``size``."""
+    return [ids[start:start + size] for start in range(0, len(ids), size)]
+
+
 
 class TvhBackend(ABC):
     """One connection to a TVHeadend server (HTTP JSON or HTSP).
@@ -462,5 +473,7 @@ def create_backend(server) -> TvhBackend:
 
 
 def channel_sort_key(channel: Channel):
+    """Number, then sub-channel (2 before 2.1 before 2.2 before 2.10), then name,
+    as Tvheadend orders channels. Channels without a number go last."""
     number = channel.number if channel.number else float('inf')
-    return (number, (channel.name or '').lower())
+    return (number, channel.number_minor or 0, (channel.name or '').lower())
