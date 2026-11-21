@@ -31,6 +31,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path diagnostics | Out-Null
           python -u -X faulthandler -m pytest -vv -s --tb=long tests/test_background.py -k test_second_launch_activates_owner_and_lock_is_reusable 2>&1 | Tee-Object diagnostics/instance-activation.log
+          python -u scripts/diagnose_windows_instance.py 2>&1 | Tee-Object diagnostics/socket-probe.log
           exit 0
       - name: Upload detailed reproduction log
         if: always()
