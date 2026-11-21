@@ -246,6 +246,49 @@ def test_guide_window_reports_a_failed_read_until_reload(monkeypatch):
         app.processEvents()
 
 
+def test_selected_programme_loads_full_event_details_without_blocking(monkeypatch):
+    """The grid synopsis can be shorter than getEvent metadata."""
+    app = _app()
+    import tvhplayer.guide_view as guide_view
+    from tvhplayer.core.models import Channel, EpgEvent
+
+    now = int(time.time())
+    channel = Channel(uuid='film', name='Cinema HD', number=11)
+    short = EpgEvent(start=now - 120, stop=now + 3600,
+                     title='Film', channel_uuid='film', event_id=87,
+                     description='A short synopsis...')
+    full_text = 'Complete programme description provided by TVHeadend. ' * 25
+    full = EpgEvent(start=short.start, stop=short.stop,
+                    title='Film', channel_uuid='film', event_id=87,
+                    description=full_text)
+
+    class DetailBackend(_Backend):
+        def __init__(self):
+            super().__init__([short])
+            self.detail_calls = []
+
+        def get_event(self, event_id):
+            self.detail_calls.append(event_id)
+            return full
+
+    backend = DetailBackend()
+    monkeypatch.setattr(guide_view, 'create_backend', lambda server: backend)
+    window = guide_view.GuideWindow(_Host([channel], [], backend))
+    try:
+        window.show()
+        window.show_channel(channel)
+        assert _wait(app, lambda: window.description_text.toPlainText() == full_text)
+        assert backend.detail_calls == [87]
+        window._on_tick()
+        window._on_tick()
+        assert backend.detail_calls == [87]
+    finally:
+        window.shutdown()
+        window.close()
+        window.deleteLater()
+        app.processEvents()
+
+
 def test_long_description_is_scrollable_without_refresh_jumping(monkeypatch):
     """Keep every line available and do not reset a user's reading position."""
     app = _app()
