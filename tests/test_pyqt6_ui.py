@@ -293,11 +293,12 @@ def _make_player(monkeypatch, tmp_path, prepare=None, start_hidden=False):
 
     app = QApplication.instance() or QApplication([])
     app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings, True)
+    # Most UI tests do not exercise server DVR fetching. Install the default
+    # before constructing the window because TasksPane may refresh in __init__.
+    # Fetch-specific tests opt back into the unknown state on their instance.
+    monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                        lambda self, _server: ('synced', []))
     window = ui.TVHeadendClient(start_hidden=start_hidden)
-    # Most UI tests do not exercise server DVR fetching. Keep the pane on an
-    # already-synced empty result so tests never start real HTTP workers by
-    # accident; the few fetch-specific tests opt back into the unknown state.
-    window.synced_recordings = lambda _server: ('synced', [])
     # Not GitHub: once a newer release is out, its Update Available box waits for a click.
     # On the window, not the class: its check comes 10 s after it opens, often during a
     # later test, when a stub on the class would be undone.
