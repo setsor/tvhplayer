@@ -263,7 +263,10 @@ class _FakePlayer:
 def _make_player(monkeypatch, tmp_path, prepare=None, start_hidden=False):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     fake_player = _FakePlayer()
-    sys.modules.pop('tvhplayer.tvhplayer', None)
+    # Diagnostic only: compare fresh versus reused UI module in CI.
+    # Keep the original behaviour unless explicitly enabled by the workflow.
+    if os.environ.get('TVHPLAYER_DIAG_NO_MODULE_RELOAD') != '1':
+        sys.modules.pop('tvhplayer.tvhplayer', None)
     import tvhplayer.tvhplayer as ui
 
     from tvhplayer.core.config import ConfigStore
