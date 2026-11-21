@@ -2797,6 +2797,11 @@ def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
     assert clipboard.text() == 'keep-me'
     assert password not in window.statusbar.currentMessage()
     assert 'clipboard' not in window.statusbar.currentMessage().lower()
+    # This test is about opening the web UI, not the shutdown lookup.
+    # The fake supervisor has no real recording backend; allowing closeEvent
+    # to launch an asynchronous lookup leaves a callback alive in the next test.
+    window._confirm_quit = lambda: True
+    window.builtin = None
     window.close()
     app.processEvents()
 
