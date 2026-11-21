@@ -5496,6 +5496,34 @@ def _diagnose_widths(window, phase):
             f"layoutMin={layout_min} layoutHint={layout_hint}",
             flush=True,
         )
+    # The first row is the minimum-width driver on Windows (332 px).
+    # Capture every child and style-dependent margins before changing UI code.
+    top = window.left_pane.layout().itemAt(0).layout()
+    if top is not None:
+        margins = top.contentsMargins()
+        print(
+            f"WIDTH-DIAG {phase} server-row: spacing={top.spacing()} "
+            f"margins=({margins.left()},{margins.right()}) "
+            f"min={top.minimumSize().width()} hint={top.sizeHint().width()}",
+            flush=True,
+        )
+        for idx in range(top.count()):
+            item = top.itemAt(idx)
+            widget = item.widget()
+            child = item.layout()
+            if widget is not None:
+                print(
+                    f"WIDTH-DIAG {phase} server-row[{idx}] "
+                    f"{type(widget).__name__} text={getattr(widget, 'text', lambda: '')()!r} "
+                    f"minimumWidth={widget.minimumWidth()} minHint={widget.minimumSizeHint().width()} "
+                    f"hint={widget.sizeHint().width()} itemMin={item.minimumSize().width()} "
+                    f"sizePolicy={widget.sizePolicy().horizontalPolicy().name}",
+                    flush=True,
+                )
+            elif child is not None:
+                print(f"WIDTH-DIAG {phase} server-row[{idx}] nested "
+                      f"minimum={item.minimumSize().width()} hint={item.sizeHint().width()}",
+                      flush=True)
     for group_name, layout in (("left", window.left_pane.layout()), 
                                ("right", window.right_pane.layout())):
         if layout is None:
