@@ -75,23 +75,15 @@ jobs:
             if [ "$code" -ne 0 ]; then failed=1; fi
           }
           set -e
-          # 0 = original per-window module reload; 1 = reuse imported UI module.
-          check baseline-dvr 0 tests/test_pyqt6_ui.py -k 'test_builtin_server_records_through_one_window'
-          check reuse-dvr 1 tests/test_pyqt6_ui.py -k 'test_builtin_server_records_through_one_window'
-          check baseline-layout 0 tests/test_pyqt6_ui.py -k 'test_long_group_and_server_names_do_not_widen_the_channel_pane'
-          check reuse-layout 1 tests/test_pyqt6_ui.py -k 'test_long_group_and_server_names_do_not_widen_the_channel_pane'
-          check baseline-sequence 0 tests/test_pyqt6_ui.py -k 'test_recording_from_timeshift_uses_the_captured_position or test_builtin_server_records_through_one_window'
-          check reuse-sequence 1 tests/test_pyqt6_ui.py -k 'test_recording_from_timeshift_uses_the_captured_position or test_builtin_server_records_through_one_window'
-          # Independently reproduce the three remaining platform failures.
-          # Keep original pytest output unmodified for attribution.
-          check isolated-quit-lookup 0 tests/test_pyqt6_ui.py -k 'test_quit_asks_the_builtin_server_even_when_another_is_selected'
-          check isolated-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
-          # Determine whether failure depends on earlier tests in the same
-          # UI module, on earlier test modules, or on all-suite interactions.
-          check quit-group 0 tests/test_pyqt6_ui.py -k 'quit'
-          check ui-file-only 0 tests/test_pyqt6_ui.py -x
-          check baseline-suite 0 tests -x
-          check reuse-suite 1 tests -x
+          # The original SIGABRT and News Hour cases are already isolated.
+          # Measure only the two remaining UI geometry regressions.
+          check narrow-window 0 tests/test_pyqt6_ui.py -k 'test_the_window_narrows_to_half_a_1080p_screen_at_125_percent'
+          check long-server-labels 0 tests/test_pyqt6_ui.py -k 'test_long_group_and_server_names_do_not_widen_the_channel_pane'
+          # Independent Windows QLocalSocket failure; no need to repeat on
+          # macOS/Linux, where it already passed isolated.
+          if [ "$RUNNER_OS" = Windows ]; then
+            check windows-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
+          fi
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
@@ -99,11 +91,6 @@ jobs:
             echo '~~~'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$failed" > diagnostics/has-failures.txt
-      - name: Bisect preceding UI tests for News Hour interference
-        shell: bash
-        run: |
-          set -eo pipefail
-          python scripts/diagnose_quit_interference.py | tee diagnostics/quit-bisect-console.log
       - name: Upload diagnostic logs, even on failure
         if: always()
         uses: actions/upload-artifact@v7
