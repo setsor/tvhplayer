@@ -1,0 +1,63 @@
+name: Verify channel start watcher shutdown
+
+on:
+  push:
+    branches:
+      - fix/stop-start-watch-on-quit-4.7.6
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tvhplayer/tvhplayer.py'
+      - 'tests/test_pyqt6_ui.py'
+      - '.github/workflows/verify-start-watch-shutdown.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  start-watch-shutdown:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2025
+            python: '3.13'
+          - os: ubuntu-24.04
+            python: '3.12'
+          - os: macos-15
+            python: '3.15'
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libmpv2 ffmpeg libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+      - name: Install macOS mpv
+        if: runner.os == 'macOS'
+        run: brew install mpv
+      - name: Install test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$RUNNER_OS" in
+            Windows) reqs=windows/requirements-build.txt ;;
+            macOS) reqs=macos/requirements-build.txt ;;
+            *) reqs=runtime-requirements.txt ;;
+          esac
+          python -m pip install --upgrade pip
+          python -m pip install -r "$reqs" PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
+      - name: Build native decoder
+        run: python packaging/build-native.py
+      - name: Verify watcher shutdown on quit
+        run: python -u -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k test_closing_window_stops_channel_start_watch

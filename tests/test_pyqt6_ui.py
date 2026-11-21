@@ -6077,3 +6077,38 @@ def test_hidden_login_loads_the_last_server_without_play_on_start(monkeypatch, t
         window._confirm_quit = lambda: True
         window.background.quit()
         app.processEvents()
+
+
+def test_closing_window_stops_channel_start_watch(monkeypatch, tmp_path):
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+
+    class Backend:
+        def get_subscriptions(self):
+            return []
+
+        def get_inputs(self):
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ui, 'create_backend', lambda _server: Backend())
+    watch = ui.StartWatch(
+        {'name': 'Remote', 'url': 'http://127.0.0.1:9981', 'protocol': 'http'},
+        'News', window,
+    )
+    window._start_watch = watch
+    watch.start()
+    try:
+        assert watch._thread.is_alive()
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+        watch._thread.join(timeout=2)
+        assert not watch._thread.is_alive()
+        assert window._start_watch is None
+    finally:
+        if not window._closing:
+            window._confirm_quit = lambda: True
+            window.close()
+            app.processEvents()
