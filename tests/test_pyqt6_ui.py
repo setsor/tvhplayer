@@ -5496,6 +5496,29 @@ def _diagnose_widths(window, phase):
             f"layoutMin={layout_min} layoutHint={layout_hint}",
             flush=True,
         )
+    # After the server-row fix, Windows recording state still exceeds the
+    # 680 px target by 15 px. Show every squeeze level and the controls that
+    # determine the narrowest level; no production sizing changes here.
+    bar = window.controls_bar
+    print(f"WIDTH-DIAG {phase} player-squeeze-levels={bar.squeeze.widths()} "
+          f"currentLevel={bar.squeeze.level}", flush=True)
+    root = bar.layout()
+    for ix in range(root.count()):
+        inner = root.itemAt(ix).layout()
+        if inner is None:
+            continue
+        for jx in range(inner.count()):
+            item = inner.itemAt(jx)
+            widget = item.widget()
+            if widget is not None:
+                print(
+                    f"WIDTH-DIAG {phase} bar[{ix}][{jx}] "
+                    f"{widget.objectName() or type(widget).__name__}: "
+                    f"visible={widget.isVisible()} min={item.minimumSize().width()} "
+                    f"hint={item.sizeHint().width()} "
+                    f"minimumWidth={widget.minimumWidth()}",
+                    flush=True,
+                )
     # The first row is the minimum-width driver on Windows (332 px).
     # Capture every child and style-dependent margins before changing UI code.
     top = window.left_pane.layout().itemAt(0).layout()
