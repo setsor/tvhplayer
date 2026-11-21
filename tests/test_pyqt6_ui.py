@@ -5472,8 +5472,6 @@ def _settle(app):
 
 def _diagnose_widths(window, phase):
     """Read-only Qt geometry snapshot for cross-platform CI investigation."""
-    app = window.window().parent()  # No QApplication reference needed for this snapshot.
-    del app
     pairs = [
         ("window", window),
         ("left_pane", window.left_pane),
