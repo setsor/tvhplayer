@@ -82,6 +82,10 @@ jobs:
           check reuse-layout 1 tests/test_pyqt6_ui.py -k 'test_long_group_and_server_names_do_not_widen_the_channel_pane'
           check baseline-sequence 0 tests/test_pyqt6_ui.py -k 'test_recording_from_timeshift_uses_the_captured_position or test_builtin_server_records_through_one_window'
           check reuse-sequence 1 tests/test_pyqt6_ui.py -k 'test_recording_from_timeshift_uses_the_captured_position or test_builtin_server_records_through_one_window'
+          # Independently reproduce the three remaining platform failures.
+          # Keep original pytest output unmodified for attribution.
+          check isolated-quit-lookup 0 tests/test_pyqt6_ui.py -k 'test_quit_asks_the_builtin_server_even_when_another_is_selected'
+          check isolated-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
           check baseline-suite 0 tests -x
           check reuse-suite 1 tests -x
           {
