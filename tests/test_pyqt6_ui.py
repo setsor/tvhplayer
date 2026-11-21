@@ -5470,6 +5470,51 @@ def _settle(app):
         app.processEvents()
 
 
+def _diagnose_widths(window, phase):
+    """Read-only Qt geometry snapshot for cross-platform CI investigation."""
+    app = window.window().parent()  # No QApplication reference needed for this snapshot.
+    del app
+    pairs = [
+        ("window", window),
+        ("left_pane", window.left_pane),
+        ("right_pane", window.right_pane),
+        ("splitter", window.splitter),
+        ("controls_bar", window.controls_bar),
+        ("server_combo", window.server_combo),
+        ("tag_row", window.tag_row),
+        ("tag_combo", window.tag_combo),
+        ("tasks_pane", window.tasks_pane),
+    ]
+    for name, widget in pairs:
+        hint = widget.sizeHint()
+        minimum = widget.minimumSizeHint()
+        layout = widget.layout()
+        layout_min = layout.minimumSize().width() if layout else None
+        layout_hint = layout.sizeHint().width() if layout else None
+        print(
+            f"WIDTH-DIAG {phase} {name}: visible={widget.isVisible()} "
+            f"minimumWidth={widget.minimumWidth()} width={widget.width()} "
+            f"minHint={minimum.width()} hint={hint.width()} "
+            f"layoutMin={layout_min} layoutHint={layout_hint}",
+            flush=True,
+        )
+    for group_name, layout in (("left", window.left_pane.layout()), 
+                               ("right", window.right_pane.layout())):
+        if layout is None:
+            continue
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            widget = item.widget()
+            nested = item.layout()
+            kind = widget.objectName() or type(widget).__name__ if widget else "nested-layout"
+            print(
+                f"WIDTH-DIAG {phase} {group_name}[{idx}] {kind}: "
+                f"minHint={item.minimumSize().width()} hint={item.sizeHint().width()} "
+                f"nestedCount={nested.count() if nested else 0}",
+                flush=True,
+            )
+
+
 def test_the_window_narrows_to_half_a_1080p_screen_at_125_percent(monkeypatch, tmp_path):
     # Issue #58: the row over the channel list and the player bar kept every
     # control at full size, so the window could not be narrower than 865 px
@@ -5481,10 +5526,12 @@ def test_the_window_narrows_to_half_a_1080p_screen_at_125_percent(monkeypatch, t
         window.resize(1400, 700)
         window.show()
         _settle(app)
+        _diagnose_widths(window, "window-idle")
         assert window.minimumSizeHint().width() <= 560
         bar.set_timeshift((False, 30, 600))
         bar.set_recording(True, False)
         _settle(app)
+        _diagnose_widths(window, "window-recording")
         assert window.minimumSizeHint().width() <= 680
         # Wide, everything shows at full size.
         assert bar.squeeze.level == 0
@@ -5554,6 +5601,7 @@ def test_long_group_and_server_names_do_not_widen_the_channel_pane(monkeypatch, 
         window.tag_row.setVisible(True)
         window.show()
         _settle(app)
+        _diagnose_widths(window, "long-names")
         assert window.left_pane.minimumSizeHint().width() <= 280
     finally:
         window.close()
