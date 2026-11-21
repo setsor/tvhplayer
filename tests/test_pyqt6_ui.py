@@ -2794,6 +2794,9 @@ def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
     assert clipboard.text() == 'keep-me'
     assert password not in window.statusbar.currentMessage()
     assert 'clipboard' not in window.statusbar.currentMessage().lower()
+    # This test only exercises the web-UI URL. Its lightweight built-in
+    # stand-in has no shutdown/recording API, so remove it before fixture close.
+    window.builtin = None
     window.close()
     app.processEvents()
 
