@@ -1,0 +1,41 @@
+name: Diagnose Windows single-instance activation
+
+on:
+  push:
+    branches:
+      - diagnostic/4.7.6-windows-instance-activation
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-instance:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install Windows test environment
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r windows/requirements-build.txt PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
+      - name: Isolate named-pipe/QLocalSocket activation
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path diagnostics | Out-Null
+          python -u -X faulthandler -m pytest -vv -s --tb=long tests/test_background.py -k test_second_launch_activates_owner_and_lock_is_reusable 2>&1 | Tee-Object diagnostics/instance-activation.log
+          exit 0
+      - name: Upload detailed reproduction log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-instance-activation-diagnostic
+          path: diagnostics/
+          retention-days: 14
