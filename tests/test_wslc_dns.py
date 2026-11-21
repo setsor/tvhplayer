@@ -230,6 +230,10 @@ def test_saving_the_setting_does_not_discover_dns_on_the_ui_thread(monkeypatch, 
         window._confirm_quit = lambda: True
         if dialog is not None:
             dialog.close()
+        # This test uses a lightweight WSLc stand-in, not a real supervisor.
+        # Keep the WSLc setting enabled while the dialog is tested, but do not
+        # enter the asynchronous supervisor-shutdown path during fixture cleanup.
+        window.builtin.uses_wslc = False
         window.close()
         app.processEvents()
 
