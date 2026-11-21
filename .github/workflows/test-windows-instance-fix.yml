@@ -1,0 +1,41 @@
+name: Verify Windows single-instance activation fix
+
+on:
+  push:
+    branches:
+      - fix/windows-qlocalsocket-activation-4.7.6
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tvhplayer/app_instance.py'
+      - 'tests/test_background.py'
+      - '.github/workflows/test-windows-instance-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-activation:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install Windows test environment
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r windows/requirements-build.txt PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
+      - name: Build native decoder
+        run: python packaging/build-native.py
+      - name: Test single-instance activation handshake
+        shell: pwsh
+        run: |
+          python -u -X faulthandler -m pytest -vv -s --tb=long tests/test_background.py -k "second_launch_activates_owner_and_lock_is_reusable or second_launch_activation_does_not_depend_on_wait_for_bytes_written"
