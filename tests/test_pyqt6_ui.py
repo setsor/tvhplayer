@@ -293,11 +293,6 @@ def _make_player(monkeypatch, tmp_path, prepare=None, start_hidden=False):
 
     app = QApplication.instance() or QApplication([])
     app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings, True)
-    # Most UI tests do not exercise server DVR fetching. Install the default
-    # before constructing the window because TasksPane may refresh in __init__.
-    # Fetch-specific tests opt back into the unknown state on their instance.
-    monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
-                        lambda self, _server: ('synced', []))
     window = ui.TVHeadendClient(start_hidden=start_hidden)
     # Not GitHub: once a newer release is out, its Update Available box waits for a click.
     # On the window, not the class: its check comes 10 s after it opens, often during a
@@ -358,6 +353,9 @@ def test_window_starts_on_the_last_server_only(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'find_bundled_binary', lambda: '/bin/true')
         monkeypatch.setattr(ui.BuiltinSupervisor, 'start', lambda self, *a, **k: events.append('builtin'))
         monkeypatch.setattr(ui.ChannelFetch, 'start', lambda self: events.append(self.server['name']))
+        # This test checks startup selection, not DVR loading from a remote test address.
+        monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                            lambda self, _server: ('synced', []))
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path, prepare)
     try:
@@ -1053,6 +1051,8 @@ def test_go_to_playing_channel_switches_to_its_server(monkeypatch, tmp_path):
 
         window.get_backend = lambda: Backend(window.current_server())
         window._open_channel_backend = Backend
+        # This test covers channel switching, not a separate DVR HTTP fetch.
+        window.synced_recordings = lambda _server: ('synced', [])
         window.servers = [
             {'name': 'Home', 'url': 'http://home.example:9981', 'protocol': 'http'},
             {'name': 'Away', 'url': 'http://away.example:9981', 'protocol': 'http'},
