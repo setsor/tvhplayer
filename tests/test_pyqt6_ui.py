@@ -350,6 +350,11 @@ def test_window_starts_on_the_last_server_only(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'find_bundled_binary', lambda: '/bin/true')
         monkeypatch.setattr(ui.BuiltinSupervisor, 'start', lambda self, *a, **k: events.append('builtin'))
         monkeypatch.setattr(ui.ChannelFetch, 'start', lambda self: events.append(self.server['name']))
+        # This startup-selection test does not exercise DVR tasks. Report an
+        # already-synced empty list instead of opening a real HTTP tasks-fetch
+        # worker against the documentation-only 192.0.2.1 test address.
+        monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                            lambda self, server: ('synced', []))
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path, prepare)
     try:
@@ -2794,6 +2799,11 @@ def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
     assert clipboard.text() == 'keep-me'
     assert password not in window.statusbar.currentMessage()
     assert 'clipboard' not in window.statusbar.currentMessage().lower()
+    # This test covers opening the web UI, not the shutdown lookup. The fake
+    # supervisor has no recording backend; don't start an async lookup while
+    # closing this window and leave its callback alive for the next Qt test.
+    window._confirm_quit = lambda: True
+    window.builtin = None
     window.close()
     app.processEvents()
 
@@ -4762,7 +4772,9 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
         create_dvr_entry=lambda *args, **kwargs: created.append(args))
 
     def confirm(dialog):
+        print("TIMESHIFT-DIAG: RecordingDurationDialog.exec entered", flush=True)
         titles.append(dialog.windowTitle())
+        print("TIMESHIFT-DIAG: dialog title", dialog.windowTitle(), "buffer checked", dialog.records_from_buffer(), flush=True)
         assert dialog.records_from_buffer()
         assert str(tmp_path) in dialog.folder_label.text()
         if choice == 'live':
@@ -4772,20 +4784,42 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
 
     monkeypatch.setattr(ui.RecordingDurationDialog, 'exec', confirm)
     try:
+        print("TIMESHIFT-DIAG: show window", flush=True)
         window.show()
+        # This test exercises the recording shortcut, not periodic server
+        # metadata polling. The fake built-in supervisor has no HTTP backend;
+        # stop the timer to avoid an unrelated async request during teardown.
+        window._metadata_timer.stop()
         window._sync_record_controls()
         bar = window.controls_bar
         assert bar.record_more_btn.isHidden()
+        print("TIMESHIFT-DIAG: fill playback menu", flush=True)
         window._fill_playback_menu(window.playback_menu)
         texts = [a.text() for a in window.playback_menu.actions()]
         assert not any('This &Computer' in t for t in texts)
         if entry == 'button':
+            print("TIMESHIFT-DIAG: click record button", flush=True)
             window.record_btn.click()
         else:
             shortcut = next(a for a in window.playback_actions
                             if a is not None and a.shortcut().toString() == 'Ctrl+Shift+R')
+            print("TIMESHIFT-DIAG: shortcut found", shortcut.shortcut().toString(), "enabled", shortcut.isEnabled(), "visible", shortcut.isVisible(), "context", shortcut.shortcutContext().name, flush=True)
+            print("TIMESHIFT-DIAG: trigger shortcut", flush=True)
             shortcut.trigger()
-        app.processEvents()
+        print("TIMESHIFT-DIAG: process events", flush=True)
+        import sys
+        previous_excepthook = sys.excepthook
+        def _diagnostic_excepthook(exc_type, exc_value, exc_tb):
+            import traceback
+            print("TIMESHIFT-DIAG: unhandled Qt/Python exception", flush=True)
+            traceback.print_exception(exc_type, exc_value, exc_tb)
+            previous_excepthook(exc_type, exc_value, exc_tb)
+        sys.excepthook = _diagnostic_excepthook
+        try:
+            app.processEvents()
+        finally:
+            sys.excepthook = previous_excepthook
+        print("TIMESHIFT-DIAG: events processed; titles", titles, "menu visible", bar.record_menu.isVisible(), flush=True)
         assert not bar.record_menu.isVisible()
         assert titles == ['Record']
         if choice == 'buffer':
