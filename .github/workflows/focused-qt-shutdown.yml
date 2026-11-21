@@ -64,5 +64,7 @@ jobs:
       - name: Run the Windows timeshift shortcut test independently
         if: runner.os == 'Windows'
         run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k 'test_builtin_server_records_through_one_window and buffer-local_shortcut'
-      - name: Run the complete PyQt6 UI test module
-        run: python -X faulthandler -m pytest -vv --tb=long --timeout=300 -p no:cacheprovider tests/test_pyqt6_ui.py
+      - name: Run the complete PyQt6 UI test module with worker-thread audit
+        shell: bash
+        run: |
+          PYTHONPATH="tests${PYTHONPATH:+:$PYTHONPATH}" python -X faulthandler -m pytest -vv -s --tb=long --timeout=300 -p no:cacheprovider -p pytest_thread_audit tests/test_pyqt6_ui.py
