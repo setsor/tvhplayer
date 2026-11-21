@@ -28,7 +28,7 @@ with tempfile.TemporaryDirectory() as directory:
         print("probe state:", probe.state().name, flush=True)
         print("probe error:", probe.errorString(), flush=True)
         if connected:
-            written = probe.write(b"show\\n")
+            written = probe.write(b"show\n")
             print("probe write bytes:", written, flush=True)
             print("probe bytesToWrite before wait:", probe.bytesToWrite(), flush=True)
             acknowledged = probe.waitForBytesWritten(1000)
