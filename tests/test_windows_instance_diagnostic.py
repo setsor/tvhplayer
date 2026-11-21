@@ -43,7 +43,7 @@ def test_windows_local_socket_activation_probe():
             print("probe state:", probe.state().name, flush=True)
             print("probe error:", probe.errorString(), flush=True)
             if connected:
-                count = probe.write(b"show\\n")
+                count = probe.write(b"show\n")
                 print("probe write bytes:", count, flush=True)
                 print("bytesToWrite before wait:", probe.bytesToWrite(), flush=True)
                 acknowledged = probe.waitForBytesWritten(1000)
