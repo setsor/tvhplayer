@@ -2794,6 +2794,11 @@ def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
     assert clipboard.text() == 'keep-me'
     assert password not in window.statusbar.currentMessage()
     assert 'clipboard' not in window.statusbar.currentMessage().lower()
+    # This test covers opening the web UI, not the shutdown lookup. The fake
+    # supervisor has no recording backend; don't start an async lookup while
+    # closing this window and leave its callback alive for the next Qt test.
+    window._confirm_quit = lambda: True
+    window.builtin = None
     window.close()
     app.processEvents()
 
