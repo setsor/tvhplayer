@@ -4767,7 +4767,9 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
         create_dvr_entry=lambda *args, **kwargs: created.append(args))
 
     def confirm(dialog):
+        print("TIMESHIFT-DIAG: RecordingDurationDialog.exec entered", flush=True)
         titles.append(dialog.windowTitle())
+        print("TIMESHIFT-DIAG: dialog title", dialog.windowTitle(), "buffer checked", dialog.records_from_buffer(), flush=True)
         assert dialog.records_from_buffer()
         assert str(tmp_path) in dialog.folder_label.text()
         if choice == 'live':
@@ -4796,7 +4798,18 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
             print("TIMESHIFT-DIAG: trigger shortcut", flush=True)
             shortcut.trigger()
         print("TIMESHIFT-DIAG: process events", flush=True)
-        app.processEvents()
+        import sys
+        previous_excepthook = sys.excepthook
+        def _diagnostic_excepthook(exc_type, exc_value, exc_tb):
+            import traceback
+            print("TIMESHIFT-DIAG: unhandled Qt/Python exception", flush=True)
+            traceback.print_exception(exc_type, exc_value, exc_tb)
+            previous_excepthook(exc_type, exc_value, exc_tb)
+        sys.excepthook = _diagnostic_excepthook
+        try:
+            app.processEvents()
+        finally:
+            sys.excepthook = previous_excepthook
         print("TIMESHIFT-DIAG: events processed; titles", titles, "menu visible", bar.record_menu.isVisible(), flush=True)
         assert not bar.record_menu.isVisible()
         assert titles == ['Record']
