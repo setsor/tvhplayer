@@ -294,6 +294,10 @@ def _make_player(monkeypatch, tmp_path, prepare=None, start_hidden=False):
     app = QApplication.instance() or QApplication([])
     app.setAttribute(Qt.ApplicationAttribute.AA_DontCreateNativeWidgetSiblings, True)
     window = ui.TVHeadendClient(start_hidden=start_hidden)
+    # Most UI tests do not exercise server DVR fetching. Keep the pane on an
+    # already-synced empty result so tests never start real HTTP workers by
+    # accident; the few fetch-specific tests opt back into the unknown state.
+    window.synced_recordings = lambda _server: ('synced', [])
     # Not GitHub: once a newer release is out, its Update Available box waits for a click.
     # On the window, not the class: its check comes 10 s after it opens, often during a
     # later test, when a stub on the class would be undone.
@@ -1574,6 +1578,7 @@ def test_tasks_panel_reads_the_server_without_blocking(monkeypatch, tmp_path):
     servers = {'name': 'old', 'url': 'http://old'}
     window.current_server = lambda: servers
     window._server_requests_ready = lambda: True
+    window.synced_recordings = lambda _server: ('unknown', None)
     panel = window.tasks_pane
     panel.open_backend = lambda server: SlowBackend(server['name'])
     try:
@@ -1652,6 +1657,7 @@ def _slow_dvr_window(monkeypatch, tmp_path):
     server = {'name': 'tv', 'url': 'http://tv'}
     window.current_server = lambda: server
     window._server_requests_ready = lambda: True
+    window.synced_recordings = lambda _server: ('unknown', None)
     window.get_backend = lambda: backend
     window.open_backend = lambda srv: backend
     window.tasks_pane.open_backend = lambda srv: backend
