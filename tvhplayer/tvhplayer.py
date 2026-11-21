@@ -4693,7 +4693,10 @@ class TVHeadendClient(QMainWindow):
         self.server_combo = QComboBox()
         self.server_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.server_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.server_combo.setMinimumContentsLength(8)
+        # Keep the selected name elided in a narrow pane; the dropdown still
+        # offers the full server names. Six characters avoid a Windows-only
+        # minimum-size floor while preserving the server action buttons.
+        self.server_combo.setMinimumContentsLength(6)
         for server in self.servers:
             self.server_combo.addItem(server['name'])
         # The last server, chosen before the change signal is connected: the
