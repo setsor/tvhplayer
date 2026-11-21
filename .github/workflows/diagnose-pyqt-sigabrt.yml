@@ -99,6 +99,11 @@ jobs:
             echo '~~~'
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$failed" > diagnostics/has-failures.txt
+      - name: Bisect preceding UI tests for News Hour interference
+        shell: bash
+        run: |
+          set -eo pipefail
+          python scripts/diagnose_quit_interference.py | tee diagnostics/quit-bisect-console.log
       - name: Upload diagnostic logs, even on failure
         if: always()
         uses: actions/upload-artifact@v7
