@@ -84,6 +84,10 @@ jobs:
           if [ "$RUNNER_OS" = Windows ]; then
             check windows-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
           fi
+          # Compare the full UI module with the existing sys.modules reload
+          # disabled. The audit records any start-watch/tasks-fetch workers
+          # that remain alive after each test, including their Python stacks.
+          PYTHONPATH=tests check ui-module-reuse 1 -p pytest_thread_audit tests/test_pyqt6_ui.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
