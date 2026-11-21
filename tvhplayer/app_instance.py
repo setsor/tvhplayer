@@ -75,12 +75,46 @@ class AppInstance(QObject):
             if not socket.waitForConnected(3000):
                 socket.deleteLater()
                 raise RuntimeError('TVHplayer is already starting or stopping. Try opening it again shortly.')
-            socket.write(b'show\n')
-            sent = socket.waitForBytesWritten(1000)
+            # QAbstractSocket::waitForBytesWritten() is documented by Qt as
+            # potentially failing randomly on Windows. Use its bytesWritten
+            # signal instead, while the event loop remains active.
+            from PyQt6.QtCore import QEventLoop, QTimer
+
+            payload = b'show\n'
+            loop = QEventLoop()
+            timer = QTimer()
+            timer.setSingleShot(True)
+
+            def bytes_written(_count):
+                if socket.bytesToWrite() == 0:
+                    loop.quit()
+
+            socket.bytesWritten.connect(bytes_written)
+            written = socket.write(payload)
+            if written != len(payload):
+                socket.bytesWritten.disconnect(bytes_written)
+                socket.abort()
+                socket.deleteLater()
+                raise RuntimeError('Could not queue the request to activate the running TVHplayer.')
+
+            if socket.bytesToWrite():
+                timer.timeout.connect(loop.quit)
+                timer.start(1000)
+                loop.exec()
+            timer.stop()
+            socket.bytesWritten.disconnect(bytes_written)
+
+            if socket.bytesToWrite():
+                error = socket.errorString()
+                socket.abort()
+                socket.deleteLater()
+                raise RuntimeError(
+                    'Could not send the request to activate the running TVHplayer'
+                    + (f': {error}' if error else '.')
+                )
+
             socket.disconnectFromServer()
             socket.deleteLater()
-            if not sent:
-                raise RuntimeError('Could not ask the running TVHplayer to open its window.')
             return False
         # Only the proven lock owner may remove a socket left by a crashed owner.
         QLocalServer.removeServer(self.name)
