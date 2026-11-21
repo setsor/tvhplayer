@@ -350,6 +350,11 @@ def test_window_starts_on_the_last_server_only(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'find_bundled_binary', lambda: '/bin/true')
         monkeypatch.setattr(ui.BuiltinSupervisor, 'start', lambda self, *a, **k: events.append('builtin'))
         monkeypatch.setattr(ui.ChannelFetch, 'start', lambda self: events.append(self.server['name']))
+        # This startup-selection test does not exercise DVR tasks. Report an
+        # already-synced empty list instead of opening a real HTTP tasks-fetch
+        # worker against the documentation-only 192.0.2.1 test address.
+        monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                            lambda self, server: ('synced', []))
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path, prepare)
     try:
