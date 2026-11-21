@@ -27,7 +27,7 @@ def run(label, arguments):
     except subprocess.TimeoutExpired as exc:
         output, status = str(exc.stdout or "") + "\nTIMEOUT", 124
     (OUT / (label + ".log")).write_text(output, encoding="utf-8", errors="replace")
-    failed_target = bool(re.search(r"FAILED\\s+[^\\n]*" + TARGET, output))
+    failed_target = bool(re.search(r"FAILED\s+[^\n]*" + re.escape(TARGET), output))
     line = f"{label}: exit={status}; target_failed={failed_target}; selected={len(arguments)}"
     print(line, flush=True)
     for part in output.splitlines():
