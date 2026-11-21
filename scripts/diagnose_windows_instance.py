@@ -1,6 +1,8 @@
 """Windows-only read-only diagnostic of QLocalSocket activation handoff."""
 import tempfile
+import sys
 from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PyQt6.QtCore import QCoreApplication
 from PyQt6.QtNetwork import QLocalSocket
 from tvhplayer.app_instance import AppInstance
