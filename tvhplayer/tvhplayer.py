@@ -7861,7 +7861,10 @@ class TVHeadendClient(QMainWindow):
             index (int): Index of the newly selected server in self.servers list
         """
         print(f"Debug: Server changed to index {index}")
-        if index >= 0:  # Valid index selected
+        # Qt may emit currentIndexChanged when a combo receives temporary
+        # entries before the backing server list is populated. Never allow an
+        # IndexError to escape a Qt signal handler (which aborts PyQt).
+        if 0 <= index < len(self.servers):
             print(f"Debug: Switching to server: {self.servers[index]['name']}")
             
             self.config['last_server'] = index
