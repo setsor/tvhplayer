@@ -59,5 +59,10 @@ jobs:
         run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k test_opening_builtin_web_ui_does_not_copy_a_password
       - name: Run the next shutdown test independently
         run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k test_quit_asks_the_builtin_server_even_when_another_is_selected
+      - name: Run the idle-logo test independently
+        run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k test_the_idle_logo_shrinks_with_the_player
+      - name: Run the Windows timeshift shortcut test independently
+        if: runner.os == 'Windows'
+        run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k 'test_builtin_server_records_through_one_window and buffer-local_shortcut'
       - name: Run the complete PyQt6 UI test module
         run: python -X faulthandler -m pytest -vv --tb=long --timeout=300 -p no:cacheprovider tests/test_pyqt6_ui.py
