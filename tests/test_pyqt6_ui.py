@@ -4747,7 +4747,10 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
     window.active_channel = lambda: channel
     window._with_programme_on_now = lambda _c, then: then(None)
     window.current_server = lambda: {'name': 'Built-in', 'builtin': True, 'url': 'http://127.0.0.1:9981'}
-    window.builtin = types.SimpleNamespace(set_recordings_dir=lambda _folder: True)
+    # A real built-in supervisor exposes is_running; Qt metadata timers call it.
+    window.builtin = types.SimpleNamespace(
+        set_recordings_dir=lambda _folder: True, is_running=lambda: True,
+    )
     window.set_local_recording_dir(str(tmp_path))
     window._refresh_tasks = lambda **_k: None
     buffered, created, titles = [], [], []
