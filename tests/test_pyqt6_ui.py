@@ -4777,20 +4777,27 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
 
     monkeypatch.setattr(ui.RecordingDurationDialog, 'exec', confirm)
     try:
+        print("TIMESHIFT-DIAG: show window", flush=True)
         window.show()
         window._sync_record_controls()
         bar = window.controls_bar
         assert bar.record_more_btn.isHidden()
+        print("TIMESHIFT-DIAG: fill playback menu", flush=True)
         window._fill_playback_menu(window.playback_menu)
         texts = [a.text() for a in window.playback_menu.actions()]
         assert not any('This &Computer' in t for t in texts)
         if entry == 'button':
+            print("TIMESHIFT-DIAG: click record button", flush=True)
             window.record_btn.click()
         else:
             shortcut = next(a for a in window.playback_actions
                             if a is not None and a.shortcut().toString() == 'Ctrl+Shift+R')
+            print("TIMESHIFT-DIAG: shortcut found", shortcut.shortcut().toString(), "enabled", shortcut.isEnabled(), "visible", shortcut.isVisible(), "context", shortcut.shortcutContext().name, flush=True)
+            print("TIMESHIFT-DIAG: trigger shortcut", flush=True)
             shortcut.trigger()
+        print("TIMESHIFT-DIAG: process events", flush=True)
         app.processEvents()
+        print("TIMESHIFT-DIAG: events processed; titles", titles, "menu visible", bar.record_menu.isVisible(), flush=True)
         assert not bar.record_menu.isVisible()
         assert titles == ['Record']
         if choice == 'buffer':
