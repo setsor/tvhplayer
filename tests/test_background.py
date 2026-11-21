@@ -180,3 +180,25 @@ def test_login_launch_does_not_activate_existing_instance(qapp, tmp_path):
     finally:
         login.close()
         owner.close()
+
+
+def test_second_launch_activation_does_not_depend_on_wait_for_bytes_written(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtNetwork import QLocalSocket
+    from tvhplayer.app_instance import AppInstance
+
+    # Qt documents that waitForBytesWritten() may fail randomly on Windows.
+    # The activation handshake must rely on bytesWritten/event-loop delivery.
+    monkeypatch.setattr(QLocalSocket, 'waitForBytesWritten', lambda *_args: False)
+    owner = AppInstance(tmp_path)
+    second = AppInstance(tmp_path)
+    activated = []
+    owner.show_requested.connect(lambda: activated.append(True))
+    try:
+        assert owner.acquire()
+        assert not second.acquire()
+        wait_for(qapp, lambda: activated)
+        assert activated == [True]
+        assert owner.server.isListening()
+    finally:
+        second.close()
+        owner.close()
