@@ -8567,6 +8567,8 @@ class TVHeadendClient(QMainWindow):
             return
         self._closing = True
         self._shutdown_started_at = time.monotonic()
+        # Stop the channel-start watcher before destroying its Qt signal receiver.
+        self._stop_start_watch()
         # Stop foreground work before waiting for the backend. A queued stream
         # URL or playback-start callback must not revive it during shutdown.
         self._play_generation += 1
