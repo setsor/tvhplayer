@@ -57,3 +57,5 @@ jobs:
           python packaging/build-native.py
       - name: Run only the web UI close fixture test
         run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k test_opening_builtin_web_ui_does_not_copy_a_password
+      - name: Run the next shutdown test independently
+        run: python -X faulthandler -m pytest -vv -s --tb=long --timeout=120 -p no:cacheprovider tests/test_pyqt6_ui.py -k test_quit_asks_the_builtin_server_even_when_another_is_selected
