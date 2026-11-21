@@ -86,6 +86,10 @@ jobs:
           # Keep original pytest output unmodified for attribution.
           check isolated-quit-lookup 0 tests/test_pyqt6_ui.py -k 'test_quit_asks_the_builtin_server_even_when_another_is_selected'
           check isolated-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
+          # Determine whether failure depends on earlier tests in the same
+          # UI module, on earlier test modules, or on all-suite interactions.
+          check quit-group 0 tests/test_pyqt6_ui.py -k 'quit'
+          check ui-file-only 0 tests/test_pyqt6_ui.py -x
           check baseline-suite 0 tests -x
           check reuse-suite 1 tests -x
           {
