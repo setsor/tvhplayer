@@ -617,13 +617,15 @@ def test_real_buffer_recording_contains_rewound_and_new_footage(tmp_path, disk):
         player.close()
 
 
-@pytest.mark.parametrize('mode', ['auto-safe', 'auto-copy', 'no'])
+@pytest.mark.parametrize('mode', ['auto-safe', 'auto-copy', 'nvdec-copy', 'd3d11va-copy', 'no'])
 def test_hardware_decoding_changes_only_on_next_stream(engine, mode):
+    from tvhplayer.core.player import HARDWARE_DECODING_DEFAULT
+
     player, mpv, _ = engine
     player.play('http://example.test/first')
-    assert mpv.props['hwdec'] == 'auto-safe'
+    assert mpv.props['hwdec'] == HARDWARE_DECODING_DEFAULT
     player.set_hardware_decoding(mode)
-    assert mpv.props['hwdec'] == 'auto-safe'
+    assert mpv.props['hwdec'] == HARDWARE_DECODING_DEFAULT
     player.play('http://example.test/second')
     assert mpv.props['hwdec'] == mode
     player.play('http://example.test/third')
@@ -662,3 +664,59 @@ def test_a_late_start_of_the_previous_channel_is_ignored(engine):
     for callback in queued:
         callback()
     assert seen == ['playing']
+
+
+def test_media_info_requests_one_async_snapshot_without_property_reads(engine, monkeypatch):
+    player, mpv, _ = engine
+    future = Future()
+    calls = []
+
+    def command_async(*args):
+        calls.append(args)
+        return future
+
+    monkeypatch.setattr(mpv, 'command_async', command_async)
+    assert player.media_info() is future
+    assert not future.done()
+    assert len(calls) == 1
+    command, template = calls[0]
+    assert command == 'expand-text'
+    assert '${video-params/w:Unavailable}' in template
+    assert '${video-params/h:Unavailable}' in template
+    assert '${video-codec:Unavailable}' in template
+    assert '${audio-codec:Unavailable}' in template
+    assert '${audio-params/samplerate:Unavailable}' in template
+    assert not mpv.commands
+
+
+@pytest.mark.parametrize('reply', ['pending', 'success', 'failure'])
+def test_begin_shutdown_stops_asynchronously_and_rejects_late_playback(engine, monkeypatch, reply):
+    player, mpv, seen = engine
+    queued = []
+    player.set_handlers(on_playing=lambda: seen.append('playing'), schedule=queued.append)
+    player.play('http://example.test/stream')
+    mpv.fire(_event(_EventID.PLAYBACK_RESTART))
+    pending = Future()
+    calls = []
+
+    def command_async(*args):
+        calls.append(args)
+        return pending
+
+    monkeypatch.setattr(mpv, 'command_async', command_async)
+    player.begin_shutdown()
+    player.begin_shutdown()
+    assert calls == [('stop',)]
+    assert not pending.done() and not mpv.commands
+    for callback in queued:
+        callback()
+    player.play('http://example.test/obsolete-stream')
+    mpv.fire(_event(_EventID.PLAYBACK_RESTART))
+    mpv.fire(_event(_EventID.END_FILE, _EndFile.EOF))
+    assert len(mpv.loaded) == 1 and not seen
+    if reply == 'success':
+        pending.set_result(None)
+    elif reply == 'failure':
+        pending.set_exception(RuntimeError('decoder already stopped'))
+    player.close()
+    assert mpv.terminated

@@ -41,6 +41,39 @@ class WslcCommandError(WslcError):
         super().__init__(f'WSL container {command} failed: {output[-2000:]}')
 
 
+def image_absent(error, image):
+    """Whether WSLc rejected a command because this image id is not imported.
+
+    Port conflicts and other launch failures mention neither this id nor the
+    image-not-found code, so a skipped inspect is retried only for this case.
+    """
+    text = getattr(error, 'output', None)
+    if text is None:
+        text = str(error)
+    if not image or image not in text:
+        return False
+    lower = text.lower()
+    return ('wslc_e_image_not_found' in lower
+            or f'no such image: {image}'.lower() in lower
+            or f'object not found: {image}'.lower() in lower
+            or 'unable to find image' in lower)
+
+
+def object_missing(output, name):
+    """Whether WSLc says ``name`` is already gone (old and current wording)."""
+    text = (output or '').strip()
+    if not text or not name:
+        return False
+    if text == f'Object not found: {name}':
+        return True
+    lower = text.lower()
+    if f"container '{name.lower()}' not found" in lower:
+        return True
+    if 'wslc_e_container_not_found' in lower and name in text:
+        return True
+    return False
+
+
 def port_conflict(error):
     message = str(error).lower()
     return any(text in message for text in ('address already in use', 'only one usage of each socket',
@@ -58,6 +91,8 @@ class WslcRuntimeAdapter:
         self.progress = None
         self.image_state = 'not_checked'
         self.archive_verified = False
+        self.skipped_image_inspect = False
+        self.established = False
 
     def _progress(self, message):
         if self.progress:
@@ -119,6 +154,26 @@ class WslcRuntimeAdapter:
         from .windows_prerequisites import probe_windows, prerequisite_issue, setup_checks
         if self.executable is None:
             self.executable = find_wslc()
+        # Normal starts use the runtime itself. CIM diagnostics are relatively
+        # expensive and are useful only when the runtime cannot answer. This
+        # does not claim that virtualization works: launch/readiness still
+        # establish that, and command() translates virtualization failures.
+        self._prerequisite_state = {}
+        version_error = None
+        version = ''
+        if self.established:
+            try:
+                version = self.command('version')
+                match = re.search(r'(\d+)\.(\d+)\.(\d+)', version)
+                if match and tuple(map(int, match.groups())) >= (2, 9, 3):
+                    self.command('info')
+                    self.setup_checks = setup_checks({}, True, tuple(map(int, match.groups())))
+                    return
+            except WslcError as exc:
+                if self.cancel is not None and self.cancel.is_set():
+                    raise
+                if not version:
+                    version_error = exc
         issue = None
         if sys.platform == 'win32' and self.runner is None:
             self._prerequisite_state = probe_windows()
@@ -127,11 +182,11 @@ class WslcRuntimeAdapter:
                 issue = ('Install WSL to set up the built-in server. Setup enables the required '
                          'Windows features. Restart Windows when setup finishes, even if no reboot '
                          'prompt appears.', 'install')
-        version_error = None
-        try:
-            version = self.command('version')
-        except WslcError as exc:
-            version, version_error = '', exc
+        if not self.established:
+            try:
+                version = self.command('version')
+            except WslcError as exc:
+                version_error = exc
         match = re.search(r'(\d+)\.(\d+)\.(\d+)', version)
         self.setup_checks = setup_checks(self._prerequisite_state, bool(self.executable),
                                         tuple(map(int, match.groups())) if match else None)
@@ -151,21 +206,44 @@ class WslcRuntimeAdapter:
                 'hypervisor and system policy, or connect to an existing server.\n\n'
                 f'Diagnostic details:\n{exc}', 'diagnose') from exc
 
-    def provision(self, directory):
+    def provision(self, directory, trusted_image=None):
         self.image_state = 'not_checked'
         self.archive_verified = False
+        self.skipped_image_inspect = False
         self._progress('Checking the server image…')
         directory = Path(directory)
         started = time.monotonic()
         try:
+            read_started = time.monotonic()
             manifest = read_manifest(directory)
             image = manifest['image']
             self.image_state = 'available'
+            logging.getLogger(__name__).info(
+                'Built-in startup: image manifest read in %.3fs', time.monotonic() - read_started)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise WslcError(f'Install the matching offline backend bundle: {exc}') from exc
-        # WSLc checks the immutable imported image identity and architecture.
-        # The archive is only needed (and hashed) when that image is absent.
-        if not self.has_image(image):
+        # The last successful start already ran this image id. Inspecting it
+        # again costs seconds and is not repeated later in the same attempt.
+        # A deleted image fails the next image command and is imported then.
+        if isinstance(trusted_image, str) and trusted_image == image:
+            self.skipped_image_inspect = True
+            self.image_state = 'installed'
+            for row in self.setup_checks:
+                if row['key'] == 'image':
+                    row['status'] = 'passed'
+            logging.getLogger(__name__).info(
+                'Built-in startup: skipped image inspect; last start used this image (%.3fs)',
+                time.monotonic() - started)
+            return image
+        # One inspect per startup. check() has already talked to WSLc when
+        # established is set, so this cost is the image query itself. The
+        # archive is hashed only when that image is absent.
+        inspect_started = time.monotonic()
+        present = self.has_image(image)
+        logging.getLogger(__name__).info(
+            'Built-in startup: image inspect %s in %.3fs (WSLc already checked: %s)',
+            'hit' if present else 'miss', time.monotonic() - inspect_started, self.established)
+        if not present:
             self._progress('Verifying the server files…')
             try:
                 verify_bundle(directory, cancel=self.cancel)
@@ -231,13 +309,25 @@ class WslcRuntimeAdapter:
     def configure_hdhomerun(self, transport):
         changes = transport.config() if transport else {'local_ip': '', 'local_port': 0}
         if any(self._server_settings.get(key) != value for key, value in changes.items()):
+            self._progress('Saving tuner addresses…')
             self.config_storage.update_server_settings(dict(self._server_settings, **changes))
 
-    def launch(self, image, name, owner, config, recordings, ports, udp_ports=()):
+    def launch(self, image, name, owner, config, recordings, ports, udp_ports=(), dns_servers=()):
         if self.config_storage is None or not self.config_storage.volume:
             raise WslcError('Linux server settings have not been prepared.')
+        from .windows_dns import DnsAddressError, canonical_dns_address
+        # --dns replaces inherited resolvers, so the caller passes the full list.
+        # An empty list keeps WSLc's own DNS and adds no flags.
+        dns = []
+        for address in dns_servers:
+            try:
+                dns.append(canonical_dns_address(address))
+            except DnsAddressError as exc:
+                raise WslcError(str(exc)) from exc
         args = ['run', '--detach', '--pull', 'never', '--name', name,
                 '--label', f'tvhplayer.owner={owner}', '--stop-timeout', '5']
+        for address in dns:
+            args += ['--dns', address]
         for host, guest in zip(ports, (9981, 9982)):
             args += ['--publish', f'127.0.0.1:{int(host)}:{guest}/tcp']
         # HDHomeRun MPEG-TS return path: tuner n sends to local_port+n on the
@@ -249,9 +339,13 @@ class WslcRuntimeAdapter:
         # as on Linux, and verify_running checks that before the app uses them.
         args += ['--mount', f'type=volume,source={self.config_storage.volume},target=/config',
                  '--mount', bind_mount(str(recordings), '/recordings'), '--entrypoint', '/bin/sh']
-        self.command(*args, image, '-c',
-                     'umask 077; exec /usr/libexec/tvhplayer/tvheadend -c /config/data -B '
-                     '--bindaddr 0.0.0.0 --noacl --http_port 9981 --htsp_port 9982', timeout=60)
+        server_command = ('umask 077; exec /usr/libexec/tvhplayer/tvheadend -c /config/data -B '
+                          '--bindaddr 0.0.0.0 --noacl --http_port 9981 --htsp_port 9982')
+        if os.environ.get('TVHPLAYER_TRACE_STARTUP') == '1':
+            # The pinned fork already measures its native loading stages.
+            # Keep this opt-in: tracing adds logging and per-event EPG clocks.
+            server_command += ' -d --trace main'
+        self.command(*args, image, '-c', server_command, timeout=60)
 
     def inspect_owned(self, name, owner, cancellable=True, missing_ok=False):
         if not re.fullmatch(r'[0-9a-f]{32}', owner) or name != 'tvhplayer-' + owner:
@@ -261,10 +355,10 @@ class WslcRuntimeAdapter:
                 output = self.command('inspect', '--type', 'container', name,
                                       timeout=5, cancellable=cancellable)
             except WslcCommandError as exc:
-                if missing_ok and exc.output.strip() == f'Object not found: {name}':
+                if missing_ok and object_missing(exc.output, name):
                     return None
                 raise
-            if missing_ok and output.strip() == f'Object not found: {name}':
+            if missing_ok and object_missing(output, name):
                 return None
             data = json.loads(output)
             if isinstance(data, list):
@@ -298,14 +392,43 @@ class WslcRuntimeAdapter:
                 raise WslcError('HDHomeRun stream ports must be published on one LAN address.')
 
     def stop_owned(self, name, owner):
-        data = self.inspect_owned(name, owner, cancellable=False, missing_ok=True)
+        data = self._cleanup_step('inspect', self.inspect_owned, name, owner,
+                                  cancellable=False, missing_ok=True)
         if data is None:
             return False
         if data.get('State', {}).get('Running'):
-            self.command('stop', '--time', '5', name, timeout=8, cancellable=False)
-        self.command('remove', name, timeout=5, cancellable=False)
+            try:
+                self._cleanup_step('stop', self.command, 'stop', '--time', '5', name,
+                                   timeout=8, cancellable=False)
+            except WslcCommandError as exc:
+                # Stop can race with an exit that already deleted the container.
+                if not object_missing(exc.output, name):
+                    raise
+                return True
+        try:
+            self._cleanup_step('remove', self.command, 'remove', name, timeout=5, cancellable=False)
+        except WslcCommandError as exc:
+            # WSLc may delete on stop, or another cleanup may win the race.
+            if not object_missing(exc.output, name):
+                raise
         return True
 
-    def logs_owned(self, name, owner):
+    def _cleanup_step(self, name, operation, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            logging.getLogger(__name__).info('Shutdown: WSLc %s took %.3fs', name, time.monotonic() - started)
+
+    def logs_owned(self, name, owner, *, tail=200):
+        # Startup tracing asks for a longer tail once. Steady monitoring stays short.
+        tail = int(tail)
+        if tail < 1 or tail > 1000:
+            raise WslcError('Server log request is out of range.')
         self.inspect_owned(name, owner)
+        return self.command('logs', '--tail', str(tail), name, timeout=5)
+
+    def monitor_owned(self, name, owner, ports, udp_ports=()):
+        """Verify ownership/running state/publication once before reading logs."""
+        self.verify_running(name, owner, ports, udp_ports)
         return self.command('logs', '--tail', '200', name, timeout=5)

@@ -138,7 +138,7 @@ def test_backups_use_live_native_data_and_retain_previous(tmp_path):
     assert s.latest.read_bytes() == current
 
 
-def test_shutdown_backup_ignores_startup_cancellation(tmp_path):
+def test_explicit_backup_ignores_startup_cancellation(tmp_path):
     s, runtime = storage(tmp_path)
     s.prepare()
     runtime.cancel.set()
@@ -148,6 +148,19 @@ def test_shutdown_backup_ignores_startup_cancellation(tmp_path):
         return original(*args, **kwargs)
     runtime.command = checked
     assert s.backup().exists()
+
+
+def test_backup_allows_large_config_tar_across_windows_bind_mount(tmp_path):
+    s, runtime = storage(tmp_path)
+    s.prepare()
+    original = runtime.command
+    timeouts = []
+    def checked(*args, **kwargs):
+        timeouts.append(kwargs.get('timeout'))
+        return original(*args, **kwargs)
+    runtime.command = checked
+    assert s.backup().exists()
+    assert 300 in timeouts
 
 
 def test_missing_volume_restores_latest_backup_instead_of_stale_windows_tree(tmp_path):

@@ -17,7 +17,9 @@ from .channel_info import channel_list_options
 from .guide_feeds import GuideSource
 from .guide_match import Choice
 from .models import ServerConfig
-from .player import DEINTERLACE_AUTO, DEINTERLACE_MODES, HARDWARE_DECODING_MODES
+from .player import (
+    DEINTERLACE_AUTO, DEINTERLACE_MODES, HARDWARE_DECODING_DEFAULT, HARDWARE_DECODING_MODES,
+)
 from .playlist_sync import PlaylistSource, valid_state_id
 from .recorder import DEFAULT_FORMAT, RECORDING_FORMATS
 from .urls import pin_http_port
@@ -112,7 +114,7 @@ def default_config():
         'deinterlace': DEINTERLACE_AUTO,
         # Probe a new stream for less time, so a channel's picture comes sooner.
         'fast_channel_start': False,
-        'hardware_decoding': 'auto-safe',
+        'hardware_decoding': HARDWARE_DECODING_DEFAULT,
         # Timeshift buffer on disk, up to this many GB, instead of mpv's buffer in memory.
         'timeshift_on_disk': False,
         'timeshift_gb': 4,
@@ -132,6 +134,9 @@ def default_config():
         'builtin_padding_late': 5,
         # Warn when the recordings folder has less than this many GB free; 0 never warns.
         'low_space_gb': 5,
+        # Windows WSLc only: an extra DNS server after the ones Windows already provides.
+        'wslc_extra_dns': False,
+        'wslc_extra_dns_address': '',
         # Legacy field: having offered setup is not evidence that channels exist.
         'setup_offered': False,
         'setup_started': False,
@@ -220,7 +225,7 @@ def _normalize(data):
     if cfg.get('deinterlace') not in DEINTERLACE_MODES:
         cfg['deinterlace'] = DEINTERLACE_AUTO
     if cfg.get('hardware_decoding') not in HARDWARE_DECODING_MODES:
-        cfg['hardware_decoding'] = 'auto-safe'
+        cfg['hardware_decoding'] = HARDWARE_DECODING_DEFAULT
     # Legacy Settings choice (auto/mpv/vlc); playback is always libmpv now.
     cfg.pop('player_engine', None)
     if not isinstance(cfg.get('ui_theme'), str) or not cfg['ui_theme'].strip():
@@ -251,6 +256,21 @@ def _normalize(data):
     value = cfg.get('timeshift_gb')
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= TIMESHIFT_MAX_GB:
         cfg['timeshift_gb'] = defaults['timeshift_gb']
+    cfg['wslc_extra_dns'] = bool(cfg.get('wslc_extra_dns'))
+    address = cfg.get('wslc_extra_dns_address')
+    if not isinstance(address, str):
+        address = ''
+    else:
+        address = address.strip()
+    if address:
+        try:
+            from .windows_dns import canonical_dns_address
+            address = canonical_dns_address(address)
+        except ValueError:
+            address = ''
+    if not address:
+        cfg['wslc_extra_dns'] = False
+    cfg['wslc_extra_dns_address'] = address
     return cfg
 
 

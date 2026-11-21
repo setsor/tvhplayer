@@ -58,6 +58,9 @@ class FakeAdmin:
         self.muxes[uuid] = dict(conf, scan_state=0, scan_result=1)
         return uuid
 
+    def create_muxes(self, network_uuid, confs):
+        return [self.create_mux(network_uuid, conf) for conf in confs]
+
     def list_services(self, _mux_uuids, fields=None, network_uuid=""):
         return []
 
@@ -654,7 +657,9 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
         def set_plays_on_start(self, on):
             self.play = on
 
-        decoder = 'auto-safe'
+        from tvhplayer.core.player import HARDWARE_DECODING_DEFAULT
+
+        decoder = HARDWARE_DECODING_DEFAULT
 
         def hardware_decoding(self):
             return self.decoder
@@ -899,8 +904,10 @@ def test_settings_toggle_hiding_and_check_now(app, monkeypatch):
     assert not dialog.play_check.isChecked()
     dialog.play_check.click()
     assert host.play is True
-    assert dialog.hardware_decoding_combo.currentData() == 'auto-safe'
-    for mode in ('no', 'auto-copy', 'auto-safe'):
+    from tvhplayer.core.player import HARDWARE_DECODING_DEFAULT
+
+    assert dialog.hardware_decoding_combo.currentData() == HARDWARE_DECODING_DEFAULT
+    for mode in ('auto-safe', 'auto-copy', 'nvdec-copy', 'no'):
         dialog.hardware_decoding_combo.setCurrentIndex(dialog.hardware_decoding_combo.findData(mode))
         assert host.decoder == mode
     assert not dialog.fast_start_check.isChecked()

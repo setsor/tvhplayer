@@ -13,13 +13,13 @@ from time import monotonic
 from .buffer_recorder import BufferRecorder
 from .player import (
     BufferRecordingPoint, DEINTERLACE_AUTO, DEINTERLACE_MODES, DEINTERLACE_OFF, DEINTERLACE_ON,
-    HARDWARE_DECODING_MODES, NO_TRACK, Player, Timeshift,
+    HARDWARE_DECODING_DEFAULT, HARDWARE_DECODING_MODES, NO_TRACK, Player, Timeshift,
 )
 from .proxy import hide_http_proxy, stream_proxy
 
 MPV_OPTIONS = {
     'vo': 'libmpv',
-    'hwdec': 'auto-safe',
+    'hwdec': HARDWARE_DECODING_DEFAULT,
     # A player inside the app: no mpv keys, controls, scripts or config files.
     'input_default_bindings': False,
     'input_vo_keyboard': False,
@@ -71,6 +71,7 @@ class MpvPlayer(Player):
         self._buffer_recorder = None
         # Set by play(); the first picture of that stream reports playback started.
         self._waiting_for_picture = False
+        self._shutting_down = False
         # The proxy goes to mpv per stream, so a local or LAN server is reached directly.
         hide_http_proxy()
         # QApplication sets the numeric locale from the desktop; libmpv refuses anything but C.
@@ -137,6 +138,8 @@ class MpvPlayer(Player):
         self._emit(report)
 
     def play(self, url: str):
+        if self._shutting_down:
+            return
         self._stop_buffer_recording()
         self._stream_serial += 1
         self._configure_timeshift_store()
@@ -415,8 +418,33 @@ class MpvPlayer(Player):
         print(f'Hardware decoding: {mpv.hwdec_current or "no"}')
         print(f'Dropped frames: {mpv.frame_drop_count} (decoder: {mpv.decoder_frame_drop_count})')
 
+    def media_info(self):
+        # One bounded snapshot on mpv's event thread. Synchronous property reads
+        # can wait for the decoder while a stream is opening or stopping.
+        return self._mpv.command_async('expand-text', '\n'.join((
+            'Resolution: ${video-params/w:Unavailable} × ${video-params/h:Unavailable}',
+            'Video codec: ${video-codec:Unavailable}',
+            'Pixel format: ${video-params/pixelformat:Unavailable}',
+            'Hardware decoding: ${hwdec-current:Unavailable}',
+            '',
+            'Audio codec: ${audio-codec:Unavailable}',
+            'Sample rate: ${audio-params/samplerate:Unavailable} Hz',
+            'Audio channels: ${audio-params/channels:Unavailable}',
+        )))
+
+    def begin_shutdown(self):
+        if self._shutting_down:
+            return
+        self._shutting_down = True
+        super().begin_shutdown()
+        self._stream_serial += 1
+        self._waiting_for_picture = False
+        if self._mpv is not None:
+            self._mpv.command_async('stop')
+
     def close(self):
         # Quiesce playback first; native callbacks must not reach a closing Qt window.
+        self._shutting_down = True
         self._on_playing = self._on_stopped = self._on_error = None
         self._stop_buffer_recording()
         player = self._mpv

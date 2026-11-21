@@ -5,15 +5,48 @@ The window owns the video widget. An engine opens a URL in that widget.
 
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
-from typing import Callable, List, NamedTuple, Optional, Tuple
+from typing import Callable, List, NamedTuple, Optional, Sequence, Tuple
 
 # Deinterlacing: the engine decides from the stream, always on, or off.
 DEINTERLACE_AUTO = 'auto'
 DEINTERLACE_ON = 'on'
 DEINTERLACE_OFF = 'off'
 DEINTERLACE_MODES = (DEINTERLACE_AUTO, DEINTERLACE_ON, DEINTERLACE_OFF)
-HARDWARE_DECODING_MODES = ('auto-safe', 'auto-copy', 'no')
+
+# mpv --hwdec. Software on Windows (libmpv/OpenGL path); auto-safe elsewhere.
+_HARDWARE_DECODING_COMMON: Tuple[Tuple[str, str], ...] = (
+    ('Software', 'no'),
+    ('Hardware — automatic', 'auto-safe'),
+    ('Hardware — copy-back', 'auto-copy'),
+    ('NVIDIA — copy-back', 'nvdec-copy'),
+)
+_HARDWARE_DECODING_WINDOWS: Tuple[Tuple[str, str], ...] = (
+    ('Direct3D 11 — copy-back', 'd3d11va-copy'),
+)
+HARDWARE_DECODING_MODES = tuple(dict.fromkeys(
+    mode for _, mode in _HARDWARE_DECODING_COMMON + _HARDWARE_DECODING_WINDOWS
+))
+
+
+def hardware_decoding_default(platform: Optional[str] = None) -> str:
+    """Default ``hwdec`` for new configs on this platform."""
+    platform = sys.platform if platform is None else platform
+    return 'no' if platform == 'win32' else 'auto-safe'
+
+
+HARDWARE_DECODING_DEFAULT = hardware_decoding_default()
+
+
+def hardware_decoding_choices(platform: Optional[str] = None) -> Sequence[Tuple[str, str]]:
+    """Labels and mpv ``hwdec`` values for Settings on this platform."""
+    platform = sys.platform if platform is None else platform
+    if platform == 'win32':
+        return _HARDWARE_DECODING_COMMON + _HARDWARE_DECODING_WINDOWS
+    return _HARDWARE_DECODING_COMMON
+
+
 # The track id that turns subtitles off.
 NO_TRACK = -1
 
@@ -161,6 +194,21 @@ class Player(ABC):
 
     def log_stats(self):
         """Print engine-specific playback stats. The default does nothing."""
+
+    def media_info(self):
+        """Return a cancellable Future containing a plain-text media snapshot.
+
+        Submitting the request must not wait for the playback engine.
+        """
+        from concurrent.futures import Future
+
+        result = Future()
+        result.set_result(None)
+        return result
+
+    def begin_shutdown(self):
+        """Quiesce playback without waiting; close() releases native resources later."""
+        self._on_playing = self._on_stopped = self._on_error = None
 
     def close(self):
         """Release the engine. The default does nothing."""

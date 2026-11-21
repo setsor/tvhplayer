@@ -101,6 +101,7 @@ try:
     from .playlist_dialogs import ImportPlaylistDialog, PlaylistJob, PlaylistsDialog
     from .guide_dialogs import GuideJob, GuideSourcesDialog
     from .about_dialog import AboutDialog
+    from .media_info import MediaInfoDialog
     from .settings_dialog import SettingsDialog
     from .setup_wizard import SetupWizard
     from .sleep_inhibit import SleepInhibitor
@@ -206,6 +207,7 @@ except ImportError:
     from playlist_dialogs import ImportPlaylistDialog, PlaylistJob, PlaylistsDialog
     from guide_dialogs import GuideJob, GuideSourcesDialog
     from about_dialog import AboutDialog
+    from media_info import MediaInfoDialog
     from settings_dialog import SettingsDialog
     from setup_wizard import SetupWizard
     from sleep_inhibit import SleepInhibitor
@@ -290,7 +292,7 @@ import logging
 import platform
 
 # Shown in About; the release notes in the metainfo file give the same version.
-APP_VERSION = "4.7.5"
+APP_VERSION = "4.7.6"
 UPDATE_CHECK_DELAY_MS = 10_000
 CHANNEL_RELOAD_SECONDS = 30
 # The not-working marks wait this long after the channel list fills.
@@ -1150,6 +1152,8 @@ class TasksPanel(QFrame):
         The server's answer redraws the rows when it arrives. A failed server
         fetch keeps the rows already shown.
         """
+        if getattr(self._host, '_closing', False):
+            return
         if server:
             self._fetch_server_tasks()
         self._redraw()
@@ -1355,6 +1359,9 @@ class TasksPanel(QFrame):
             error = exc
             # Connect again next time; the connection may be broken.
             self._close_backend()
+        if getattr(self._host, '_closing', False):
+            self._close_backend()
+            return
         try:
             self._server_fetched.emit(generation, entries, error)
         except RuntimeError:
@@ -1371,6 +1378,8 @@ class TasksPanel(QFrame):
 
     def _on_server_fetched(self, generation, entries, error):
         self._fetching = False
+        if getattr(self._host, '_closing', False):
+            return
         if generation != self._generation:
             # The server changed while this one was answering.
             self._fetch_server_tasks()
@@ -4102,12 +4111,16 @@ class ServerLogWatch(QObject):
                 try:
                     poll = feed.poll()
                 except TvhAuthError:
+                    if self._stopped.is_set():
+                        break
                     self.note.emit(
                         "The server did not accept this sign-in. "
                         "Check the username and password in the server settings."
                     )
                     break
                 except Exception as exc:
+                    if self._stopped.is_set():
+                        break
                     if not failing:
                         print(f"Debug: Server log unavailable: {exc}")
                     failing = True
@@ -4129,7 +4142,8 @@ class ServerLogWatch(QObject):
                 if poll.lines:
                     self.lines.emit(poll.lines)
         except Exception as exc:
-            self.note.emit(f"Cannot show this server's log: {exc}")
+            if not self._stopped.is_set():
+                self.note.emit(f"Cannot show this server's log: {exc}")
         finally:
             if feed is not None:
                 feed.close()
@@ -4279,13 +4293,8 @@ class TVHeadendClient(QMainWindow):
             if not app.desktopFileName():
                 app.setDesktopFileName("io.github.mfat.tvhplayer")
         geometry = self.config['window_geometry']
-        self.setGeometry(
-            geometry['x'],
-            geometry['y'],
-            geometry['width'],
-            geometry['height']
-        )
-        
+        saved_placement = self.config.get('window_placement')
+
         # Initialize servers from config. Without a packaged Tvheadend there is no built-in entry.
         self._builtin_binary = find_bundled_binary() if platform_supports_builtin() and not windows_backend_enabled() else None
         self.servers = ensure_builtin_server(
@@ -4408,6 +4417,9 @@ class TVHeadendClient(QMainWindow):
             if ensure_recording_dir(folder):
                 self.builtin.recordings_dir = folder
             self.builtin.padding = self.recording_padding()
+            if getattr(self.builtin, 'uses_wslc', False):
+                self.builtin.extra_dns = (
+                    self.config['wslc_extra_dns_address'] if self.config['wslc_extra_dns'] else '')
             self.builtin.ready.connect(self._on_builtin_ready)
             self.builtin.failed.connect(self._on_builtin_failed)
             self.builtin.status_changed.connect(self._on_builtin_phase, Qt.ConnectionType.QueuedConnection)
@@ -4459,6 +4471,7 @@ class TVHeadendClient(QMainWindow):
 
         # Then setup UI
         self.setup_ui()
+        window_frame.restore_window_placement(self, geometry, saved_placement)
         self._bind_chromecast()
         self._bind_playback_splash()
         self._check_disk_space()
@@ -6119,8 +6132,8 @@ class TVHeadendClient(QMainWindow):
                 self._show_builtin_problem()
                 self.statusbar.showMessage('The built-in server needs attention.')
                 return
-            self._show_channel_state("Starting built-in server…", busy=True)
-            self.statusbar.showMessage("Starting built-in server...")
+            self._show_channel_state('Loading channels', busy=True)
+            self.statusbar.showMessage('Starting the built-in server…')
             supervisor.start()
             return
         print(f"Debug: Fetching channels from server: {server['url']}")
@@ -6140,7 +6153,11 @@ class TVHeadendClient(QMainWindow):
             self.channel_busy.show()
         else:
             self._clear_channels()
-            self._show_channel_state(f"Loading channels from {server.get('name') or 'the server'}…", busy=True)
+            if is_builtin_server(server):
+                caption = 'Loading channels'
+            else:
+                caption = f"Loading channels from {server.get('name') or 'the server'}…"
+            self._show_channel_state(caption, busy=True)
         self.statusbar.showMessage("Connecting to server...")
         fetch.start()
 
@@ -6876,6 +6893,8 @@ class TVHeadendClient(QMainWindow):
             self.player.show_message(text)
 
     def _on_playback_started(self, casting=False):
+        if self._closing:
+            return
         if self.cast_manager.is_connected and not casting:
             return
         stream = getattr(self, '_stream', None)
@@ -7677,6 +7696,9 @@ class TVHeadendClient(QMainWindow):
                 elif item not in hidden:
                     menu.addAction(item)
         casting = self.cast_manager.is_connected
+        info = menu.addAction('Media &Information…')
+        info.setEnabled(self._media_info_available())
+        info.triggered.connect(self.show_media_info)
         self._add_stream_profile_menu(menu, cast=casting)
         if casting:
             return
@@ -7709,6 +7731,40 @@ class TVHeadendClient(QMainWindow):
             group.addAction(action)
             action.triggered.connect(lambda _checked=False, value=value: self.set_deinterlace(value))
         deinterlace.setToolTipsVisible(True)
+
+    def _media_info_available(self):
+        return (self._playback_active and not self._awaiting_playback
+                and not self.cast_manager.is_connected and not self._closing)
+
+    def show_media_info(self):
+        if not self._media_info_available():
+            return
+        player, stream = self.player, self._stream
+        dialog = getattr(self, '_media_info_dialog', None)
+        if dialog is not None:
+            old_player, old_stream = self._media_info_context
+            if old_player is player and old_stream is stream:
+                dialog.show()
+                dialog.raise_()
+                dialog.activateWindow()
+                return
+            dialog.close()
+        channel = self._playback_channel
+        dialog = MediaInfoDialog(
+            self, player.media_info,
+            lambda: (self._media_info_available() and self.player is player and self._stream is stream),
+            getattr(channel, 'name', ''),
+        )
+        self._media_info_dialog = dialog
+        self._media_info_context = (player, stream)
+
+        def closed(_result):
+            self._media_info_dialog = None
+            self._media_info_context = None
+            dialog.deleteLater()
+
+        dialog.finished.connect(closed)
+        dialog.show()
 
     def _add_track_choices(self, menu, tracks, current, choose):
         group = QActionGroup(menu)
@@ -7782,12 +7838,7 @@ class TVHeadendClient(QMainWindow):
         """Save current configuration"""
         try:
             if not self.is_fullscreen:
-                self.config['window_geometry'] = {
-                    'x': self.x(),
-                    'y': self.y(),
-                    'width': self.width(),
-                    'height': self.height()
-                }
+                window_frame.save_window_placement(self, self.config)
             self.config_store.servers = self.servers
             self.config['last_server'] = self.server_combo.currentIndex()
             self.config_store.data = self.config
@@ -8483,7 +8534,10 @@ class TVHeadendClient(QMainWindow):
     def closeEvent(self, event):
         """Save configuration when closing the application"""
         if self._closing:
-            event.accept()
+            if getattr(self, '_close_resources_done', False):
+                event.accept()
+            else:
+                event.ignore()
             return
         if self.background.close_to_background():
             event.ignore()
@@ -8497,6 +8551,24 @@ class TVHeadendClient(QMainWindow):
             event.ignore()
             return
         self._closing = True
+        self._shutdown_started_at = time.monotonic()
+        # Stop foreground work before waiting for the backend. A queued stream
+        # URL or playback-start callback must not revive it during shutdown.
+        self._play_generation += 1
+        self._play_on_start = False
+        self._playback_active = self._awaiting_playback = False
+        for name in ('hw_check_timer', 'hw_check_late_timer', '_now_next_timer', '_conversion_timer'):
+            timer = getattr(self, name, None)
+            if timer is not None:
+                timer.stop()
+        self.tasks_pane.update_timer.stop()
+        try:
+            self.player.begin_shutdown()
+        except (OSError, RuntimeError) as error:
+            print(f'Debug: Could not request playback shutdown: {error}')
+        media_info = getattr(self, '_media_info_dialog', None)
+        if media_info is not None:
+            media_info.close()
         self.background.shutdown()
         self._metadata_timer.stop()
         fetch, self._channel_fetch = self._channel_fetch, None
@@ -8521,7 +8593,34 @@ class TVHeadendClient(QMainWindow):
         for job in self._guide_jobs.values():
             job.cancel()
         if self.builtin is not None:
-            self.builtin.shut_down()
+            if getattr(self.builtin, 'uses_wslc', False):
+                self._shutdown_backend_started_at = time.monotonic()
+                self.builtin.shutdown_finished.connect(self._builtin_shutdown_finished)
+                if not self.builtin.shut_down():
+                    # Keep Qt and the supervisor alive while its worker stops
+                    # the container. Never join it here.
+                    event.ignore()
+                    return
+                self.builtin.shutdown_finished.disconnect(self._builtin_shutdown_finished)
+            else:
+                self.builtin.shut_down()
+        self._finish_close_resources()
+        super().closeEvent(event)
+        self._quit_after_close()
+
+    def _builtin_shutdown_finished(self):
+        print(f'Debug: Shutdown: built-in backend took '
+              f'{time.monotonic() - self._shutdown_backend_started_at:.3f}s')
+        self.builtin.shutdown_finished.disconnect(self._builtin_shutdown_finished)
+        self._finish_close_resources()
+        self.close()
+        self._quit_after_close()
+
+    def _finish_close_resources(self):
+        """Release remaining resources once the built-in backend is stopped."""
+        if getattr(self, '_close_resources_done', False):
+            return
+        workers_started = time.monotonic()
         # With the server gone, a running stream test notices within seconds.
         for job in self._playlist_jobs:
             if not job.shutdown(10000):
@@ -8529,8 +8628,9 @@ class TVHeadendClient(QMainWindow):
         for job in self._guide_jobs.values():
             if not job.shutdown(10000):
                 print("Debug: A guide update did not stop in time")
+        print(f'Debug: Shutdown: playlist and guide workers took {time.monotonic() - workers_started:.3f}s')
         for job in self.local_jobs:
-            job.recorder.stop()
+            self._shutdown_step('local recorder', job.recorder.stop)
         self._awake_timer.stop()
         self.sleep_inhibitor.release()
         for conversion in self.conversions:
@@ -8538,20 +8638,30 @@ class TVHeadendClient(QMainWindow):
         self._now_next_timer.stop()
         guide = getattr(self, '_guide', None)
         if guide is not None:
-            guide.shutdown()
+            self._shutdown_step('TV guide', guide.shutdown)
             guide.close()
         self._visible_logo_timer.stop()
-        self.logo_loader.shutdown()
+        self._shutdown_step('logo loader', self.logo_loader.shutdown)
         if self.picon_job is not None:
             self.picon_job.cancel()
-        self.close_backend()
+        self._shutdown_step('server connections', self.close_backend)
         if getattr(self, 'cast_manager', None) is not None:
-            self.cast_manager.close()
+            self._shutdown_step('Chromecast', self.cast_manager.close)
         if getattr(self, 'player', None) is not None:
-            self.player.close()
-        if not self.config_store.flush(timeout=30):
+            self._shutdown_step('mpv', self.player.close)
+        if not self._shutdown_step('settings flush', self.config_store.flush, timeout=30):
             print("Debug: The settings were still being saved when TVHplayer closed")
-        super().closeEvent(event)
+        self._close_resources_done = True
+
+    def _shutdown_step(self, name, operation, *args, **kwargs):
+        started = time.monotonic()
+        try:
+            return operation(*args, **kwargs)
+        finally:
+            print(f'Debug: Shutdown: {name} took {time.monotonic() - started:.3f}s')
+
+    def _quit_after_close(self):
+        print(f'Debug: Shutdown: cleanup complete in {time.monotonic() - self._shutdown_started_at:.3f}s')
         # Hidden/transient windows must not keep an explicitly quit app alive.
         if getattr(QApplication.instance(), '_tvhplayer_instance', None) is not None:
             QApplication.instance().quit()
@@ -8619,7 +8729,10 @@ class TVHeadendClient(QMainWindow):
                 except Exception:
                     pass
 
+        started = time.monotonic()
+
         def done(entries, error):
+            print(f'Debug: Shutdown: recording check took {time.monotonic() - started:.3f}s')
             self._quit_lookup_call = None
             if error is not None:
                 self._quit_lookup = ([], [], True)
@@ -8694,7 +8807,7 @@ class TVHeadendClient(QMainWindow):
 
     def _on_builtin_progress(self, message):
         if is_builtin_server(self.current_server()) and not self._channels:
-            self._show_channel_state(message, busy=True)
+            self._show_channel_state('Loading channels', busy=True)
             self.statusbar.showMessage(message)
 
     def _fix_builtin_setup(self, action):
@@ -8709,8 +8822,8 @@ class TVHeadendClient(QMainWindow):
         if self.builtin is None or self.builtin.status != phase or not is_builtin_server(self.current_server()):
             return
         if phase == 'installing':
-            self._show_channel_state('Preparing the built-in server…', busy=True)
-            self.statusbar.showMessage('Loading the offline server image…')
+            if not self._channels:
+                self._show_channel_state('Loading channels', busy=True)
         elif phase == 'stopping':
             self._show_channel_state('Stopping the built-in server…', busy=True)
         elif phase == 'stopped':
@@ -8761,12 +8874,8 @@ class TVHeadendClient(QMainWindow):
         if supervisor is None or not supervisor.is_running():
             self.statusbar.showMessage("The built-in server is not running.")
             return
-        # The page asks for a login. Hand over the password without putting it in the URL.
-        QApplication.clipboard().setText(supervisor.password)
+        # Access control is off (--noacl); the loopback URL needs no login.
         QDesktopServices.openUrl(QUrl(f"http://127.0.0.1:{supervisor.http_port}/"))
-        self.statusbar.showMessage(
-            f"Log in as \"{supervisor.username}\". The password is on the clipboard."
-        )
 
     def show_setup_wizard(self):
         """Add channels from a tuner or a playlist to the selected server, starting the built-in one if needed."""
@@ -9261,6 +9370,37 @@ class TVHeadendClient(QMainWindow):
         self.config['stay_awake_for_scheduled'] = bool(on)
         self.save_config()
         self._sync_awake()
+
+    def extra_dns_enabled(self):
+        return bool(self.config.get('wslc_extra_dns'))
+
+    def extra_dns_address(self):
+        return self.config.get('wslc_extra_dns_address') or ''
+
+    def set_extra_dns(self, enabled, address):
+        """Save an extra WSLc DNS server. It is used the next time the server starts."""
+        try:
+            from .core.windows_dns import DnsAddressError, canonical_dns_address
+        except ImportError:
+            from core.windows_dns import DnsAddressError, canonical_dns_address
+        enabled = bool(enabled)
+        text = '' if address is None else str(address)
+        if enabled:
+            stored = canonical_dns_address(text)
+        else:
+            try:
+                stored = canonical_dns_address(text) if text.strip() else self.extra_dns_address()
+            except DnsAddressError:
+                stored = self.extra_dns_address()
+        self.config['wslc_extra_dns'] = bool(enabled and stored)
+        if stored:
+            self.config['wslc_extra_dns_address'] = stored
+        elif not enabled:
+            self.config['wslc_extra_dns_address'] = ''
+        self.save_config()
+        if getattr(self.builtin, 'uses_wslc', False):
+            self.builtin.extra_dns = stored if self.config['wslc_extra_dns'] else ''
+        return self.config['wslc_extra_dns']
 
     def recording_padding(self):
         """Minutes the built-in server starts recordings early and ends them late."""
@@ -10283,7 +10423,10 @@ def main():
             QTimer.singleShot(0, lambda: portal.request(autostart=True, commandline=launch_command()))
         else:
             QTimer.singleShot(0, lambda: start_player(background_launch))
-        sys.exit(app.exec())
+        exit_code = app.exec()
+        if player is not None and getattr(player, '_closing', False):
+            print('Debug: Shutdown: Qt event loop exited')
+        sys.exit(exit_code)
     except Exception as e:
         print(f"Error starting application: {str(e)}")
         print(f"Traceback: {traceback.format_exc()}")

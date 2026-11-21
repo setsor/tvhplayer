@@ -1,8 +1,8 @@
 # The built-in server. These pins match packaging/tvheadend/pins.env;
 # tests/test_packaging_pins.py fails when they disagree.
 %global tvh_repo https://github.com/mfat/tvheadend
-%global tvh_commit 21bc3036d986f403b8e7a9ab1662fbd42e0ecfdd
-%global tvh_version 4.3^2920.g21bc3036d
+%global tvh_commit f89c949bc40e750773bc6d90f87c8b51c171339a
+%global tvh_version 4.3^2921.gf89c949bc
 %global scan_commit 31d6fb8f8b86e204518ada99bfb8cf6807c717e5
 %global dvbcsa_version 1.1.0
 %global hdhomerun_version 20250815
@@ -11,7 +11,7 @@
 %global mpv_wheel_sha256 dcf77f612e3f5ce49bd89393f37d286de7ac290db6b0800f1fdcfe0aeb5ba9b8
 
 Name:           tvhplayer
-Version:        4.7.5
+Version:        4.7.6
 Release:        1%{?dist}
 Summary:        Tvheadend desktop client with a built-in server
 
@@ -119,6 +119,12 @@ desktop-file-validate %{buildroot}%{_datadir}/applications/io.github.mfat.tvhpla
 %{_metainfodir}/io.github.mfat.tvhplayer.metainfo.xml
 
 %changelog
+* Thu Nov 19 2026 mFat <newmfat@gmail.com> - 4.7.6-1
+- Added more limpv decoder options
+- Added custom DNS settings
+- Fixed XMLTV guide imports into the Windows WSLc container
+- Bug fixes and improvements
+
 * Wed Nov 18 2026 mFat <newmfat@gmail.com> - 4.7.5-1
 - Performance improvements
 

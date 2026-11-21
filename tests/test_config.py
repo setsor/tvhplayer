@@ -7,6 +7,19 @@ import pytest
 from tvhplayer.core.config import ConfigStore, default_config
 
 
+def test_window_placement_survives_a_reload(tmp_path):
+    path = tmp_path / 'tvhplayer.conf'
+    path.write_text(json.dumps({
+        'window_geometry': {'x': 12, 'y': 34, 'width': 800, 'height': 600},
+        'window_placement': 'abc+/==',
+    }), encoding='utf-8')
+    store = ConfigStore(path)
+    assert store.data['window_placement'] == 'abc+/=='
+    assert store.data['window_geometry'] == {'x': 12, 'y': 34, 'width': 800, 'height': 600}
+    store.save()
+    assert json.loads(path.read_text(encoding='utf-8'))['window_placement'] == 'abc+/=='
+
+
 def test_config_roundtrip_normalizes_servers(tmp_path):
     path = tmp_path / 'tvhplayer.conf'
     store = ConfigStore(path)
@@ -204,6 +217,8 @@ def test_every_setting_has_a_default_and_bad_values_are_replaced(tmp_path):
     assert data['convert_options'] == ''
     assert data['last_channel'] == {}
     assert data['hide_dead_channels'] is False
+    assert data['wslc_extra_dns'] is False
+    assert data['wslc_extra_dns_address'] == ''
     # A config saved before this setting existed gets marking on.
     assert data['mark_dead_channels'] is True
     assert default_config()['hide_dead_channels'] is False
@@ -368,18 +383,46 @@ def test_background_saves_are_read_back_in_order(tmp_path):
     assert len(data['playlists'][0]['muxes']) == 20
 
 
-@pytest.mark.parametrize('mode', ['auto-safe', 'auto-copy', 'no'])
+@pytest.mark.parametrize('mode', ['no', 'auto-safe', 'auto-copy', 'nvdec-copy', 'd3d11va-copy'])
 def test_hardware_decoding_roundtrip(tmp_path, mode):
+    from tvhplayer.core.player import HARDWARE_DECODING_DEFAULT
+
     path = tmp_path / 'tvhplayer.conf'
     store = ConfigStore(path)
-    assert store.data['hardware_decoding'] == 'auto-safe'
+    assert store.data['hardware_decoding'] == HARDWARE_DECODING_DEFAULT
     store.data['hardware_decoding'] = mode
     store.save()
     assert ConfigStore(path).data['hardware_decoding'] == mode
 
 
-@pytest.mark.parametrize('value', [None, [], {}, 1, 'invalid'])
+@pytest.mark.parametrize('value', [None, [], {}, 1, 'invalid', 'vaapi', 'auto-unsafe'])
 def test_invalid_hardware_decoding_uses_default(tmp_path, value):
+    from tvhplayer.core.player import HARDWARE_DECODING_DEFAULT
+
     path = tmp_path / 'tvhplayer.conf'
     path.write_text(json.dumps({'hardware_decoding': value}), encoding='utf-8')
-    assert ConfigStore(path).data['hardware_decoding'] == 'auto-safe'
+    assert ConfigStore(path).data['hardware_decoding'] == HARDWARE_DECODING_DEFAULT
+
+
+def test_hardware_decoding_choices_are_simplified():
+    from tvhplayer.core.player import hardware_decoding_choices
+
+    common = [
+        ('Software', 'no'),
+        ('Hardware — automatic', 'auto-safe'),
+        ('Hardware — copy-back', 'auto-copy'),
+        ('NVIDIA — copy-back', 'nvdec-copy'),
+    ]
+    assert list(hardware_decoding_choices('linux')) == common
+    assert list(hardware_decoding_choices('darwin')) == common
+    assert list(hardware_decoding_choices('win32')) == common + [
+        ('Direct3D 11 — copy-back', 'd3d11va-copy'),
+    ]
+
+
+def test_hardware_decoding_default_is_software_on_windows_only():
+    from tvhplayer.core.player import hardware_decoding_default
+
+    assert hardware_decoding_default('win32') == 'no'
+    assert hardware_decoding_default('linux') == 'auto-safe'
+    assert hardware_decoding_default('darwin') == 'auto-safe'

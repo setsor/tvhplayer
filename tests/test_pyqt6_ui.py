@@ -245,6 +245,10 @@ class _FakePlayer:
     def log_stats(self):
         return None
 
+    def begin_shutdown(self):
+        self._playing = False
+        self._on_playing = self._on_stopped = self._on_error = None
+
     def close(self):
         self._playing = False
 
@@ -495,6 +499,7 @@ def test_video_context_menu_and_double_click(monkeypatch, tmp_path):
             'Show EPG',
             'Show in TV Guide',
             'Jump to Now Playing',
+            'Media &Information…',
             'Stream Pro&file',
             '&Audio Track',
             '&Subtitles',
@@ -2772,6 +2777,27 @@ def test_quit_asks_while_recording_to_this_computer(monkeypatch, tmp_path):
     app.processEvents()
 
 
+def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
+    # Built-in uses --noacl on loopback, so the web UI needs no login handoff.
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    password = 'secret-secret-secret'
+    window.builtin = types.SimpleNamespace(
+        is_running=lambda: True, http_port=24111,
+        username='tvhplayer', password=password,
+    )
+    opened = []
+    monkeypatch.setattr(ui.QDesktopServices, 'openUrl', lambda url: opened.append(url.toString()))
+    clipboard = ui.QApplication.clipboard()
+    clipboard.setText('keep-me')
+    window.open_builtin_web()
+    assert opened == ['http://127.0.0.1:24111/']
+    assert clipboard.text() == 'keep-me'
+    assert password not in window.statusbar.currentMessage()
+    assert 'clipboard' not in window.statusbar.currentMessage().lower()
+    window.close()
+    app.processEvents()
+
+
 def test_quit_asks_the_builtin_server_even_when_another_is_selected(monkeypatch, tmp_path):
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
     from tvhplayer.core.models import DvrEntry
@@ -3107,11 +3133,14 @@ def test_last_channel_plays_at_start_when_asked(monkeypatch, tmp_path):
         window.set_plays_on_start(True)
         assert window.plays_on_start()
 
-        assert window.hardware_decoding() == 'auto-safe'
-        assert window.player.hardware_decoding == 'auto-safe'
-        window.set_hardware_decoding('no')
-        assert window.config['hardware_decoding'] == 'no'
-        assert window.player.hardware_decoding == 'no'
+        from tvhplayer.core.player import HARDWARE_DECODING_DEFAULT
+
+        assert window.hardware_decoding() == HARDWARE_DECODING_DEFAULT
+        assert window.player.hardware_decoding == HARDWARE_DECODING_DEFAULT
+        other = 'no' if HARDWARE_DECODING_DEFAULT == 'auto-safe' else 'auto-safe'
+        window.set_hardware_decoding(other)
+        assert window.config['hardware_decoding'] == other
+        assert window.player.hardware_decoding == other
 
         assert not window.starts_channels_fast()
         assert window.player.fast_start is False
@@ -4194,8 +4223,123 @@ def test_playback_menu_lists_tracks_and_deinterlace(monkeypatch, tmp_path):
         assert fake_player.deinterlace() == 'off'
         # Filled again when it opens, so the list follows the stream.
         window._fill_playback_menu(menu)
-        assert len(menu.actions()) == len(window.playback_actions) + 4
+        assert len(menu.actions()) == len(window.playback_actions) + 5
         assert menu.actions()[0] is window.playback_actions[0]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('entry', ['playback', 'video-context'])
+def test_media_information_is_reachable_and_reuses_its_pending_dialog(monkeypatch, tmp_path, entry):
+    from concurrent.futures import Future
+
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    requests = []
+
+    def request():
+        future = Future()
+        requests.append(future)
+        return future
+
+    monkeypatch.setattr(player, 'media_info', request, raising=False)
+    window._playback_active = True
+    window._stream = {'name': 'One'}
+    window._playback_channel = types.SimpleNamespace(name='One')
+    try:
+        if entry == 'playback':
+            menu = window.playback_menu
+            window._fill_playback_menu(menu)
+        else:
+            menu = window._video_context_menu()
+        action = next(a for a in menu.actions() if a.text() == 'Media &Information…')
+        assert action.isEnabled()
+        assert not requests  # Opening a menu never requests media properties.
+        action.trigger()
+        dialog = window._media_info_dialog
+        assert dialog.note.text() == 'One'
+        action.trigger()
+        assert window._media_info_dialog is dialog
+        assert len(requests) == 1
+        requests[0].set_result('Resolution: 1920 × 1080\nVideo codec: h264')
+        dialog._poll()
+        assert '1920 × 1080' in dialog.view.toPlainText()
+        dialog.close()
+        assert window._media_info_dialog is None
+        action.trigger()
+        assert len(requests) == 2
+        assert window._media_info_dialog is not dialog
+        # Shutdown cancels the read before the playback engine is released.
+        window.close()
+        assert requests[1].cancelled()
+        assert window._media_info_dialog is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('state', ['idle', 'starting', 'casting', 'playing'])
+def test_media_information_menu_follows_local_playback(monkeypatch, tmp_path, state):
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    try:
+        window._playback_active = state != 'idle'
+        window._awaiting_playback = state == 'starting'
+        monkeypatch.setattr(type(window.cast_manager), 'is_connected', property(lambda self: state == 'casting'))
+        window._fill_playback_menu(window.playback_menu)
+        info = next(a for a in window.playback_menu.actions() if a.text() == 'Media &Information…')
+        assert info.isEnabled() == (state == 'playing')
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_media_information_rejects_a_late_reply_after_switching_channels(monkeypatch, tmp_path):
+    from concurrent.futures import Future
+
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    future = Future()
+    monkeypatch.setattr(player, 'media_info', lambda: future, raising=False)
+    window._playback_active = True
+    window._stream = {'name': 'One'}
+    try:
+        window.show_media_info()
+        dialog = window._media_info_dialog
+        window._stream = {'name': 'Two'}
+        future.set_result('Resolution of One')
+        dialog._poll()
+        assert 'Playback changed' in dialog.view.toPlainText()
+        assert 'Resolution of One' not in dialog.view.toPlainText()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_opening_media_information_after_a_channel_switch_reads_the_new_stream(monkeypatch, tmp_path):
+    from concurrent.futures import Future
+
+    app, ui, window, player = _make_player(monkeypatch, tmp_path)
+    requests = []
+
+    def request():
+        future = Future()
+        requests.append(future)
+        return future
+
+    monkeypatch.setattr(player, 'media_info', request, raising=False)
+    window._playback_active = True
+    window._stream = {'name': 'One'}
+    try:
+        window.show_media_info()
+        first = window._media_info_dialog
+        window._stream = {'name': 'Two'}
+        window.show_media_info()
+        second = window._media_info_dialog
+        assert second is not first
+        assert requests[0].cancelled()
+        assert len(requests) == 2
+        requests[1].set_result('Video codec of Two')
+        second._poll()
+        assert second.view.toPlainText() == 'Video codec of Two'
     finally:
         window.close()
         app.processEvents()
@@ -5510,6 +5654,170 @@ def _make_background_player(monkeypatch, tmp_path):
         monkeypatch.setattr(ui.TVHeadendClient, '_new_video_surface', lambda self: ui.QWidget())
         monkeypatch.setattr(ui.TVHeadendClient, 'fetch_channels', lambda self, keep_place=False: None)
     return _make_player(monkeypatch, tmp_path, prepare=prepare)
+
+
+@pytest.mark.parametrize('error', ['', 'Backend cleanup failed: command timed out'])
+@pytest.mark.parametrize('primary_instance', [False, True])
+def test_close_waits_asynchronously_for_windows_backend_cleanup(
+        monkeypatch, tmp_path, error, primary_instance):
+    from PyQt6.QtCore import QTimer
+    from tvhplayer.wslc_builtin_supervisor import WslcBuiltinSupervisor
+
+    app, ui, window, player = _make_background_player(monkeypatch, tmp_path)
+    supervisor = WslcBuiltinSupervisor(tmp_path / 'backend', tmp_path, parent=window)
+
+    class Worker:
+        def join(self, *args, **kwargs):
+            pytest.fail('The window must not wait for the backend thread')
+
+    supervisor._thread = Worker()
+    supervisor._status = 'running'
+    window.builtin = supervisor
+    monkeypatch.setattr(window, '_confirm_quit', lambda: True)
+    closed = []
+    monkeypatch.setattr(player, 'close', lambda: closed.append('player'))
+    quits = []
+    monkeypatch.setattr(app, '_tvhplayer_instance', object() if primary_instance else None, raising=False)
+    monkeypatch.setattr(app, 'quit', lambda: quits.append(True))
+    window._on_playback_started()
+    assert window.hw_check_timer.isActive() and window.hw_check_late_timer.isActive()
+    assert window.tasks_pane.update_timer.isActive()
+    tasks = []
+    monkeypatch.setattr(window.tasks_pane, '_fetch_server_tasks', lambda: tasks.append('fetch'))
+    monkeypatch.setattr(window.tasks_pane, '_redraw', lambda: tasks.append('redraw'))
+    window.show()
+    try:
+        assert not window.close()
+        assert window._closing and supervisor._cancel.is_set()
+        assert not closed and not quits
+        assert not player._playing and not window._playback_active
+        assert not window.hw_check_timer.isActive() and not window.hw_check_late_timer.isActive()
+        assert not window.tasks_pane.update_timer.isActive()
+        # Already-queued timer and server results cannot restart work while
+        # the supervisor is still stopping its container.
+        window._on_playback_started()
+        window.tasks_pane.refresh()
+        window.tasks_pane._on_server_fetched(window.tasks_pane._generation, [], None)
+        assert not tasks and not window.hw_check_timer.isActive()
+        assert not window.close()  # Repeated close cannot bypass pending cleanup.
+        pulses = []
+        QTimer.singleShot(0, lambda: pulses.append(True))
+        app.processEvents()
+        assert pulses and not closed and not quits
+        supervisor._completed.emit(error)
+        app.processEvents()
+        assert closed == ['player']
+        assert supervisor.last_error == error
+        assert window._close_resources_done
+        assert quits == ([True] if primary_instance else [])
+        assert window.close()
+        assert closed == ['player']
+    finally:
+        if supervisor._thread is not None:
+            supervisor._completed.emit('')
+        window.close()
+        app.processEvents()
+
+
+def test_late_tasks_read_closes_its_backend_on_the_worker_during_quit(monkeypatch, tmp_path):
+    import threading
+
+    app, ui, window, player = _make_background_player(monkeypatch, tmp_path)
+    panel = window.tasks_pane
+    closed, delivered = [], []
+    panel._backend_key = []
+    panel._backend = types.SimpleNamespace(
+        list_dvr_entries=lambda: [], close=lambda: closed.append(threading.current_thread()))
+    panel._server_fetched.connect(lambda *_: delivered.append(True))
+    window._closing = True
+    worker = threading.Thread(target=panel._read_server_entries, args=(panel._generation, {}), daemon=True)
+    try:
+        worker.start()
+        worker.join(2)
+        assert not worker.is_alive()
+        app.processEvents()
+        assert closed == [worker] and not delivered
+        assert panel._backend is None
+    finally:
+        window._closing = False
+        window.close()
+        app.processEvents()
+
+
+@pytest.mark.parametrize('failure', ['poll', 'auth', 'constructor'])
+def test_stopped_log_watcher_does_not_report_shutdown_disconnect(monkeypatch, capsys, failure):
+    import tvhplayer.tvhplayer as ui
+
+    watch = ui.ServerLogWatch({'url': 'http://example.test:9981'})
+    notes, lines, closed = [], [], []
+    watch.note.connect(notes.append)
+    watch.lines.connect(lines.append)
+
+    class Feed:
+        def __init__(self, server):
+            if failure == 'constructor':
+                watch.stop()
+                raise RuntimeError('closed during construction')
+
+        def poll(self):
+            watch.stop()
+            if failure == 'auth':
+                raise ui.TvhAuthError('connection closed')
+            raise RuntimeError('Remote end closed connection without response')
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(ui, 'ServerLogFeed', Feed)
+    watch._run()
+    assert notes == lines == []
+    assert 'Server log unavailable' not in capsys.readouterr().out
+    assert closed == ([] if failure == 'constructor' else [True])
+
+
+def test_log_watcher_reports_a_real_connection_failure(monkeypatch, capsys):
+    import tvhplayer.tvhplayer as ui
+
+    watch = ui.ServerLogWatch({'url': 'http://example.test:9981'})
+    watch.RETRY_SECONDS = 0
+    notes, closed = [], []
+    watch.note.connect(notes.append)
+
+    class Feed:
+        polls = 0
+
+        def __init__(self, server):
+            pass
+
+        def poll(self):
+            self.polls += 1
+            if self.polls == 1:
+                raise RuntimeError('server unreachable')
+            return types.SimpleNamespace(admin=False, lines=[])
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(ui, 'ServerLogFeed', Feed)
+    watch._run()
+    assert 'Server log unavailable: server unreachable' in capsys.readouterr().out
+    assert notes[0] == 'Cannot reach the server. Trying again every few seconds.'
+    assert closed == [True]
+
+
+def test_windows_backend_that_already_stopped_does_not_defer_close(monkeypatch, tmp_path):
+    from tvhplayer.wslc_builtin_supervisor import WslcBuiltinSupervisor
+
+    app, ui, window, player = _make_background_player(monkeypatch, tmp_path)
+    window.builtin = WslcBuiltinSupervisor(tmp_path / 'backend', tmp_path, parent=window)
+    monkeypatch.setattr(window, '_confirm_quit', lambda: True)
+    closed = []
+    monkeypatch.setattr(player, 'close', lambda: closed.append(True))
+    assert window.close()
+    assert window._close_resources_done and closed == [True]
+    assert window.close()
+    assert closed == [True]
+    app.processEvents()
 
 
 def test_background_close_preserves_server_and_recording_jobs(monkeypatch, tmp_path):

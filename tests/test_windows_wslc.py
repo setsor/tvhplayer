@@ -1,6 +1,7 @@
 """Windows backend safety contracts, using a fake CLI (no WSL setup required)."""
 import hashlib
 import json
+import logging
 import subprocess
 import threading
 import sys
@@ -111,6 +112,63 @@ def test_offline_provision_uses_immutable_image(tmp_path):
     assert cli.calls == [['wslc.exe', 'inspect', '--type', 'image', IMAGE]]
 
 
+def test_matching_recorded_image_skips_inspect(tmp_path, monkeypatch, caplog):
+    bundle(tmp_path)
+    monkeypatch.setattr('tvhplayer.core.backend_bundle.file_digest',
+                        lambda *args, **kwargs: pytest.fail('A trusted image must not hash the archive'))
+    (tmp_path / 'tvheadend.tar').unlink()
+    cli = Cli(json.dumps([{'Id': IMAGE, 'Architecture': 'amd64'}]))
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    with caplog.at_level(logging.INFO):
+        assert runtime.provision(tmp_path, trusted_image=IMAGE) == IMAGE
+    assert cli.calls == []
+    assert runtime.skipped_image_inspect
+    assert runtime.image_state == 'installed'
+    assert not runtime.archive_verified
+    assert 'skipped image inspect' in caplog.text
+
+
+def test_different_recorded_image_still_inspects(tmp_path):
+    bundle(tmp_path)
+    cli = Cli(json.dumps([{'Id': IMAGE, 'Architecture': 'amd64'}]))
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    assert runtime.provision(tmp_path, trusted_image='sha256:' + 'a' * 64) == IMAGE
+    assert cli.calls == [['wslc.exe', 'inspect', '--type', 'image', IMAGE]]
+    assert not runtime.skipped_image_inspect
+
+
+@pytest.mark.parametrize('output', [
+    f'No such image: {IMAGE}\nError code: WSLC_E_IMAGE_NOT_FOUND\n',
+    f'Object not found: {IMAGE}',
+    f'Unable to find image "{IMAGE}" locally',
+])
+def test_image_absent_matches_only_this_image(output):
+    from tvhplayer.core.windows_wslc import WslcCommandError, image_absent
+    error = WslcCommandError('run', 1, output)
+    assert image_absent(error, IMAGE)
+    assert not image_absent(error, 'sha256:' + 'a' * 64)
+    assert not image_absent(WslcError('bind: Address already in use'), IMAGE)
+    assert not image_absent(WslcCommandError('run', 1, 'Object not found: tvhplayer-' + 'a' * 32), IMAGE)
+
+
+def test_cached_image_inspect_is_one_query_after_the_manifest(tmp_path, monkeypatch, caplog):
+    bundle(tmp_path)
+    monkeypatch.setattr('tvhplayer.core.backend_bundle.file_digest',
+                        lambda *args, **kwargs: pytest.fail('Cached image startup must not hash the offline archive'))
+    (tmp_path / 'tvheadend.tar').unlink()
+    cli = Cli(json.dumps([{'Id': IMAGE, 'Architecture': 'amd64'}]))
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    runtime.established = True
+    with caplog.at_level(logging.INFO):
+        assert runtime.provision(tmp_path) == IMAGE
+    assert cli.calls == [['wslc.exe', 'inspect', '--type', 'image', IMAGE]]
+    assert 'image manifest read in' in caplog.text
+    assert 'image inspect hit in' in caplog.text
+    assert 'WSLc already checked: True' in caplog.text
+    assert runtime.image_state == 'installed'
+    assert not runtime.archive_verified
+
+
 def test_cached_image_does_not_read_unused_archive(tmp_path, monkeypatch):
     bundle(tmp_path)
     def forbidden(*args, **kwargs):
@@ -196,6 +254,7 @@ def test_launch_publishes_only_two_loopback_ports_without_credentials():
     runtime.config_storage = SimpleNamespace(volume='tvhplayer-config-' + OWNER)
     runtime.launch(IMAGE, NAME, OWNER, r'C:\Config', r'D:\TV recordings', (24111, 24112))
     args = cli.calls[0]
+    assert '--dns' not in args
     assert args.count('--publish') == 2
     assert '127.0.0.1:24111:9981/tcp' in args
     assert '127.0.0.1:24112:9982/tcp' in args
@@ -205,6 +264,65 @@ def test_launch_publishes_only_two_loopback_ports_without_credentials():
     assert r'C:\Config' not in str(args)
     assert 'type=volume,source=tvhplayer-config-' + OWNER + ',target=/config' in args
     assert '-c /config/data' in args[-1]
+
+
+@pytest.mark.parametrize('trace', [None, '', '0', '1', 'yes'])
+def test_native_startup_tracing_is_explicit_and_preserves_launch_contract(monkeypatch, trace):
+    from types import SimpleNamespace
+
+    if trace is None:
+        monkeypatch.delenv('TVHPLAYER_TRACE_STARTUP', raising=False)
+    else:
+        monkeypatch.setenv('TVHPLAYER_TRACE_STARTUP', trace)
+    cli = Cli()
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    runtime.config_storage = SimpleNamespace(volume='tvhplayer-config-' + OWNER)
+    runtime.launch(IMAGE, NAME, OWNER, r'C:\Config', r'D:\Recordings', (24111, 24112))
+    command = cli.calls[0]
+    server_command = command[-1]
+    assert ('--trace main' in server_command) == (trace == '1')
+    assert (' -d' in server_command) == (trace == '1')
+    assert '-c /config/data -B --bindaddr 0.0.0.0 --noacl' in server_command
+    assert command[command.index('--label') + 1] == 'tvhplayer.owner=' + OWNER
+    assert command.count('--publish') == 2
+    assert not any('password' in value for value in command)
+
+
+def test_tuner_address_save_is_reported_only_when_the_settings_change():
+    from types import SimpleNamespace
+    runtime = WslcRuntimeAdapter('wslc.exe', Cli())
+    saved = []
+    runtime.config_storage = SimpleNamespace(update_server_settings=saved.append)
+    stages = []
+    runtime.progress = stages.append
+    transport = SimpleNamespace(config=lambda: {'local_ip': '192.0.2.10', 'local_port': 30000})
+    runtime._server_settings = {'local_ip': '192.0.2.10', 'local_port': 30000}
+    runtime.configure_hdhomerun(transport)
+    assert stages == [] and saved == []
+    runtime._server_settings = {'local_ip': '', 'local_port': 0}
+    runtime.configure_hdhomerun(transport)
+    assert stages == ['Saving tuner addresses…']
+    assert saved == [{'local_ip': '192.0.2.10', 'local_port': 30000}]
+
+
+def test_startup_trace_log_tail_is_bounded(monkeypatch):
+    cli = Cli(json.dumps(state()))
+
+    def runner(args, **kwargs):
+        result = cli(args, **kwargs)
+        if args[1] == 'logs':
+            result.stdout = 'main: startup mpegts_init: 1935 ms\n'
+        return result
+
+    runtime = WslcRuntimeAdapter('wslc.exe', runner)
+    assert 'mpegts_init' in runtime.logs_owned(NAME, OWNER, tail=1000)
+    logs = next(call for call in cli.calls if call[1] == 'logs')
+    assert logs[logs.index('--tail') + 1] == '1000'
+    assert logs[-1] == NAME
+    with pytest.raises(WslcError, match='out of range'):
+        runtime.logs_owned(NAME, OWNER, tail=1001)
+    with pytest.raises(WslcError, match='out of range'):
+        runtime.logs_owned(NAME, OWNER, tail=0)
 
 
 def test_container_healthcheck_and_entrypoint_use_live_settings_path():
@@ -268,6 +386,32 @@ def test_verified_owned_backend_can_be_stopped():
     runtime.verify_running(NAME, OWNER, (24111, 24112))
     runtime.stop_owned(NAME, OWNER)
     assert cli.calls[-2:] == [['wslc.exe', 'stop', '--time', '5', NAME], ['wslc.exe', 'remove', NAME]]
+
+
+def test_stop_owned_ignores_remove_when_container_already_gone():
+    # WSLc may delete on stop, or cleanup races; "not found" must not fail shutdown.
+    responses = [
+        json.dumps(state()),
+        '',
+        f"Container '{NAME}' not found.\nError code: WSLC_E_CONTAINER_NOT_FOUND\n",
+    ]
+    codes = [0, 0, 1]
+    calls = []
+
+    def runner(args, **kwargs):
+        calls.append(args)
+        output = responses.pop(0)
+        code = codes.pop(0)
+        return subprocess.CompletedProcess(args, code, output, output if code else '')
+
+    assert WslcRuntimeAdapter('wslc.exe', runner).stop_owned(NAME, OWNER) is True
+    assert calls[-1] == ['wslc.exe', 'remove', NAME]
+
+
+def test_inspect_owned_recognizes_wslc_container_not_found():
+    cli = Cli(f"Container '{NAME}' not found.\nError code: WSLC_E_CONTAINER_NOT_FOUND\n")
+    cli.code = 1
+    assert WslcRuntimeAdapter('wslc.exe', cli).inspect_owned(NAME, OWNER, missing_ok=True) is None
 
 
 def test_wslc_3_top_level_ports():
@@ -357,7 +501,8 @@ def test_container_stderr_logs_are_not_discarded():
     assert WslcRuntimeAdapter('wslc.exe', runner).command('logs', NAME) == 'backend log from stderr'
 
 
-def test_cancel_before_provision_completes_never_launches(tmp_path, monkeypatch):
+@pytest.mark.parametrize('operation', ['stop', 'shut_down'])
+def test_cancel_before_provision_completes_never_launches(tmp_path, monkeypatch, operation):
     pytest.importorskip('PyQt6')
     from PyQt6.QtCore import QCoreApplication
     from tvhplayer import wslc_builtin_supervisor as module
@@ -367,19 +512,86 @@ def test_cancel_before_provision_completes_never_launches(tmp_path, monkeypatch)
     class Runtime:
         def check(self):
             pass
-        def provision(self, folder):
+        def provision(self, folder, trusted_image=None):
             reached.set()
             release.wait(5)
             return IMAGE
-        def launch(self, *args):
+        def launch(self, *args, **kwargs):
             pytest.fail('Cancelled setup must not launch a container')
     monkeypatch.setattr(module, 'protect_config', lambda folder: folder.mkdir(parents=True, exist_ok=True))
     supervisor = module.WslcBuiltinSupervisor(tmp_path / 'config', tmp_path, runtime=Runtime())
     supervisor.start()
     assert reached.wait(5)
-    supervisor.stop()
+    getattr(supervisor, operation)()
     release.set()
     supervisor._thread.join(5)
     app.processEvents()
     assert supervisor.status == 'stopped'
     assert supervisor._thread is None
+
+
+def test_successful_runtime_check_skips_windows_diagnostics(monkeypatch):
+    from tvhplayer.core import windows_prerequisites
+    monkeypatch.setattr(windows_prerequisites, 'probe_windows', lambda: pytest.fail('CIM on healthy start'))
+    runtime = WslcRuntimeAdapter('wslc.exe')
+    runtime.established = True
+    calls = []
+    runtime.command = lambda command: calls.append(command) or 'WSLc version 3.0.5'
+    for _ in range(2):
+        runtime.check()
+    assert calls == ['version', 'info', 'version', 'info']
+    assert runtime._prerequisite_state == {}
+
+
+def test_failed_runtime_check_runs_windows_diagnostics(monkeypatch):
+    from tvhplayer.core import windows_prerequisites, windows_wslc
+    monkeypatch.setattr(windows_wslc.sys, 'platform', 'win32')
+    calls = []
+    monkeypatch.setattr(windows_prerequisites, 'probe_windows', lambda: calls.append('probe') or {'feature': 2})
+    runtime = WslcRuntimeAdapter('wslc.exe')
+    runtime.established = True
+    def command(name):
+        if name == 'version': return '3.0.5'
+        raise WslcError('unavailable')
+    runtime.command = command
+    with pytest.raises(windows_wslc.WslcPrerequisiteError) as error:
+        runtime.check()
+    assert error.value.action == 'repair'
+    assert calls == ['probe']
+
+
+@pytest.mark.parametrize('fault', [None, 'owner', 'stopped', 'ports'])
+def test_monitor_inspects_once_and_rejects_bad_state(fault):
+    data = state()
+    if fault == 'owner': data['Config']['Labels']['tvhplayer.owner'] = 'other'
+    if fault == 'stopped': data['State']['Running'] = False
+    if fault == 'ports': data['NetworkSettings']['Ports'] = {}
+    cli = Cli(json.dumps(data))
+    runtime = WslcRuntimeAdapter('wslc.exe', cli)
+    if fault:
+        with pytest.raises(WslcError):
+            runtime.monitor_owned(NAME, OWNER, (24111, 24112))
+        assert [c[1] for c in cli.calls] == ['inspect']
+    else:
+        runtime.monitor_owned(NAME, OWNER, (24111, 24112))
+        assert [c[1] for c in cli.calls] == ['inspect', 'logs']
+
+
+def test_cancelled_runtime_check_does_not_probe(monkeypatch):
+    from tvhplayer.core import windows_prerequisites
+    monkeypatch.setattr(windows_prerequisites, 'probe_windows', lambda: pytest.fail('probe after cancellation'))
+    runtime = WslcRuntimeAdapter('wslc.exe')
+    runtime.established = True
+    runtime.cancel = threading.Event()
+    runtime.cancel.set()
+    def command(*args): raise WslcError('cancelled')
+    runtime.command = command
+    with pytest.raises(WslcError, match='cancelled'):
+        runtime.check()
+
+
+@pytest.mark.parametrize('error', [subprocess.TimeoutExpired('info', 20), OSError('missing')])
+def test_runtime_check_failure_remains_bounded(error):
+    def runner(*args, **kwargs): raise error
+    with pytest.raises(WslcError):
+        WslcRuntimeAdapter('wslc.exe', runner).check()
