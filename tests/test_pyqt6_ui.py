@@ -6077,3 +6077,26 @@ def test_hidden_login_loads_the_last_server_without_play_on_start(monkeypatch, t
         window._confirm_quit = lambda: True
         window.background.quit()
         app.processEvents()
+
+
+def test_closing_window_stops_channel_start_watch(monkeypatch, tmp_path):
+    import threading
+
+    app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    stopped = threading.Event()
+    class Watch:
+        def stop(self):
+            stopped.set()
+
+    window._start_watch = Watch()
+    try:
+        window._confirm_quit = lambda: True
+        window.close()
+        app.processEvents()
+        assert stopped.is_set()
+        assert window._start_watch is None
+    finally:
+        if not window._closing:
+            window._confirm_quit = lambda: True
+            window.close()
+            app.processEvents()
