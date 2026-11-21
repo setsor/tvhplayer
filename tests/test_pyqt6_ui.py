@@ -4781,6 +4781,10 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
     try:
         print("TIMESHIFT-DIAG: show window", flush=True)
         window.show()
+        # This test exercises the recording shortcut, not periodic server
+        # metadata polling. The fake built-in supervisor has no HTTP backend;
+        # stop the timer to avoid an unrelated async request during teardown.
+        window._metadata_timer.stop()
         window._sync_record_controls()
         bar = window.controls_bar
         assert bar.record_more_btn.isHidden()
