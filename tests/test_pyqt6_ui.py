@@ -332,6 +332,9 @@ def _use_remote_server(window):
     A new config has the built-in server, which has one Record window.
     """
     window.current_server = lambda: {'name': 'Remote', 'url': 'http://192.0.2.1:9981'}
+    # These UI tests exercise remote recording controls, not DVR metadata.
+    # Never launch a real background HTTP request to this documentation-only IP.
+    window.synced_recordings = lambda _server: ('synced', [])
     window._sync_record_controls()
 
 
