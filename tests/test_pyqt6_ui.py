@@ -263,7 +263,10 @@ class _FakePlayer:
 def _make_player(monkeypatch, tmp_path, prepare=None, start_hidden=False):
     os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     fake_player = _FakePlayer()
-    sys.modules.pop('tvhplayer.tvhplayer', None)
+    # Diagnostic only: compare fresh versus reused UI module in CI.
+    # Keep the original behaviour unless explicitly enabled by the workflow.
+    if os.environ.get('TVHPLAYER_DIAG_NO_MODULE_RELOAD') != '1':
+        sys.modules.pop('tvhplayer.tvhplayer', None)
     import tvhplayer.tvhplayer as ui
 
     from tvhplayer.core.config import ConfigStore
@@ -329,6 +332,9 @@ def _use_remote_server(window):
     A new config has the built-in server, which has one Record window.
     """
     window.current_server = lambda: {'name': 'Remote', 'url': 'http://192.0.2.1:9981'}
+    # These UI tests exercise remote recording controls, not DVR metadata.
+    # Never launch a real background HTTP request to this documentation-only IP.
+    window.synced_recordings = lambda _server: ('synced', [])
     window._sync_record_controls()
 
 
@@ -350,6 +356,9 @@ def test_window_starts_on_the_last_server_only(monkeypatch, tmp_path):
         monkeypatch.setattr(ui, 'find_bundled_binary', lambda: '/bin/true')
         monkeypatch.setattr(ui.BuiltinSupervisor, 'start', lambda self, *a, **k: events.append('builtin'))
         monkeypatch.setattr(ui.ChannelFetch, 'start', lambda self: events.append(self.server['name']))
+        # This test checks startup selection, not DVR loading from a remote test address.
+        monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                            lambda self, _server: ('synced', []))
 
     app, ui, window, fake_player = _make_player(monkeypatch, tmp_path, prepare)
     try:
@@ -1045,6 +1054,8 @@ def test_go_to_playing_channel_switches_to_its_server(monkeypatch, tmp_path):
 
         window.get_backend = lambda: Backend(window.current_server())
         window._open_channel_backend = Backend
+        # This test covers channel switching, not a separate DVR HTTP fetch.
+        window.synced_recordings = lambda _server: ('synced', [])
         window.servers = [
             {'name': 'Home', 'url': 'http://home.example:9981', 'protocol': 'http'},
             {'name': 'Away', 'url': 'http://away.example:9981', 'protocol': 'http'},
@@ -1571,6 +1582,7 @@ def test_tasks_panel_reads_the_server_without_blocking(monkeypatch, tmp_path):
     servers = {'name': 'old', 'url': 'http://old'}
     window.current_server = lambda: servers
     window._server_requests_ready = lambda: True
+    window.synced_recordings = lambda _server: ('unknown', None)
     panel = window.tasks_pane
     panel.open_backend = lambda server: SlowBackend(server['name'])
     try:
@@ -1649,6 +1661,7 @@ def _slow_dvr_window(monkeypatch, tmp_path):
     server = {'name': 'tv', 'url': 'http://tv'}
     window.current_server = lambda: server
     window._server_requests_ready = lambda: True
+    window.synced_recordings = lambda _server: ('unknown', None)
     window.get_backend = lambda: backend
     window.open_backend = lambda srv: backend
     window.tasks_pane.open_backend = lambda srv: backend
@@ -2794,6 +2807,11 @@ def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
     assert clipboard.text() == 'keep-me'
     assert password not in window.statusbar.currentMessage()
     assert 'clipboard' not in window.statusbar.currentMessage().lower()
+    # This test is about opening the web UI, not the shutdown lookup.
+    # The fake supervisor has no real recording backend; allowing closeEvent
+    # to launch an asynchronous lookup leaves a callback alive in the next test.
+    window._confirm_quit = lambda: True
+    window.builtin = None
     window.close()
     app.processEvents()
 
@@ -4744,7 +4762,10 @@ def test_builtin_server_records_through_one_window(monkeypatch, tmp_path, choice
     window.active_channel = lambda: channel
     window._with_programme_on_now = lambda _c, then: then(None)
     window.current_server = lambda: {'name': 'Built-in', 'builtin': True, 'url': 'http://127.0.0.1:9981'}
-    window.builtin = types.SimpleNamespace(set_recordings_dir=lambda _folder: True)
+    # A real built-in supervisor exposes is_running; Qt metadata timers call it.
+    window.builtin = types.SimpleNamespace(
+        set_recordings_dir=lambda _folder: True, is_running=lambda: True,
+    )
     window.set_local_recording_dir(str(tmp_path))
     window._refresh_tasks = lambda **_k: None
     buffered, created, titles = [], [], []
@@ -5459,6 +5480,100 @@ def _settle(app):
         app.processEvents()
 
 
+def _diagnose_widths(window, phase):
+    """Read-only Qt geometry snapshot for cross-platform CI investigation."""
+    pairs = [
+        ("window", window),
+        ("left_pane", window.left_pane),
+        ("right_pane", window.right_pane),
+        ("splitter", window.splitter),
+        ("controls_bar", window.controls_bar),
+        ("server_combo", window.server_combo),
+        ("tag_row", window.tag_row),
+        ("tag_combo", window.tag_combo),
+        ("tasks_pane", window.tasks_pane),
+    ]
+    for name, widget in pairs:
+        hint = widget.sizeHint()
+        minimum = widget.minimumSizeHint()
+        layout = widget.layout()
+        layout_min = layout.minimumSize().width() if layout else None
+        layout_hint = layout.sizeHint().width() if layout else None
+        print(
+            f"WIDTH-DIAG {phase} {name}: visible={widget.isVisible()} "
+            f"minimumWidth={widget.minimumWidth()} width={widget.width()} "
+            f"minHint={minimum.width()} hint={hint.width()} "
+            f"layoutMin={layout_min} layoutHint={layout_hint}",
+            flush=True,
+        )
+    # After the server-row fix, Windows recording state still exceeds the
+    # 680 px target by 15 px. Show every squeeze level and the controls that
+    # determine the narrowest level; no production sizing changes here.
+    bar = window.controls_bar
+    print(f"WIDTH-DIAG {phase} player-squeeze-levels={bar.squeeze.widths()} "
+          f"currentLevel={bar.squeeze.level}", flush=True)
+    root = bar.layout()
+    for ix in range(root.count()):
+        inner = root.itemAt(ix).layout()
+        if inner is None:
+            continue
+        for jx in range(inner.count()):
+            item = inner.itemAt(jx)
+            widget = item.widget()
+            if widget is not None:
+                print(
+                    f"WIDTH-DIAG {phase} bar[{ix}][{jx}] "
+                    f"{widget.objectName() or type(widget).__name__}: "
+                    f"visible={widget.isVisible()} min={item.minimumSize().width()} "
+                    f"hint={item.sizeHint().width()} "
+                    f"minimumWidth={widget.minimumWidth()}",
+                    flush=True,
+                )
+    # The first row is the minimum-width driver on Windows (332 px).
+    # Capture every child and style-dependent margins before changing UI code.
+    top = window.left_pane.layout().itemAt(0).layout()
+    if top is not None:
+        margins = top.contentsMargins()
+        print(
+            f"WIDTH-DIAG {phase} server-row: spacing={top.spacing()} "
+            f"margins=({margins.left()},{margins.right()}) "
+            f"min={top.minimumSize().width()} hint={top.sizeHint().width()}",
+            flush=True,
+        )
+        for idx in range(top.count()):
+            item = top.itemAt(idx)
+            widget = item.widget()
+            child = item.layout()
+            if widget is not None:
+                print(
+                    f"WIDTH-DIAG {phase} server-row[{idx}] "
+                    f"{type(widget).__name__} text={getattr(widget, 'text', lambda: '')()!r} "
+                    f"minimumWidth={widget.minimumWidth()} minHint={widget.minimumSizeHint().width()} "
+                    f"hint={widget.sizeHint().width()} itemMin={item.minimumSize().width()} "
+                    f"sizePolicy={widget.sizePolicy().horizontalPolicy().name}",
+                    flush=True,
+                )
+            elif child is not None:
+                print(f"WIDTH-DIAG {phase} server-row[{idx}] nested "
+                      f"minimum={item.minimumSize().width()} hint={item.sizeHint().width()}",
+                      flush=True)
+    for group_name, layout in (("left", window.left_pane.layout()), 
+                               ("right", window.right_pane.layout())):
+        if layout is None:
+            continue
+        for idx in range(layout.count()):
+            item = layout.itemAt(idx)
+            widget = item.widget()
+            nested = item.layout()
+            kind = widget.objectName() or type(widget).__name__ if widget else "nested-layout"
+            print(
+                f"WIDTH-DIAG {phase} {group_name}[{idx}] {kind}: "
+                f"minHint={item.minimumSize().width()} hint={item.sizeHint().width()} "
+                f"nestedCount={nested.count() if nested else 0}",
+                flush=True,
+            )
+
+
 def test_the_window_narrows_to_half_a_1080p_screen_at_125_percent(monkeypatch, tmp_path):
     # Issue #58: the row over the channel list and the player bar kept every
     # control at full size, so the window could not be narrower than 865 px
@@ -5470,10 +5585,12 @@ def test_the_window_narrows_to_half_a_1080p_screen_at_125_percent(monkeypatch, t
         window.resize(1400, 700)
         window.show()
         _settle(app)
+        _diagnose_widths(window, "window-idle")
         assert window.minimumSizeHint().width() <= 560
         bar.set_timeshift((False, 30, 600))
         bar.set_recording(True, False)
         _settle(app)
+        _diagnose_widths(window, "window-recording")
         assert window.minimumSizeHint().width() <= 680
         # Wide, everything shows at full size.
         assert bar.squeeze.level == 0
@@ -5543,6 +5660,7 @@ def test_long_group_and_server_names_do_not_widen_the_channel_pane(monkeypatch, 
         window.tag_row.setVisible(True)
         window.show()
         _settle(app)
+        _diagnose_widths(window, "long-names")
         assert window.left_pane.minimumSizeHint().width() <= 280
     finally:
         window.close()
