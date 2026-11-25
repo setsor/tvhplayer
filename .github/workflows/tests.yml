@@ -26,13 +26,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The Python each platform's package ships with.
+          # Linux-only validation on this diagnostic branch; main remains unchanged.
           - os: ubuntu-24.04
             python: '3.12'
-          - os: windows-2025
-            python: '3.13'
-          - os: macos-15
-            python: '3.15'
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONFAULTHANDLER: '1'
