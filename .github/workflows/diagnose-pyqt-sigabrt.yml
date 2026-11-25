@@ -89,6 +89,9 @@ jobs:
           # Check timing-sensitive responsiveness cases in a fresh process.
           # Do not modify their existing 250ms limit merely to pass CI.
           check responsiveness-isolated 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
+          # Repeat the exact subset on the same idle runner, using another
+          # fresh interpreter; preserve the existing 250 ms budget.
+          check responsiveness-repeat 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
           # Run the entire responsiveness module in one fresh process to
           # distinguish intra-module contamination from earlier test modules.
           check responsiveness-module 0 tests/test_responsiveness.py
