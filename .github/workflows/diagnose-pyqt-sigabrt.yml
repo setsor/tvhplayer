@@ -92,13 +92,13 @@ jobs:
           # Repeat the exact subset on the same idle runner, using another
           # fresh interpreter; preserve the existing 250 ms budget.
           check responsiveness-repeat 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          # Bisect the prefix before the three timing-sensitive tests.
-          # Each check uses a fresh pytest process; no test thresholds change.
-          # Compare preceding slow-server/UI tests without the two HTSP
-          # update stress tests, against the HTSP stress tests alone.
-          check responsiveness-prefix-no-htsp-stress 1 tests/test_responsiveness.py -k 'not test_programme_changes_on_a_big_list_keep_the_window_answering and not test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering'
-          check responsiveness-htsp-stress-only 1 tests/test_responsiveness.py -k 'test_programme_changes_on_a_big_list_keep_the_window_answering or test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering or test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          # Full-module control, same Ubuntu environment and fixed 250ms budget.
+          # Two non-overlapping groups of the first 25 test functions; both
+          # include the two HTSP stress tests and the three failing cases.
+          # Each run is a separate Python interpreter on the same runner.
+          # No changes to application or test thresholds (250 ms).
+          check responsiveness-prefix-a 1 tests/test_responsiveness.py -k 'test_background_guide_scan_keeps_the_window_answering or test_playing_a_channel_on_a_slow_server_keeps_the_window_answering or test_a_late_stream_address_for_an_earlier_channel_is_dropped or test_stopping_while_the_stream_address_is_on_its_way_plays_nothing or test_a_server_that_cannot_give_a_stream_address_is_reported or test_starting_a_recording_on_a_slow_server_keeps_the_window_answering or test_stopping_a_recording_on_a_slow_server_keeps_the_window_answering or test_a_server_that_cannot_record_is_reported or test_stopping_when_nothing_records_says_so or test_a_guide_the_server_cannot_give_is_reported or test_opening_a_channel_guide_on_a_slow_server_keeps_the_window_answering or test_finding_a_logo_address_on_a_slow_server_keeps_the_window_answering or test_programme_changes_on_a_big_list_keep_the_window_answering or test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering or test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
+          check responsiveness-prefix-b 1 tests/test_responsiveness.py -k 'test_recording_to_this_computer_on_a_slow_server_keeps_the_window_answering or test_scheduling_from_a_channel_guide_on_a_slow_server_keeps_the_window_answering or test_recording_from_the_tv_guide_on_a_slow_server_keeps_the_window_answering or test_pressing_record_twice_in_the_tv_guide_asks_the_server_once or test_opening_dvr_status_on_a_slow_server_keeps_the_window_answering or test_refreshing_dvr_status_while_the_server_answers_asks_once or test_opening_server_status_on_a_slow_server_keeps_the_window_answering or test_choosing_the_recording_to_keep_on_a_slow_server_keeps_the_window_answering or test_quitting_while_the_builtin_server_is_slow_keeps_the_window_answering or test_removing_picons_keeps_the_window_answering or test_a_recordings_folder_on_a_slow_disk_keeps_the_window_answering or test_refreshing_tasks_with_thousands_of_recordings_keeps_the_window_answering or test_tasks_show_a_finished_recording_again_when_it_changes or test_programme_changes_on_a_big_list_keep_the_window_answering or test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering or test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
+          # Full-module control for the same runner.
           check responsiveness-module-no-reload 1 tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
