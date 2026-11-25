@@ -86,6 +86,9 @@ jobs:
           # disabled. The audit records any start-watch/tasks-fetch workers
           # that remain alive after each test, including their Python stacks.
           PYTHONPATH=tests check ui-module-reuse 1 -p pytest_thread_audit tests/test_pyqt6_ui.py
+          # Check timing-sensitive responsiveness cases in a fresh process.
+          # Do not modify their existing 250ms limit merely to pass CI.
+          check responsiveness-isolated 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
