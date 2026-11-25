@@ -946,6 +946,9 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
+    # Synthetic channel/EPG benchmarks do not test DVR. The real backend is
+    # never connected, so prevent TasksPane from starting unrelated HTSP I/O.
+    window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')
@@ -1091,6 +1094,9 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
+    # Synthetic channel/EPG benchmarks do not test DVR. The real backend is
+    # never connected, so prevent TasksPane from starting unrelated HTSP I/O.
+    window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')
