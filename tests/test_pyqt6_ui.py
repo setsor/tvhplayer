@@ -3886,6 +3886,10 @@ def test_player_bar_casts_the_selected_channel_and_routes_audio(monkeypatch, tmp
         # Not the server's log: reading it from the made-up address waits
         # 30 seconds, keeping this window and its shortcuts alive into later tests.
         monkeypatch.setattr(ui.ServerLogWatch, 'start', lambda self: None)
+        # This cast-control test is not a DVR-metadata test. The server URL
+        # below is documentation-only and must never start a real HTTP fetch.
+        monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                            lambda self, _server: ('synced', []))
 
     # A server of its own: without one only a computer with Tvheadend
     # installed had a server (the built-in one) to cast from.
