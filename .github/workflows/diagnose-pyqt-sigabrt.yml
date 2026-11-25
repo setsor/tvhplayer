@@ -94,7 +94,7 @@ jobs:
           check responsiveness-repeat 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
           # Run the entire responsiveness module in one fresh process to
           # distinguish intra-module contamination from earlier test modules.
-          check responsiveness-module 0 tests/test_responsiveness.py
+          check responsiveness-module-no-reload 1 tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
