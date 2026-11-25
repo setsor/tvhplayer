@@ -92,8 +92,13 @@ jobs:
           # Repeat the exact subset on the same idle runner, using another
           # fresh interpreter; preserve the existing 250 ms budget.
           check responsiveness-repeat 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          # Run the entire responsiveness module in one fresh process to
-          # distinguish intra-module contamination from earlier test modules.
+          # Bisect the prefix before the three timing-sensitive tests.
+          # Each check uses a fresh pytest process; no test thresholds change.
+          # Compare preceding slow-server/UI tests without the two HTSP
+          # update stress tests, against the HTSP stress tests alone.
+          check responsiveness-prefix-no-htsp-stress 1 tests/test_responsiveness.py -k 'not test_programme_changes_on_a_big_list_keep_the_window_answering and not test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering'
+          check responsiveness-htsp-stress-only 1 tests/test_responsiveness.py -k 'test_programme_changes_on_a_big_list_keep_the_window_answering or test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering or test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
+          # Full-module control, same Ubuntu environment and fixed 250ms budget.
           check responsiveness-module-no-reload 1 tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
