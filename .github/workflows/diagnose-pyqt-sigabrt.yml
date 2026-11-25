@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - diagnostic/4.7.6-pyqt-sigabrt
+      - diagnostic/linux-qt-tasks-fetch
   pull_request:
     paths:
       - '.github/workflows/diagnose-pyqt-sigabrt.yml'
