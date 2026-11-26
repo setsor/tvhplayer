@@ -172,6 +172,20 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
 
     gc.callbacks.append(gc_callback)
 
+    # Snapshot the old-generation population once, before the measured
+    # event-loop interval. Do not force a collection or retain object refs.
+    def heap_snapshot(label):
+        from collections import Counter
+        objects = gc.get_objects(generation=2)
+        counts = Counter((type(obj).__module__, type(obj).__qualname__)
+                         for obj in objects)
+        print(f'DIAG HEAP {label}: old-generation={len(objects)} '
+              f'gc-count={gc.get_count()} gc-threshold={gc.get_threshold()}',
+              flush=True)
+        for (module, typename), count in counts.most_common(14):
+            print(f'  heap-type={module}.{typename} count={count}', flush=True)
+        del objects
+
     def cleanup():
         if gc_callback in gc.callbacks:
             gc.callbacks.remove(gc_callback)
@@ -226,7 +240,7 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
         instrument(backend, 'channel_snapshot')
         instrument(ui, 'channel_kinds')
         instrument(ui, 'tag_channel_counts')
-        return samples, gc_events, cleanup
+        return samples, gc_events, cleanup, heap_snapshot
     except BaseException:
         cleanup()
         raise
@@ -1268,7 +1282,8 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     backend._on_async({'method': 'initialSyncCompleted'})
     # Instrument only the background preparation under measurement, not
     # construction of 58,868 synthetic HTSP channel records above.
-    phase_samples, gc_events, cleanup_gc = _trace_channel_preparation(monkeypatch, ui, backend)
+    phase_samples, gc_events, cleanup_gc, heap_snapshot = _trace_channel_preparation(monkeypatch, ui, backend)
+    heap_snapshot('before-channel-load')
     window.show()
     StallMeter().run(1.0)
     try:
