@@ -154,13 +154,20 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
             import cProfile
             import gc
             import io
+            import os
             import pstats
 
             profile = cProfile.Profile() if (
                 name == 'channel_kinds'
                 and threading.current_thread().name == 'server-call'
             ) else None
+            gc_trial = (profile is not None and
+                        os.getenv('TVHPLAYER_DIAG_NO_GC_IN_KINDS') == '1')
+            gc_was_enabled = gc.isenabled()
             collections_before = tuple(g['collections'] for g in gc.get_stats())
+            if gc_trial:
+                gc.disable()  # temporary test-only experiment
+                print('DIAG GC temporarily disabled for channel_kinds', flush=True)
             wall_start = time.perf_counter()
             cpu_start = time.thread_time()
             if profile is not None:
@@ -170,6 +177,8 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
             finally:
                 if profile is not None:
                     profile.disable()
+                if gc_trial and gc_was_enabled:
+                    gc.enable()  # restore before returning to application
                 wall_ms = (time.perf_counter() - wall_start) * 1000
                 cpu_ms = (time.thread_time() - cpu_start) * 1000
                 collections_after = tuple(g['collections'] for g in gc.get_stats())
