@@ -73,14 +73,11 @@ jobs:
             if [ "$code" -ne 0 ]; then failed=1; fi
           }
           set -e
-          # Profile actual ServerCall worker phases on Ubuntu only.
-          # Keep the timing budget and runtime code unchanged.
-          check responsiveness-channel-phases-isolated 1 tests/test_responsiveness.py -k 'test_a_big_list_arriving_keeps_the_window_answering'
-          check responsiveness-channel-phases-module 1 tests/test_responsiveness.py
-          # Same profiler and full-module test, but suppress cyclic GC only
-          # inside the instrumented channel_kinds call and restore it in
-          # the fixture's finally block. No production setting is changed.
-          TVHPLAYER_DIAG_NO_GC_IN_KINDS=1 check responsiveness-channel-phases-module-nogc 1 tests/test_responsiveness.py
+          # Capture cyclic-GC start/stop durations and thread/phase
+          # attribution without cProfile or suppressing GC. Each command is
+          # a fresh Python process; original 250-ms budget remains intact.
+          check responsiveness-gc-isolated 1 tests/test_responsiveness.py -k 'test_a_big_list_arriving_keeps_the_window_answering'
+          check responsiveness-gc-full-module 1 tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
