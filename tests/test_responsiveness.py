@@ -51,30 +51,21 @@ BIG_LIST = 60_000
 class StallMeter:
     """Gaps between ticks of a timer on the window's thread."""
 
-    def __init__(self, interval_ms=5, track_thread_cpu=False):
+    def __init__(self, interval_ms=5):
         from PyQt6.QtCore import QTimer
 
         self.interval = interval_ms / 1000
         self.ticks = []
-        self.track_thread_cpu = track_thread_cpu
-        self.cpu_ticks = []
-        self.process_ticks = []
         self.timer = QTimer()
         self.timer.setInterval(interval_ms)
-        self.timer.timeout.connect(self._tick)
-
-    def _tick(self):
-        self.ticks.append(time.perf_counter())
-        if self.track_thread_cpu:
-            self.cpu_ticks.append(time.thread_time())
-            self.process_ticks.append(time.process_time())
+        self.timer.timeout.connect(lambda: self.ticks.append(time.perf_counter()))
 
     def run(self, seconds, until=None):
         """Run the event loop for ``seconds``, or until ``until()`` is true after at least one tick."""
         from PyQt6.QtCore import QEventLoop, QTimer
 
         loop = QEventLoop()
-        self._tick()
+        self.ticks.append(time.perf_counter())
         self.timer.start()
         deadline = time.monotonic() + seconds
         check = QTimer()
@@ -89,7 +80,7 @@ class StallMeter:
         loop.exec()
         check.stop()
         self.timer.stop()
-        self._tick()
+        self.ticks.append(time.perf_counter())
 
     def gaps(self):
         return sorted(b - a for a, b in zip(self.ticks, self.ticks[1:]))
@@ -115,246 +106,6 @@ class StallMeter:
         print(f"\n{what}: worst pause {self.worst() * 1000:.0f} ms, busy {self.busy():.0%}, "
               f"p95 {self.percentile(0.95) * 1000:.0f} ms, "
               f"p99 {self.percentile(0.99) * 1000:.0f} ms, {len(self.ticks)} ticks")
-        if self.track_thread_cpu:
-            gaps = sorted(
-                ((wall2 - wall1, cpu2 - cpu1, proc2 - proc1)
-                 for wall1, wall2, cpu1, cpu2, proc1, proc2
-                 in zip(self.ticks, self.ticks[1:],
-                        self.cpu_ticks, self.cpu_ticks[1:],
-                        self.process_ticks, self.process_ticks[1:])),
-                reverse=True,
-            )
-            for wall, cpu, process_cpu in gaps[:3]:
-                print(f"  UI heartbeat: wall={wall * 1000:.1f} ms; "
-                      f"main-thread CPU={cpu * 1000:.1f} ms; "
-                      f"other-threads CPU={max(0, process_cpu - cpu) * 1000:.1f} ms; "
-                      f"process CPU={process_cpu * 1000:.1f} ms; "
-                      f"unaccounted wall={max(0, wall - process_cpu) * 1000:.1f} ms")
-            # Process CPU sums all process threads and can exceed wall time.
-            # These snapshots are diagnostic, not a measurement of time holding the GIL.
-
-
-
-def _trace_channel_preparation(monkeypatch, ui, backend):
-    """Measure channel-preparation phases and real cyclic-GC pauses.
-
-    Callbacks are installed for this synthetic benchmark only. They record
-    wall and thread CPU time, GC generation, thread and currently running
-    channel-preparation phase. They are removed in the test's finally block.
-    """
-    import gc
-    import os
-
-    samples = []
-    gc_events = []
-    active = threading.local()
-    started = threading.local()
-    lock = threading.Lock()
-
-    def gc_callback(stage, info):
-        if stage == 'start':
-            started.at = (time.perf_counter(), time.thread_time())
-            started.phase = getattr(active, 'name', 'outside-preparation')
-        elif stage == 'stop':
-            at = getattr(started, 'at', None)
-            if at is None:
-                return
-            wall_ms = (time.perf_counter() - at[0]) * 1000
-            cpu_ms = (time.thread_time() - at[1]) * 1000
-            with lock:
-                gc_events.append((
-                    info.get('generation', -1),
-                    getattr(started, 'phase', 'outside-preparation'),
-                    threading.current_thread().name,
-                    wall_ms, cpu_ms,
-                ))
-            started.at = None
-
-    gc.callbacks.append(gc_callback)
-
-    # Snapshot the old-generation population once, before the measured
-    # event-loop interval. Do not force a collection or retain object refs.
-    def heap_snapshot(label):
-        from collections import Counter
-        objects = gc.get_objects(generation=2)
-        counts = Counter((type(obj).__module__, type(obj).__qualname__)
-                         for obj in objects)
-        print(f'DIAG HEAP {label}: old-generation={len(objects)} '
-              f'gc-count={gc.get_count()} gc-threshold={gc.get_threshold()}',
-              flush=True)
-        for (module, typename), count in counts.most_common(14):
-            print(f'  heap-type={module}.{typename} count={count}', flush=True)
-        del objects
-
-    def channel_referrers(label):
-        """Sample references to old Channel objects without retaining them."""
-        import os
-        if os.getenv('TVHPLAYER_DIAG_CHANNEL_REFS') != '1':
-            return
-        from collections import Counter
-        from tvhplayer.core.models import Channel
-
-        objects = gc.get_objects(generation=2)
-        matches = [obj for obj in objects if type(obj) is Channel]
-        print(f'DIAG CHANNEL REFERRERS {label}: channels={len(matches)}', flush=True)
-        refs = Counter()
-        containers = Counter()
-        sample_indices = sorted(set(
-            int((len(matches) - 1) * fraction / 11) for fraction in range(12)
-        )) if matches else []
-        # Do not walk the entire retained object graph. Sample distinct
-        # channels; classify the immediate owners of their containers.
-        for i in sample_indices:
-            channel = matches[i]
-            for parent in gc.get_referrers(channel):
-                if parent is matches or parent is objects:
-                    continue
-                kind = type(parent).__module__ + '.' + type(parent).__qualname__
-                refs[kind] += 1
-                if isinstance(parent, (list, dict)):
-                    owners = gc.get_referrers(parent)
-                    for owner in owners:
-                        if owner is objects or owner is matches or owner is refs or owner is containers:
-                            continue
-                        if isinstance(owner, dict):
-                            if '__name__' in owner and '__package__' in owner:
-                                containers['module:' + str(owner.get('__name__'))] += 1
-                            else:
-                                containers['dict-owner size=' + str(len(owner))] += 1
-                        else:
-                            containers[type(owner).__module__ + '.' + type(owner).__qualname__] += 1
-                    del owners
-        print('DIAG CHANNEL DIRECT REFERRERS:', refs.most_common(12), flush=True)
-        print('DIAG CHANNEL CONTAINER OWNERS:', containers.most_common(16), flush=True)
-
-        # Identify who keeps the HTSP backends alive. An HtspBackend.close()
-        # shuts down its connection but does not clear stored channel metadata.
-        from tvhplayer.core.htsp_backend import HtspBackend
-        backends = [obj for obj in objects if type(obj) is HtspBackend]
-        print(f'DIAG BACKENDS live={len(backends)} '
-              f'channels-in-backends={sum(len(b._channels) for b in backends)}',
-              flush=True)
-        backend_owners = Counter()
-        backend_dict_keys = Counter()
-        closure_functions = Counter()
-        for backend in backends[:12]:
-            for owner in gc.get_referrers(backend):
-                if owner is objects or owner is backends:
-                    continue
-                kind = type(owner).__module__ + '.' + type(owner).__qualname__
-                backend_owners[kind] += 1
-                if type(owner).__name__ == 'cell':
-                    for closure_tuple in gc.get_referrers(owner):
-                        if not isinstance(closure_tuple, tuple):
-                            continue
-                        for function in gc.get_referrers(closure_tuple):
-                            if isinstance(function, types.FunctionType):
-                                closure_functions[(
-                                    function.__module__,
-                                    function.__qualname__,
-                                )] += 1
-                if isinstance(owner, dict):
-                    for key, value in list(owner.items()):
-                        if value is backend and isinstance(key, str):
-                            backend_dict_keys[key] += 1
-                    for holder in gc.get_referrers(owner):
-                        if holder is objects or holder is backends:
-                            continue
-                        if type(holder).__module__.startswith('tvhplayer'):
-                            backend_owners['owner:' + type(holder).__module__ + '.'
-                                           + type(holder).__qualname__] += 1
-        print('DIAG BACKEND REFERRERS:', backend_owners.most_common(20), flush=True)
-        print('DIAG BACKEND DICT KEYS:', backend_dict_keys.most_common(15), flush=True)
-        print('DIAG BACKEND CLOSURE FUNCTIONS:', closure_functions.most_common(20),
-              flush=True)
-        del backends, matches, objects
-
-    def cleanup():
-        if gc_callback in gc.callbacks:
-            gc.callbacks.remove(gc_callback)
-
-    try:
-        def instrument(owner, name):
-            original = getattr(owner, name)
-
-            def measured(*args, **kwargs):
-                # Keep cProfile optional: it changes the CPU cost substantially.
-                import cProfile
-                import io
-                import pstats
-
-                profile = cProfile.Profile() if (
-                    os.getenv('TVHPLAYER_DIAG_CPROFILE') == '1'
-                    and name == 'channel_kinds'
-                    and threading.current_thread().name == 'server-call'
-                ) else None
-                previous_phase = getattr(active, 'name', 'outside-preparation')
-                active.name = name
-                collections_before = tuple(g['collections'] for g in gc.get_stats())
-                wall_start = time.perf_counter()
-                cpu_start = time.thread_time()
-                if profile is not None:
-                    profile.enable()
-                try:
-                    return original(*args, **kwargs)
-                finally:
-                    if profile is not None:
-                        profile.disable()
-                    wall_ms = (time.perf_counter() - wall_start) * 1000
-                    cpu_ms = (time.thread_time() - cpu_start) * 1000
-                    collections_after = tuple(g['collections'] for g in gc.get_stats())
-                    collection_deltas = tuple(
-                        new - old for old, new in zip(collections_before, collections_after)
-                    )
-                    with lock:
-                        samples.append((name, threading.current_thread().name,
-                                        wall_ms, cpu_ms, collection_deltas))
-                    active.name = previous_phase
-                    if profile is not None:
-                        output = io.StringIO()
-                        pstats.Stats(profile, stream=output).strip_dirs().sort_stats(
-                            'cumulative'
-                        ).print_stats(12)
-                        print('DIAG channel_kinds CPU PROFILE:', flush=True)
-                        print(output.getvalue(), flush=True)
-
-            monkeypatch.setattr(owner, name, measured)
-
-        instrument(backend, 'channel_snapshot')
-        instrument(ui, 'channel_kinds')
-        instrument(ui, 'tag_channel_counts')
-        return samples, gc_events, cleanup, heap_snapshot, channel_referrers
-    except BaseException:
-        cleanup()
-        raise
-
-
-def _print_channel_preparation(samples, gc_events):
-    print('DIAG CHANNEL PREPARATION PHASES:', flush=True)
-    for name, thread, wall_ms, cpu_ms, collections in samples:
-        print(f'  phase={name} thread={thread} '
-              f'wall={wall_ms:.1f}ms cpu={cpu_ms:.1f}ms '
-              f'non-cpu={max(0.0, wall_ms - cpu_ms):.1f}ms '
-              f'gc-collections={collections}', flush=True)
-    print('DIAG GC EVENTS (per-generation and phase):', flush=True)
-    by_group = {}
-    for generation, phase, thread, wall_ms, cpu_ms in gc_events:
-        key = (generation, phase, thread)
-        group = by_group.setdefault(key, [0, 0.0, 0.0, 0.0])
-        group[0] += 1
-        group[1] += wall_ms
-        group[2] = max(group[2], wall_ms)
-        group[3] += cpu_ms
-    for (generation, phase, thread), (count, total, maximum, cpu) in sorted(by_group.items()):
-        print(f'  GC generation={generation} phase={phase} thread={thread} '
-              f'count={count} total-wall={total:.1f}ms '
-              f'max-wall={maximum:.1f}ms total-thread-cpu={cpu:.1f}ms', flush=True)
-    print('DIAG GC LONGEST:', flush=True)
-    for generation, phase, thread, wall, cpu in sorted(
-        gc_events, key=lambda x: x[3], reverse=True
-    )[:8]:
-        print(f'  GC generation={generation} phase={phase} thread={thread} '
-              f'wall={wall:.1f}ms cpu={cpu:.1f}ms', flush=True)
 
 
 def _later(action):
@@ -499,8 +250,6 @@ def _close(app, window):
 
     window.close()
     app.processEvents()
-    # Closing a QWidget does not destroy it. Dispose its QObject children,
-    # including ServerCall workers that retain HTSP channel snapshots.
     window.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
@@ -1202,8 +951,7 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
-    # Synthetic channel/EPG benchmarks do not test DVR. The real backend is
-    # never connected, so prevent TasksPane from starting unrelated HTSP I/O.
+    # Synthetic HTSP benchmarks do not query DVR metadata.
     window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
@@ -1324,7 +1072,7 @@ def test_guide_import_updates_keep_the_list_answering(monkeypatch, tmp_path, fil
         window._now_next_loaded = True
         window._update_programme_cells()
         feeder.start()
-        meter = StallMeter(track_thread_cpu=True)
+        meter = StallMeter()
         meter.run(3)
         meter.report(f'Guide import updates, filtered={filtered}')
         assert sent[0] >= 20_000
@@ -1350,8 +1098,7 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
-    # Synthetic channel/EPG benchmarks do not test DVR. The real backend is
-    # never connected, so prevent TasksPane from starting unrelated HTSP I/O.
+    # Synthetic HTSP benchmarks do not query DVR metadata.
     window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
@@ -1370,25 +1117,10 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
         backend._on_async({'method': 'tagAdd', 'tagId': tag, 'tagName': f'Group {tag}',
                            'members': list(range(tag, count + 1, groups))})
     backend._on_async({'method': 'initialSyncCompleted'})
-    # Instrument only the background preparation under measurement, not
-    # construction of 58,868 synthetic HTSP channel records above.
-    phase_samples, gc_events, cleanup_gc, heap_snapshot, channel_referrers = _trace_channel_preparation(monkeypatch, ui, backend)
-    heap_snapshot('before-channel-load')
-    channel_referrers('before-channel-load')
-    # Causal diagnostic: collect accumulated cyclic garbage before Qt timing,
-    # without changing the measured workload or the 250ms assertion.
-    import os
-    if os.getenv('TVHPLAYER_DIAG_PRECOLLECT') == '1':
-        import gc
-        wall = time.perf_counter()
-        collected = gc.collect(2)
-        print(f'DIAG PRECOLLECT: collected={collected} '
-              f'wall-ms={(time.perf_counter() - wall) * 1000:.1f}', flush=True)
-        heap_snapshot('after-precollect')
     window.show()
     StallMeter().run(1.0)
     try:
-        meter = StallMeter(track_thread_cpu=True)
+        meter = StallMeter()
         _later(lambda: window._on_channels_loaded(
             fetch, {'channels': [], 'tags': [], 'services': [], 'now_next': None}))
         meter.run(5.0, until=lambda: window.channel_model.rowCount() == count)
@@ -1401,8 +1133,6 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
         assert window._channel_kinds[ui.channel_key(window._channels[0])].kind == 'HD'
         assert meter.worst() < LIST_BURST_BUDGET
     finally:
-        cleanup_gc()
-        _print_channel_preparation(phase_samples, gc_events)
         window._channel_fetch = None
         backend.close()
         _close(app, window)
