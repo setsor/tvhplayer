@@ -75,7 +75,7 @@ jobs:
           set -e
           # Validate the corrected test-window teardown against the
           # complete Ubuntu test suite, not just the responsiveness module.
-          TVHPLAYER_DIAG_UI_WIDGET_TEARDOWN=1 check linux-full-suite-ui-teardown 1 tests
+          check linux-full-suite-xmltv-thread-cleanup 1 tests
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
