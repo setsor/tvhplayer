@@ -73,33 +73,11 @@ jobs:
             if [ "$code" -ne 0 ]; then failed=1; fi
           }
           set -e
-          # The original SIGABRT and News Hour cases are already isolated.
-          # Measure only the two remaining UI geometry regressions.
-          check narrow-window 0 tests/test_pyqt6_ui.py -k 'test_the_window_narrows_to_half_a_1080p_screen_at_125_percent'
-          check long-server-labels 0 tests/test_pyqt6_ui.py -k 'test_long_group_and_server_names_do_not_widen_the_channel_pane'
-          # Independent Windows QLocalSocket failure; no need to repeat on
-          # macOS/Linux, where it already passed isolated.
-          if [ "$RUNNER_OS" = Windows ]; then
-            check windows-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
-          fi
-          # Compare the full UI module with the existing sys.modules reload
-          # disabled. The audit records any start-watch/tasks-fetch workers
-          # that remain alive after each test, including their Python stacks.
-          PYTHONPATH=tests check ui-module-reuse 1 -p pytest_thread_audit tests/test_pyqt6_ui.py
-          # Check timing-sensitive responsiveness cases in a fresh process.
-          # Do not modify their existing 250ms limit merely to pass CI.
-          check responsiveness-isolated 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          # Repeat the exact subset on the same idle runner, using another
-          # fresh interpreter; preserve the existing 250 ms budget.
-          check responsiveness-repeat 0 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          # Two non-overlapping groups of the first 25 test functions; both
-          # include the two HTSP stress tests and the three failing cases.
-          # Each run is a separate Python interpreter on the same runner.
-          # No changes to application or test thresholds (250 ms).
-          check responsiveness-prefix-a 1 tests/test_responsiveness.py -k 'test_background_guide_scan_keeps_the_window_answering or test_playing_a_channel_on_a_slow_server_keeps_the_window_answering or test_a_late_stream_address_for_an_earlier_channel_is_dropped or test_stopping_while_the_stream_address_is_on_its_way_plays_nothing or test_a_server_that_cannot_give_a_stream_address_is_reported or test_starting_a_recording_on_a_slow_server_keeps_the_window_answering or test_stopping_a_recording_on_a_slow_server_keeps_the_window_answering or test_a_server_that_cannot_record_is_reported or test_stopping_when_nothing_records_says_so or test_a_guide_the_server_cannot_give_is_reported or test_opening_a_channel_guide_on_a_slow_server_keeps_the_window_answering or test_finding_a_logo_address_on_a_slow_server_keeps_the_window_answering or test_programme_changes_on_a_big_list_keep_the_window_answering or test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering or test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          check responsiveness-prefix-b 1 tests/test_responsiveness.py -k 'test_recording_to_this_computer_on_a_slow_server_keeps_the_window_answering or test_scheduling_from_a_channel_guide_on_a_slow_server_keeps_the_window_answering or test_recording_from_the_tv_guide_on_a_slow_server_keeps_the_window_answering or test_pressing_record_twice_in_the_tv_guide_asks_the_server_once or test_opening_dvr_status_on_a_slow_server_keeps_the_window_answering or test_refreshing_dvr_status_while_the_server_answers_asks_once or test_opening_server_status_on_a_slow_server_keeps_the_window_answering or test_choosing_the_recording_to_keep_on_a_slow_server_keeps_the_window_answering or test_quitting_while_the_builtin_server_is_slow_keeps_the_window_answering or test_removing_picons_keeps_the_window_answering or test_a_recordings_folder_on_a_slow_disk_keeps_the_window_answering or test_refreshing_tasks_with_thousands_of_recordings_keeps_the_window_answering or test_tasks_show_a_finished_recording_again_when_it_changes or test_programme_changes_on_a_big_list_keep_the_window_answering or test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering or test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
-          # Full-module control for the same runner.
-          check responsiveness-module-no-reload 1 tests/test_responsiveness.py
+          # Single Ubuntu CPU attribution check. Each command runs in a
+          # separate Python process; compare isolated targets with the
+          # full responsiveness module while preserving the 250 ms budget.
+          check responsiveness-isolated-cpu 1 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
+          check responsiveness-module-cpu 1 tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
