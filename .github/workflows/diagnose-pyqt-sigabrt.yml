@@ -78,6 +78,24 @@ jobs:
           # full responsiveness module while preserving the 250 ms budget.
           check responsiveness-isolated-cpu 1 tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
           check responsiveness-module-cpu 1 tests/test_responsiveness.py
+          # Diagnostic experiment: change only CPython's GIL switch interval.
+          # Reproduce the same tests in fresh interpreters on the same Ubuntu
+          # runner; never change the 250ms responsiveness test budget.
+          check_gil() {
+            label="$1"
+            shift
+            echo "::group::$label"
+            set +e
+            TVHPLAYER_DIAG_NO_MODULE_RELOAD=1 PYTHONUNBUFFERED=1 python -X faulthandler -c 'import sys, pytest; sys.setswitchinterval(0.001); print("DIAG GIL switch interval:", sys.getswitchinterval(), flush=True); raise SystemExit(pytest.main(sys.argv[1:]))' -vv -s --tb=short --timeout=300 -p no:cacheprovider "$@" > "diagnostics/$label.log" 2>&1
+            code=$?
+            set -e
+            echo "$label exit=$code" | tee -a diagnostics/results.txt
+            tail -n 90 "diagnostics/$label.log"
+            echo "::endgroup::"
+            if [ "$code" -ne 0 ]; then failed=1; fi
+          }
+          check_gil responsiveness-isolated-gil-1ms tests/test_responsiveness.py -k 'test_guide_import_updates_keep_the_list_answering or test_a_big_list_arriving_keeps_the_window_answering'
+          check_gil responsiveness-module-gil-1ms tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
