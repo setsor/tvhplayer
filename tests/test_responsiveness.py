@@ -1284,6 +1284,16 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     # construction of 58,868 synthetic HTSP channel records above.
     phase_samples, gc_events, cleanup_gc, heap_snapshot = _trace_channel_preparation(monkeypatch, ui, backend)
     heap_snapshot('before-channel-load')
+    # Causal diagnostic: collect accumulated cyclic garbage before Qt timing,
+    # without changing the measured workload or the 250ms assertion.
+    import os
+    if os.getenv('TVHPLAYER_DIAG_PRECOLLECT') == '1':
+        import gc
+        wall = time.perf_counter()
+        collected = gc.collect(2)
+        print(f'DIAG PRECOLLECT: collected={collected} '
+              f'wall-ms={(time.perf_counter() - wall) * 1000:.1f}', flush=True)
+        heap_snapshot('after-precollect')
     window.show()
     StallMeter().run(1.0)
     try:
