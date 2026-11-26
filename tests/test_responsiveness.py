@@ -224,7 +224,6 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
                         else:
                             containers[type(owner).__module__ + '.' + type(owner).__qualname__] += 1
                     del owners
-            del parent
         print('DIAG CHANNEL DIRECT REFERRERS:', refs.most_common(12), flush=True)
         print('DIAG CHANNEL CONTAINER OWNERS:', containers.most_common(16), flush=True)
         del matches, objects
