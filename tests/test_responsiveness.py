@@ -226,7 +226,35 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
                     del owners
         print('DIAG CHANNEL DIRECT REFERRERS:', refs.most_common(12), flush=True)
         print('DIAG CHANNEL CONTAINER OWNERS:', containers.most_common(16), flush=True)
-        del matches, objects
+
+        # Identify who keeps the HTSP backends alive. An HtspBackend.close()
+        # shuts down its connection but does not clear stored channel metadata.
+        from tvhplayer.core.htsp_backend import HtspBackend
+        backends = [obj for obj in objects if type(obj) is HtspBackend]
+        print(f'DIAG BACKENDS live={len(backends)} '
+              f'channels-in-backends={sum(len(b._channels) for b in backends)}',
+              flush=True)
+        backend_owners = Counter()
+        backend_dict_keys = Counter()
+        for backend in backends[:12]:
+            for owner in gc.get_referrers(backend):
+                if owner is objects or owner is backends:
+                    continue
+                kind = type(owner).__module__ + '.' + type(owner).__qualname__
+                backend_owners[kind] += 1
+                if isinstance(owner, dict):
+                    for key, value in list(owner.items()):
+                        if value is backend and isinstance(key, str):
+                            backend_dict_keys[key] += 1
+                    for holder in gc.get_referrers(owner):
+                        if holder is objects or holder is backends:
+                            continue
+                        if type(holder).__module__.startswith('tvhplayer'):
+                            backend_owners['owner:' + type(holder).__module__ + '.'
+                                           + type(holder).__qualname__] += 1
+        print('DIAG BACKEND REFERRERS:', backend_owners.most_common(20), flush=True)
+        print('DIAG BACKEND DICT KEYS:', backend_dict_keys.most_common(15), flush=True)
+        del backends, matches, objects
 
     def cleanup():
         if gc_callback in gc.callbacks:
