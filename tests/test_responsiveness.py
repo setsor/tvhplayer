@@ -1047,6 +1047,17 @@ def test_guide_import_updates_keep_the_list_answering(monkeypatch, tmp_path, fil
     from tvhplayer.core.channel_info import NowNext, channel_key
     from tvhplayer.core.models import EpgEvent
 
+    if filtered:
+        # Diagnose state arriving from preceding modules, before allocating
+        # this test's synthetic 60k-channel backend.
+        from collections import Counter
+        from PyQt6.QtWidgets import QApplication
+        live = Counter(t.name for t in threading.enumerate())
+        top = QApplication.topLevelWidgets()
+        print('DIAG PRE-EPG THREADS:', sorted(live.items()), flush=True)
+        print('DIAG PRE-EPG QT WINDOWS:',
+              [(type(w).__name__, w.isVisible()) for w in top][:20],
+              'total=', len(top), flush=True)
     app, ui, window, backend = _big_htsp_window(monkeypatch, tmp_path, groups=1_034)
     stopped = threading.Event()
     sent = [0]
