@@ -4682,11 +4682,17 @@ class TVHeadendClient(QMainWindow):
         
         # Server selection with add/remove buttons. In a narrow pane the
         # server names are cut short.
-        server_layout = QHBoxLayout()
+        # Keep the server selector usable in narrow windows by placing its
+        # actions beneath it instead of forcing five controls into one row.
+        server_layout = QVBoxLayout()
+        server_layout.setSpacing(2)
+        server_select_row = QHBoxLayout()
+        server_buttons_row = QHBoxLayout()
+        server_buttons_row.addStretch(1)
         self.server_combo = QComboBox()
         self.server_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.server_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.server_combo.setMinimumContentsLength(8)
+        self.server_combo.setMinimumContentsLength(6)
         for server in self.servers:
             self.server_combo.addItem(server['name'])
         # The last server, chosen before the change signal is connected: the
@@ -4701,15 +4707,17 @@ class TVHeadendClient(QMainWindow):
         self.manage_servers_btn = IconToolButton(self.icons_dir / 'settings.svg', 18)
         self.manage_servers_btn.clicked.connect(self.manage_servers)
         
-        server_layout.addWidget(buddy_label("&Server:", self.server_combo))
-        server_layout.addWidget(self.server_combo)
+        server_select_row.addWidget(buddy_label("&Server:", self.server_combo))
+        server_select_row.addWidget(self.server_combo, 1)
+        server_layout.addLayout(server_select_row)
+        server_layout.addLayout(server_buttons_row)
         describe(
             self.manage_servers_btn,
             "Manage servers",
             "Add, edit, or remove TVHeadend servers",
         )
         self.manage_servers_btn.setToolTip("Manage servers")
-        server_layout.addWidget(self.manage_servers_btn)
+        server_buttons_row.addWidget(self.manage_servers_btn)
         self.reload_channels_btn = IconToolButton(self.icons_dir / 'refresh.svg', 18)
         self.reload_channels_btn.clicked.connect(lambda: self.fetch_channels(keep_place=True))
         describe(
@@ -4718,7 +4726,7 @@ class TVHeadendClient(QMainWindow):
             "Read the channels from the server again. Keyboard: F5.",
         )
         self.reload_channels_btn.setToolTip("Reload channel list (F5)")
-        server_layout.addWidget(self.reload_channels_btn)
+        server_buttons_row.addWidget(self.reload_channels_btn)
         self.guide_btn = IconToolButton(self.icons_dir / 'event_note.svg', 18)
         self.guide_btn.clicked.connect(lambda: self.show_guide())
         describe(
@@ -4727,7 +4735,7 @@ class TVHeadendClient(QMainWindow):
             "Show what is on every channel, now and later. Keyboard: Ctrl+G.",
         )
         self.guide_btn.setToolTip(keys_text("TV guide (Ctrl+G)"))
-        server_layout.addWidget(self.guide_btn)
+        server_buttons_row.addWidget(self.guide_btn)
         left_layout.addLayout(server_layout)
         
     
