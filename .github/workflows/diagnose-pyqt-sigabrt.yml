@@ -75,7 +75,11 @@ jobs:
           set -e
           # Validate the corrected test-window teardown against the
           # complete Ubuntu test suite, not just the responsiveness module.
-          check linux-full-suite-xmltv-thread-cleanup 1 tests
+          # Runtime/correctness tests and timing-sensitive Qt benchmarks are
+          # separate processes so earlier modules cannot contaminate CPU
+          # scheduling or leave GUI windows inside the performance benchmark.
+          check linux-core-suite 1 tests --ignore=tests/test_responsiveness.py
+          check linux-responsiveness-suite 1 tests/test_responsiveness.py
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
