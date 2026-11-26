@@ -51,21 +51,28 @@ BIG_LIST = 60_000
 class StallMeter:
     """Gaps between ticks of a timer on the window's thread."""
 
-    def __init__(self, interval_ms=5):
+    def __init__(self, interval_ms=5, track_thread_cpu=False):
         from PyQt6.QtCore import QTimer
 
         self.interval = interval_ms / 1000
         self.ticks = []
+        self.track_thread_cpu = track_thread_cpu
+        self.cpu_ticks = []
         self.timer = QTimer()
         self.timer.setInterval(interval_ms)
-        self.timer.timeout.connect(lambda: self.ticks.append(time.perf_counter()))
+        self.timer.timeout.connect(self._tick)
+
+    def _tick(self):
+        self.ticks.append(time.perf_counter())
+        if self.track_thread_cpu:
+            self.cpu_ticks.append(time.thread_time())
 
     def run(self, seconds, until=None):
         """Run the event loop for ``seconds``, or until ``until()`` is true after at least one tick."""
         from PyQt6.QtCore import QEventLoop, QTimer
 
         loop = QEventLoop()
-        self.ticks.append(time.perf_counter())
+        self._tick()
         self.timer.start()
         deadline = time.monotonic() + seconds
         check = QTimer()
@@ -80,7 +87,7 @@ class StallMeter:
         loop.exec()
         check.stop()
         self.timer.stop()
-        self.ticks.append(time.perf_counter())
+        self._tick()
 
     def gaps(self):
         return sorted(b - a for a, b in zip(self.ticks, self.ticks[1:]))
@@ -106,6 +113,20 @@ class StallMeter:
         print(f"\n{what}: worst pause {self.worst() * 1000:.0f} ms, busy {self.busy():.0%}, "
               f"p95 {self.percentile(0.95) * 1000:.0f} ms, "
               f"p99 {self.percentile(0.99) * 1000:.0f} ms, {len(self.ticks)} ticks")
+        if self.track_thread_cpu:
+            gaps = sorted(
+                ((wall2 - wall1, cpu2 - cpu1)
+                 for wall1, wall2, cpu1, cpu2
+                 in zip(self.ticks, self.ticks[1:], self.cpu_ticks, self.cpu_ticks[1:])),
+                reverse=True,
+            )
+            for wall, cpu in gaps[:3]:
+                print(f"  UI heartbeat: wall={wall * 1000:.1f} ms; "
+                      f"main-thread CPU={cpu * 1000:.1f} ms; "
+                      f"non-CPU gap={max(0, wall - cpu) * 1000:.1f} ms")
+            # thread_time measures CPU used by this Python/Qt UI thread,
+            # not GIL contention or any other process; this is diagnostic.
+
 
 
 def _later(action):
@@ -1068,7 +1089,7 @@ def test_guide_import_updates_keep_the_list_answering(monkeypatch, tmp_path, fil
         window._now_next_loaded = True
         window._update_programme_cells()
         feeder.start()
-        meter = StallMeter()
+        meter = StallMeter(track_thread_cpu=True)
         meter.run(3)
         meter.report(f'Guide import updates, filtered={filtered}')
         assert sent[0] >= 20_000
@@ -1117,7 +1138,7 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     window.show()
     StallMeter().run(1.0)
     try:
-        meter = StallMeter()
+        meter = StallMeter(track_thread_cpu=True)
         _later(lambda: window._on_channels_loaded(
             fetch, {'channels': [], 'tags': [], 'services': [], 'now_next': None}))
         meter.run(5.0, until=lambda: window.channel_model.rowCount() == count)
