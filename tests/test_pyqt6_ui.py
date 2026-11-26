@@ -5586,7 +5586,20 @@ def test_long_group_and_server_names_do_not_widen_the_channel_pane(monkeypatch, 
     try:
         # The groups arrive before the row first shows, when the list sizes itself.
         window.tag_combo.addItem("Persian satellite channels in high definition (123)", "x")
-        window.server_combo.addItem("A very long server name for testing purposes")
+        # This is a geometry test, not a server-switch or network test.
+        # Keep the combo and its backing server list in sync.
+        server = {'name': 'A very long server name for testing purposes',
+                  'url': 'http://192.0.2.1:9981', 'protocol': 'http'}
+        monkeypatch.setattr(window, '_server_requests_ready', lambda: False)
+        blocked = window.server_combo.blockSignals(True)
+        try:
+            window.servers = [server]
+            window.server_combo.clear()
+            window.server_combo.addItem(server['name'])
+            window.server_combo.setCurrentIndex(0)
+        finally:
+            window.server_combo.blockSignals(blocked)
+        assert window.current_server() == server
         window.tag_row.setVisible(True)
         window.show()
         _settle(app)

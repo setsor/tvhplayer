@@ -65,17 +65,18 @@ jobs:
           python -m pip install -r "$reqs" PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
 
       - name: Build the C decoder
+        id: native_decoder
         run: python packaging/build-native.py
 
       # Run Linux responsiveness benchmarks in a fresh interpreter. Earlier
       # Qt tests otherwise retain widgets/callbacks and distort timing.
       - name: Run correctness tests (Linux)
         if: runner.os == 'Linux'
-        run: python -m pytest tests --ignore=tests/test_responsiveness.py -q -p no:cacheprovider --timeout=300 -ra
+        run: python -m pytest tests --ignore=tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
 
       - name: Run responsiveness tests (Linux)
-        if: runner.os == 'Linux'
-        run: python -m pytest tests/test_responsiveness.py -q -p no:cacheprovider --timeout=300 -ra
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.native_decoder.outcome == 'success' }}
+        run: python -m pytest tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
 
       - name: Run tests
         if: runner.os != 'Linux'
