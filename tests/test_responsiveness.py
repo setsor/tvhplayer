@@ -186,6 +186,49 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
             print(f'  heap-type={module}.{typename} count={count}', flush=True)
         del objects
 
+    def channel_referrers(label):
+        """Sample references to old Channel objects without retaining them."""
+        import os
+        if os.getenv('TVHPLAYER_DIAG_CHANNEL_REFS') != '1':
+            return
+        from collections import Counter
+        from tvhplayer.core.models import Channel
+
+        objects = gc.get_objects(generation=2)
+        matches = [obj for obj in objects if type(obj) is Channel]
+        print(f'DIAG CHANNEL REFERRERS {label}: channels={len(matches)}', flush=True)
+        refs = Counter()
+        containers = Counter()
+        sample_indices = sorted(set(
+            int((len(matches) - 1) * fraction / 11) for fraction in range(12)
+        )) if matches else []
+        # Do not walk the entire retained object graph. Sample distinct
+        # channels; classify the immediate owners of their containers.
+        for i in sample_indices:
+            channel = matches[i]
+            for parent in gc.get_referrers(channel):
+                if parent is matches or parent is objects:
+                    continue
+                kind = type(parent).__module__ + '.' + type(parent).__qualname__
+                refs[kind] += 1
+                if isinstance(parent, (list, dict)):
+                    owners = gc.get_referrers(parent)
+                    for owner in owners:
+                        if owner is objects or owner is matches or owner is refs or owner is containers:
+                            continue
+                        if isinstance(owner, dict):
+                            if '__name__' in owner and '__package__' in owner:
+                                containers['module:' + str(owner.get('__name__'))] += 1
+                            else:
+                                containers['dict-owner size=' + str(len(owner))] += 1
+                        else:
+                            containers[type(owner).__module__ + '.' + type(owner).__qualname__] += 1
+                    del owners
+            del parent
+        print('DIAG CHANNEL DIRECT REFERRERS:', refs.most_common(12), flush=True)
+        print('DIAG CHANNEL CONTAINER OWNERS:', containers.most_common(16), flush=True)
+        del matches, objects
+
     def cleanup():
         if gc_callback in gc.callbacks:
             gc.callbacks.remove(gc_callback)
@@ -240,7 +283,7 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
         instrument(backend, 'channel_snapshot')
         instrument(ui, 'channel_kinds')
         instrument(ui, 'tag_channel_counts')
-        return samples, gc_events, cleanup, heap_snapshot
+        return samples, gc_events, cleanup, heap_snapshot, channel_referrers
     except BaseException:
         cleanup()
         raise
@@ -1282,8 +1325,9 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     backend._on_async({'method': 'initialSyncCompleted'})
     # Instrument only the background preparation under measurement, not
     # construction of 58,868 synthetic HTSP channel records above.
-    phase_samples, gc_events, cleanup_gc, heap_snapshot = _trace_channel_preparation(monkeypatch, ui, backend)
+    phase_samples, gc_events, cleanup_gc, heap_snapshot, channel_referrers = _trace_channel_preparation(monkeypatch, ui, backend)
     heap_snapshot('before-channel-load')
+    channel_referrers('before-channel-load')
     # Causal diagnostic: collect accumulated cyclic garbage before Qt timing,
     # without changing the measured workload or the 250ms assertion.
     import os
