@@ -236,12 +236,23 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
               flush=True)
         backend_owners = Counter()
         backend_dict_keys = Counter()
+        closure_functions = Counter()
         for backend in backends[:12]:
             for owner in gc.get_referrers(backend):
                 if owner is objects or owner is backends:
                     continue
                 kind = type(owner).__module__ + '.' + type(owner).__qualname__
                 backend_owners[kind] += 1
+                if type(owner).__name__ == 'cell':
+                    for closure_tuple in gc.get_referrers(owner):
+                        if not isinstance(closure_tuple, tuple):
+                            continue
+                        for function in gc.get_referrers(closure_tuple):
+                            if isinstance(function, types.FunctionType):
+                                closure_functions[(
+                                    function.__module__,
+                                    function.__qualname__,
+                                )] += 1
                 if isinstance(owner, dict):
                     for key, value in list(owner.items()):
                         if value is backend and isinstance(key, str):
@@ -254,6 +265,8 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
                                            + type(holder).__qualname__] += 1
         print('DIAG BACKEND REFERRERS:', backend_owners.most_common(20), flush=True)
         print('DIAG BACKEND DICT KEYS:', backend_dict_keys.most_common(15), flush=True)
+        print('DIAG BACKEND CLOSURE FUNCTIONS:', closure_functions.most_common(20),
+              flush=True)
         del backends, matches, objects
 
     def cleanup():
