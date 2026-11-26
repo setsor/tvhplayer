@@ -495,17 +495,15 @@ def _remote_window(monkeypatch, tmp_path):
 
 
 def _close(app, window):
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
     window.close()
     app.processEvents()
-    # Optional teardown experiment: make Qt destroy windows and their
-    # QObject children, including completed ServerCall objects.
-    # Leave production behavior and default test teardown untouched.
-    import os
-    if os.getenv('TVHPLAYER_DIAG_DESTROY_TEST_WINDOWS') == '1':
-        from PyQt6.QtCore import QCoreApplication, QEvent
-        window.deleteLater()
-        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-        app.processEvents()
+    # Closing a QWidget does not destroy it. Dispose its QObject children,
+    # including ServerCall workers that retain HTSP channel snapshots.
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
 
 
 # --- Waiting for the server -------------------------------------------------
