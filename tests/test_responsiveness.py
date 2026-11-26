@@ -246,7 +246,12 @@ def _remote_window(monkeypatch, tmp_path):
 
 
 def _close(app, window):
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
     window.close()
+    app.processEvents()
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
 
 
@@ -812,6 +817,9 @@ def test_removing_picons_keeps_the_window_answering(monkeypatch, tmp_path):
 def test_a_recordings_folder_on_a_slow_disk_keeps_the_window_answering(monkeypatch, tmp_path):
     # A network share that has gone away can take seconds, or for ever, to say how full it is.
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    # The periodic awake timer checks disk space independently. Stop it so
+    # this test measures only explicitly requested and coalesced checks.
+    window._awake_timer.stop()
     asked = []
     at_once = [0, 0]
 
@@ -946,6 +954,8 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
+    # Synthetic HTSP benchmarks do not query DVR metadata.
+    window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')
@@ -1091,6 +1101,8 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
+    # Synthetic HTSP benchmarks do not query DVR metadata.
+    window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')

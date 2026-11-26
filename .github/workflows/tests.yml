@@ -70,5 +70,16 @@ jobs:
       - name: Build the C decoder
         run: python packaging/build-native.py
 
+      # Run Linux responsiveness benchmarks in a fresh interpreter. Earlier
+      # Qt tests otherwise retain widgets/callbacks and distort timing.
+      - name: Run correctness tests (Linux)
+        if: runner.os == 'Linux'
+        run: python -m pytest tests --ignore=tests/test_responsiveness.py -q -p no:cacheprovider --timeout=300 -ra
+
+      - name: Run responsiveness tests (Linux)
+        if: runner.os == 'Linux'
+        run: python -m pytest tests/test_responsiveness.py -q -p no:cacheprovider --timeout=300 -ra
+
       - name: Run tests
+        if: runner.os != 'Linux'
         run: python -m pytest tests -q -p no:cacheprovider --timeout=300 -ra
