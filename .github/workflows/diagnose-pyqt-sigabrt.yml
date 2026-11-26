@@ -73,16 +73,14 @@ jobs:
             if [ "$code" -ne 0 ]; then failed=1; fi
           }
           set -e
-          # Capture cyclic-GC start/stop durations and thread/phase
-          # attribution without cProfile or suppressing GC. Each command is
-          # a fresh Python process; original 250-ms budget remains intact.
-          check responsiveness-gc-isolated 1 tests/test_responsiveness.py -k 'test_a_big_list_arriving_keeps_the_window_answering'
-          check responsiveness-gc-full-module 1 tests/test_responsiveness.py
-          TVHPLAYER_DIAG_PRECOLLECT=1 check responsiveness-gc-full-module-precollect 1 tests/test_responsiveness.py
-          echo "::group::Old-generation heap comparison"
-          for label in responsiveness-gc-isolated responsiveness-gc-full-module responsiveness-gc-full-module-precollect; do
+          # Retention ownership: one isolated reference sample and the
+          # same test after the complete module, in separate interpreters.
+          TVHPLAYER_DIAG_CHANNEL_REFS=1 check channel-refs-isolated 1 tests/test_responsiveness.py -k 'test_a_big_list_arriving_keeps_the_window_answering'
+          TVHPLAYER_DIAG_CHANNEL_REFS=1 check channel-refs-module 1 tests/test_responsiveness.py
+          echo "::group::Channel ownership samples"
+          for label in channel-refs-isolated channel-refs-module; do
             echo "--- $label ---"
-            grep -E '^(DIAG HEAP|DIAG PRECOLLECT|  heap-type=|  GC generation=2|  phase=channel_kinds)' "diagnostics/$label.log" || true
+            grep -E '^(DIAG CHANNEL REFERRERS|DIAG CHANNEL DIRECT REFERRERS|DIAG CHANNEL CONTAINER OWNERS|DIAG HEAP)' "diagnostics/$label.log" || true
           done
           echo "::endgroup::"
           {
