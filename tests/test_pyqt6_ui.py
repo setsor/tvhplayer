@@ -9,6 +9,37 @@ from pathlib import Path
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _dispose_ui_test_widgets(monkeypatch):
+    """Destroy Qt widgets created by this UI test, not earlier test modules.
+
+    A closed QWidget and its hidden menus can remain live until Qt processes
+    DeferredDelete. Preserve widgets already present before this test.
+    """
+    if os.environ.get('TVHPLAYER_DIAG_UI_WIDGET_TEARDOWN') != '1':
+        yield
+        return
+    from PyQt6.QtCore import QCoreApplication, QEvent
+    from PyQt6.QtWidgets import QApplication
+    from PyQt6 import sip
+
+    app = QApplication.instance()
+    before = {id(w) for w in app.topLevelWidgets()} if app else set()
+    yield
+    app = QApplication.instance()
+    if app is None:
+        return
+    remaining = [w for w in app.topLevelWidgets()
+                 if id(w) not in before and not sip.isdeleted(w)]
+    for widget in remaining:
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    print(f'DIAG UI MODULE TEARDOWN: destroyed={len(remaining)} '
+          f'top-level widgets, surviving={len(app.topLevelWidgets())}', flush=True)
+
+
 ROOT = Path(__file__).resolve().parents[1]
 UI_PATH = ROOT / 'tvhplayer' / 'tvhplayer.py'
 
