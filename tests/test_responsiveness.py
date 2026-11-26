@@ -817,6 +817,9 @@ def test_removing_picons_keeps_the_window_answering(monkeypatch, tmp_path):
 def test_a_recordings_folder_on_a_slow_disk_keeps_the_window_answering(monkeypatch, tmp_path):
     # A network share that has gone away can take seconds, or for ever, to say how full it is.
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    # The periodic awake timer checks disk space independently. Stop it so
+    # this test measures only explicitly requested and coalesced checks.
+    window._awake_timer.stop()
     asked = []
     at_once = [0, 0]
 
