@@ -78,6 +78,12 @@ jobs:
           # a fresh Python process; original 250-ms budget remains intact.
           check responsiveness-gc-isolated 1 tests/test_responsiveness.py -k 'test_a_big_list_arriving_keeps_the_window_answering'
           check responsiveness-gc-full-module 1 tests/test_responsiveness.py
+          echo "::group::Old-generation heap comparison"
+          for label in responsiveness-gc-isolated responsiveness-gc-full-module; do
+            echo "--- $label ---"
+            grep -E '^(DIAG HEAP|  heap-type=|  GC generation=2|  phase=channel_kinds)' "diagnostics/$label.log" || true
+          done
+          echo "::endgroup::"
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
