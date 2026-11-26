@@ -135,6 +135,46 @@ class StallMeter:
 
 
 
+def _trace_channel_preparation(monkeypatch, ui, backend):
+    """Record the real worker phases, without changing their results.
+
+    The three operations run in ServerCall's 'server-call' thread when the
+    initial HTSP channel list is prepared. Every duration measures both
+    wall time and CPU on the thread executing that particular operation.
+    """
+    samples = []
+    lock = threading.Lock()
+
+    def instrument(owner, name):
+        original = getattr(owner, name)
+
+        def measured(*args, **kwargs):
+            wall_start = time.perf_counter()
+            cpu_start = time.thread_time()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                wall_ms = (time.perf_counter() - wall_start) * 1000
+                cpu_ms = (time.thread_time() - cpu_start) * 1000
+                with lock:
+                    samples.append((name, threading.current_thread().name, wall_ms, cpu_ms))
+
+        monkeypatch.setattr(owner, name, measured)
+
+    instrument(backend, 'channel_snapshot')
+    instrument(ui, 'channel_kinds')
+    instrument(ui, 'tag_channel_counts')
+    return samples
+
+
+def _print_channel_preparation(samples):
+    print('DIAG CHANNEL PREPARATION PHASES:', flush=True)
+    for name, thread, wall_ms, cpu_ms in samples:
+        print(f'  phase={name} thread={thread} '
+              f'wall={wall_ms:.1f}ms cpu={cpu_ms:.1f}ms '
+              f'non-cpu={max(0.0, wall_ms - cpu_ms):.1f}ms', flush=True)
+
+
 def _later(action):
     """Start ``action`` from the event loop, as a click or key press would."""
     from PyQt6.QtCore import QTimer
@@ -1141,6 +1181,9 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
         backend._on_async({'method': 'tagAdd', 'tagId': tag, 'tagName': f'Group {tag}',
                            'members': list(range(tag, count + 1, groups))})
     backend._on_async({'method': 'initialSyncCompleted'})
+    # Instrument only the background preparation under measurement, not
+    # construction of 58,868 synthetic HTSP channel records above.
+    phase_samples = _trace_channel_preparation(monkeypatch, ui, backend)
     window.show()
     StallMeter().run(1.0)
     try:
@@ -1157,6 +1200,7 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
         assert window._channel_kinds[ui.channel_key(window._channels[0])].kind == 'HD'
         assert meter.worst() < LIST_BURST_BUDGET
     finally:
+        _print_channel_preparation(phase_samples)
         window._channel_fetch = None
         backend.close()
         _close(app, window)
