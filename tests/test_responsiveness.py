@@ -149,15 +149,43 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
         original = getattr(owner, name)
 
         def measured(*args, **kwargs):
+            # cProfile is deliberately scoped to the background channel
+            # classification phase, not the Qt thread or unrelated tests.
+            import cProfile
+            import gc
+            import io
+            import pstats
+
+            profile = cProfile.Profile() if (
+                name == 'channel_kinds'
+                and threading.current_thread().name == 'server-call'
+            ) else None
+            collections_before = tuple(g['collections'] for g in gc.get_stats())
             wall_start = time.perf_counter()
             cpu_start = time.thread_time()
+            if profile is not None:
+                profile.enable()
             try:
                 return original(*args, **kwargs)
             finally:
+                if profile is not None:
+                    profile.disable()
                 wall_ms = (time.perf_counter() - wall_start) * 1000
                 cpu_ms = (time.thread_time() - cpu_start) * 1000
+                collections_after = tuple(g['collections'] for g in gc.get_stats())
+                collection_deltas = tuple(
+                    new - old for old, new in zip(collections_before, collections_after)
+                )
                 with lock:
-                    samples.append((name, threading.current_thread().name, wall_ms, cpu_ms))
+                    samples.append((name, threading.current_thread().name,
+                                    wall_ms, cpu_ms, collection_deltas))
+                if profile is not None:
+                    output = io.StringIO()
+                    pstats.Stats(profile, stream=output).strip_dirs().sort_stats(
+                        'cumulative'
+                    ).print_stats(12)
+                    print('DIAG channel_kinds CPU PROFILE:', flush=True)
+                    print(output.getvalue(), flush=True)
 
         monkeypatch.setattr(owner, name, measured)
 
@@ -169,10 +197,11 @@ def _trace_channel_preparation(monkeypatch, ui, backend):
 
 def _print_channel_preparation(samples):
     print('DIAG CHANNEL PREPARATION PHASES:', flush=True)
-    for name, thread, wall_ms, cpu_ms in samples:
+    for name, thread, wall_ms, cpu_ms, collections in samples:
         print(f'  phase={name} thread={thread} '
               f'wall={wall_ms:.1f}ms cpu={cpu_ms:.1f}ms '
-              f'non-cpu={max(0.0, wall_ms - cpu_ms):.1f}ms', flush=True)
+              f'non-cpu={max(0.0, wall_ms - cpu_ms):.1f}ms '
+              f'gc-collections={collections}', flush=True)
 
 
 def _later(action):
