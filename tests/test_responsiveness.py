@@ -1058,6 +1058,19 @@ def test_guide_import_updates_keep_the_list_answering(monkeypatch, tmp_path, fil
         print('DIAG PRE-EPG QT WINDOWS:',
               [(type(w).__name__, w.isVisible()) for w in top][:20],
               'total=', len(top), flush=True)
+        import os
+        if os.getenv('TVHPLAYER_DIAG_PRUNE_QT_TOPLEVELS') == '1':
+            from PyQt6.QtCore import QCoreApplication, QEvent
+            # Experiment: remove hidden top-level widgets left by earlier
+            # test modules, preserving any currently visible widgets.
+            stale = [w for w in top if not w.isVisible()]
+            for widget in stale:
+                widget.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            QApplication.instance().processEvents()
+            print('DIAG POST-PRUNE QT WINDOWS:',
+                  len(QApplication.topLevelWidgets()),
+                  'deleted=', len(stale), flush=True)
     app, ui, window, backend = _big_htsp_window(monkeypatch, tmp_path, groups=1_034)
     stopped = threading.Event()
     sent = [0]
