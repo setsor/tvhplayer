@@ -58,6 +58,7 @@ class StallMeter:
         self.ticks = []
         self.track_thread_cpu = track_thread_cpu
         self.cpu_ticks = []
+        self.process_ticks = []
         self.timer = QTimer()
         self.timer.setInterval(interval_ms)
         self.timer.timeout.connect(self._tick)
@@ -66,6 +67,7 @@ class StallMeter:
         self.ticks.append(time.perf_counter())
         if self.track_thread_cpu:
             self.cpu_ticks.append(time.thread_time())
+            self.process_ticks.append(time.process_time())
 
     def run(self, seconds, until=None):
         """Run the event loop for ``seconds``, or until ``until()`` is true after at least one tick."""
@@ -115,17 +117,21 @@ class StallMeter:
               f"p99 {self.percentile(0.99) * 1000:.0f} ms, {len(self.ticks)} ticks")
         if self.track_thread_cpu:
             gaps = sorted(
-                ((wall2 - wall1, cpu2 - cpu1)
-                 for wall1, wall2, cpu1, cpu2
-                 in zip(self.ticks, self.ticks[1:], self.cpu_ticks, self.cpu_ticks[1:])),
+                ((wall2 - wall1, cpu2 - cpu1, proc2 - proc1)
+                 for wall1, wall2, cpu1, cpu2, proc1, proc2
+                 in zip(self.ticks, self.ticks[1:],
+                        self.cpu_ticks, self.cpu_ticks[1:],
+                        self.process_ticks, self.process_ticks[1:])),
                 reverse=True,
             )
-            for wall, cpu in gaps[:3]:
+            for wall, cpu, process_cpu in gaps[:3]:
                 print(f"  UI heartbeat: wall={wall * 1000:.1f} ms; "
                       f"main-thread CPU={cpu * 1000:.1f} ms; "
-                      f"non-CPU gap={max(0, wall - cpu) * 1000:.1f} ms")
-            # thread_time measures CPU used by this Python/Qt UI thread,
-            # not GIL contention or any other process; this is diagnostic.
+                      f"other-threads CPU={max(0, process_cpu - cpu) * 1000:.1f} ms; "
+                      f"process CPU={process_cpu * 1000:.1f} ms; "
+                      f"unaccounted wall={max(0, wall - process_cpu) * 1000:.1f} ms")
+            # Process CPU sums all process threads and can exceed wall time.
+            # These snapshots are diagnostic, not a measurement of time holding the GIL.
 
 
 
