@@ -57,6 +57,8 @@ concurrency:
 
 jobs:
   backend:
+    # Diagnostic branch exercises Ubuntu only.
+    if: github.head_ref != 'diagnostic/linux-qt-tasks-fetch'
     uses: ./.github/workflows/backend-bundle.yml
     with:
       force_rebuild: ${{ inputs.force_backend_rebuild == true }}
@@ -65,6 +67,7 @@ jobs:
 
   windows:
     needs: backend
+    if: github.head_ref != 'diagnostic/linux-qt-tasks-fetch'
     outputs:
       label: ${{ steps.version.outputs.label }}
     runs-on: windows-2025

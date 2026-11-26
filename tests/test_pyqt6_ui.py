@@ -2773,21 +2773,38 @@ def test_conversion_is_refused_when_ffmpeg_cannot_encode(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def _destroy_quit_test_window(app, window):
+    """Close a test-owned window and release its QObject children now."""
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
+    window.close()
+    app.processEvents()
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+
+
 def test_quit_asks_while_recording_to_this_computer(monkeypatch, tmp_path):
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
-    window.builtin = None
-    recorder = types.SimpleNamespace(is_running=True, file_path='/tmp/rec_One.ts', stop=lambda: None)
-    window.local_jobs = [ui.LocalJob(recorder, types.SimpleNamespace(name='One'))]
-    messages = []
-    monkeypatch.setattr(
-        ui.QMessageBox, 'question',
-        lambda _parent, _title, text, *a: messages.append(text) or ui.QMessageBox.StandardButton.No,
-    )
-    assert window._confirm_quit() is False
-    assert 'One (rec_One.ts)' in messages[0]
-    recorder.is_running = False
-    assert window._confirm_quit() is True
-    app.processEvents()
+    try:
+        window.builtin = None
+        recorder = types.SimpleNamespace(is_running=True, file_path='/tmp/rec_One.ts', stop=lambda: None)
+        window.local_jobs = [ui.LocalJob(recorder, types.SimpleNamespace(name='One'))]
+        messages = []
+        monkeypatch.setattr(
+            ui.QMessageBox, 'question',
+            lambda _parent, _title, text, *a: messages.append(text) or ui.QMessageBox.StandardButton.No,
+        )
+        assert window._confirm_quit() is False
+        assert 'One (rec_One.ts)' in messages[0]
+        recorder.is_running = False
+        assert window._confirm_quit() is True
+    finally:
+        # The quit-decision tests must not carry their fake confirmation
+        # or supervisor into the real resource shutdown.
+        window._confirm_quit = lambda: True
+        window.builtin = None
+        _destroy_quit_test_window(app, window)
 
 
 def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
@@ -2818,74 +2835,82 @@ def test_opening_builtin_web_ui_does_not_copy_a_password(monkeypatch, tmp_path):
 
 def test_quit_asks_the_builtin_server_even_when_another_is_selected(monkeypatch, tmp_path):
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
-    from tvhplayer.core.models import DvrEntry
+    try:
+        from tvhplayer.core.models import DvrEntry
 
-    window.servers = [
-        {'name': 'NAS', 'url': 'http://nas:9981', 'protocol': 'http'},
-        {
-            'name': 'Built-in Server', 'url': 'http://127.0.0.1:24111', 'protocol': 'htsp',
-            'username': 'tvhplayer', 'password': 'secret-secret-secret', 'builtin': True,
-        },
-    ]
-    window.server_combo.blockSignals(True)
-    window.server_combo.clear()
-    window.server_combo.addItems(['NAS', 'Built-in Server'])
-    window.server_combo.setCurrentIndex(0)
-    window.server_combo.blockSignals(False)
-    window.builtin = types.SimpleNamespace(
-        is_running=lambda: True, username='tvhplayer', password='secret-secret-secret',
-        stop=lambda: None,
-    )
+        window.servers = [
+            {'name': 'NAS', 'url': 'http://nas:9981', 'protocol': 'http'},
+            {
+                'name': 'Built-in Server', 'url': 'http://127.0.0.1:24111', 'protocol': 'htsp',
+                'username': 'tvhplayer', 'password': 'secret-secret-secret', 'builtin': True,
+            },
+        ]
+        window.server_combo.blockSignals(True)
+        window.server_combo.clear()
+        window.server_combo.addItems(['NAS', 'Built-in Server'])
+        window.server_combo.setCurrentIndex(0)
+        window.server_combo.blockSignals(False)
+        window.builtin = types.SimpleNamespace(
+            is_running=lambda: True, username='tvhplayer', password='secret-secret-secret',
+            stop=lambda: None,
+        )
 
-    asked = []
+        asked = []
 
-    class _Backend:
-        def __init__(self, server):
-            asked.append(server)
+        class _Backend:
+            def __init__(self, server):
+                asked.append(server)
 
-        def list_dvr_entries(self):
-            return [DvrEntry(
-                uuid='1', title='News Hour', channel_name='One', start=0, duration=60,
-                status='Running', sched_status='recording',
-            )]
+            def list_dvr_entries(self):
+                return [DvrEntry(
+                    uuid='1', title='News Hour', channel_name='One', start=0, duration=60,
+                    status='Running', sched_status='recording',
+                )]
 
-        def close(self):
-            pass
+            def close(self):
+                pass
 
-    monkeypatch.setattr(ui, 'create_backend', _Backend)
-    messages = []
-    monkeypatch.setattr(
-        ui.QMessageBox, 'question',
-        lambda _parent, _title, text, *a: messages.append(text) or ui.QMessageBox.StandardButton.No,
-    )
-    assert window._confirm_quit() is False
-    _wait_until(app, lambda: bool(messages), 'the question')
-    assert [server['name'] for server in asked] == ['Built-in Server']
-    assert asked[0]['protocol'] == 'http'
-    assert 'News Hour' in messages[0]
-    app.processEvents()
+        monkeypatch.setattr(ui, 'create_backend', _Backend)
+        messages = []
+        monkeypatch.setattr(
+            ui.QMessageBox, 'question',
+            lambda _parent, _title, text, *a: messages.append(text) or ui.QMessageBox.StandardButton.No,
+        )
+        assert window._confirm_quit() is False
+        _wait_until(app, lambda: bool(messages), 'the question')
+        assert [server['name'] for server in asked] == ['Built-in Server']
+        assert asked[0]['protocol'] == 'http'
+        assert 'News Hour' in messages[0]
+    finally:
+        # The quit-decision tests must not carry their fake confirmation
+        # or supervisor into the real resource shutdown.
+        window._confirm_quit = lambda: True
+        window.builtin = None
+        _destroy_quit_test_window(app, window)
 
 
 def test_status_is_repeated_on_the_picture_only_while_a_channel_shows(monkeypatch, tmp_path):
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
-    from tvhplayer.core.models import Channel
+    try:
+        from tvhplayer.core.models import Channel
 
-    shown = []
-    monkeypatch.setattr(window.player, 'show_message', lambda text, duration_ms=3000: shown.append(text))
+        shown = []
+        monkeypatch.setattr(window.player, 'show_message', lambda text, duration_ms=3000: shown.append(text))
 
-    window._playback_active = False
-    window.on_volume_changed(30)
-    assert shown == []
+        window._playback_active = False
+        window.on_volume_changed(30)
+        assert shown == []
 
-    window._playback_channel = Channel(uuid='c1', name='News One', number=5)
-    window._on_playback_started()
-    assert shown == ['5  News One']
+        window._playback_channel = Channel(uuid='c1', name='News One', number=5)
+        window._on_playback_started()
+        assert shown == ['5  News One']
 
-    window.on_volume_changed(40)
-    window.toggle_mute()
-    window.toggle_mute()
-    assert shown[1:] == ['Volume 40', 'Muted', 'Sound on']
-    app.processEvents()
+        window.on_volume_changed(40)
+        window.toggle_mute()
+        window.toggle_mute()
+        assert shown[1:] == ['Volume 40', 'Muted', 'Sound on']
+    finally:
+        _destroy_quit_test_window(app, window)
 
 
 def test_channel_list_reloads_at_most_every_30_seconds_during_a_playlist_check(monkeypatch, tmp_path):
@@ -3886,6 +3911,10 @@ def test_player_bar_casts_the_selected_channel_and_routes_audio(monkeypatch, tmp
         # Not the server's log: reading it from the made-up address waits
         # 30 seconds, keeping this window and its shortcuts alive into later tests.
         monkeypatch.setattr(ui.ServerLogWatch, 'start', lambda self: None)
+        # This cast-control test is not a DVR-metadata test. The server URL
+        # below is documentation-only and must never start a real HTTP fetch.
+        monkeypatch.setattr(ui.TVHeadendClient, 'synced_recordings',
+                            lambda self, _server: ('synced', []))
 
     # A server of its own: without one only a computer with Tvheadend
     # installed had a server (the built-in one) to cast from.

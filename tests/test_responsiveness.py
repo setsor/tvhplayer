@@ -246,7 +246,12 @@ def _remote_window(monkeypatch, tmp_path):
 
 
 def _close(app, window):
+    from PyQt6.QtCore import QCoreApplication, QEvent
+
     window.close()
+    app.processEvents()
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
 
 
@@ -812,6 +817,9 @@ def test_removing_picons_keeps_the_window_answering(monkeypatch, tmp_path):
 def test_a_recordings_folder_on_a_slow_disk_keeps_the_window_answering(monkeypatch, tmp_path):
     # A network share that has gone away can take seconds, or for ever, to say how full it is.
     app, ui, window, _player = _make_player(monkeypatch, tmp_path)
+    # The periodic awake timer checks disk space independently. Stop it so
+    # this test measures only explicitly requested and coalesced checks.
+    window._awake_timer.stop()
     asked = []
     at_once = [0, 0]
 
@@ -946,6 +954,8 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
+    # Synthetic HTSP benchmarks do not query DVR metadata.
+    window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')
@@ -1040,6 +1050,30 @@ def test_guide_import_updates_keep_the_list_answering(monkeypatch, tmp_path, fil
     from tvhplayer.core.channel_info import NowNext, channel_key
     from tvhplayer.core.models import EpgEvent
 
+    if filtered:
+        # Diagnose state arriving from preceding modules, before allocating
+        # this test's synthetic 60k-channel backend.
+        from collections import Counter
+        from PyQt6.QtWidgets import QApplication
+        live = Counter(t.name for t in threading.enumerate())
+        top = QApplication.topLevelWidgets()
+        print('DIAG PRE-EPG THREADS:', sorted(live.items()), flush=True)
+        print('DIAG PRE-EPG QT WINDOWS:',
+              [(type(w).__name__, w.isVisible()) for w in top][:20],
+              'total=', len(top), flush=True)
+        import os
+        if os.getenv('TVHPLAYER_DIAG_PRUNE_QT_TOPLEVELS') == '1':
+            from PyQt6.QtCore import QCoreApplication, QEvent
+            # Experiment: remove hidden top-level widgets left by earlier
+            # test modules, preserving any currently visible widgets.
+            stale = [w for w in top if not w.isVisible()]
+            for widget in stale:
+                widget.deleteLater()
+            QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            QApplication.instance().processEvents()
+            print('DIAG POST-PRUNE QT WINDOWS:',
+                  len(QApplication.topLevelWidgets()),
+                  'deleted=', len(stale), flush=True)
     app, ui, window, backend = _big_htsp_window(monkeypatch, tmp_path, groups=1_034)
     stopped = threading.Event()
     sent = [0]
@@ -1091,6 +1125,8 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     app, ui, window, _ = _make_player(monkeypatch, tmp_path)
     backend = HtspBackend(ServerConfig(name='HTSP', url='http://127.0.0.1:9981', protocol='htsp'))
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
+    # Synthetic HTSP benchmarks do not query DVR metadata.
+    window.synced_recordings = lambda _server: ('synced', [])
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')

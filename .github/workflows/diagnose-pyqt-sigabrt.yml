@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - diagnostic/4.7.6-pyqt-sigabrt
+      - diagnostic/linux-qt-tasks-fetch
   pull_request:
     paths:
       - '.github/workflows/diagnose-pyqt-sigabrt.yml'
@@ -67,24 +68,16 @@ jobs:
             code=$?
             set -e
             echo "$label exit=$code" | tee -a diagnostics/results.txt
+            grep -E 'DIAG PRE-EPG (THREADS|QT WINDOWS):|Check free space, disk answers|Guide import updates, filtered=' "diagnostics/$label.log" || true
             tail -n 75 "diagnostics/$label.log"
             echo "::endgroup::"
             if [ "$code" -ne 0 ]; then failed=1; fi
           }
           set -e
-          # The original SIGABRT and News Hour cases are already isolated.
-          # Measure only the two remaining UI geometry regressions.
-          check narrow-window 0 tests/test_pyqt6_ui.py -k 'test_the_window_narrows_to_half_a_1080p_screen_at_125_percent'
-          check long-server-labels 0 tests/test_pyqt6_ui.py -k 'test_long_group_and_server_names_do_not_widen_the_channel_pane'
-          # Independent Windows QLocalSocket failure; no need to repeat on
-          # macOS/Linux, where it already passed isolated.
-          if [ "$RUNNER_OS" = Windows ]; then
-            check windows-instance-activation 0 tests/test_background.py -k 'test_second_launch_activates_owner_and_lock_is_reusable'
-          fi
-          # Compare the full UI module with the existing sys.modules reload
-          # disabled. The audit records any start-watch/tasks-fetch workers
-          # that remain alive after each test, including their Python stacks.
-          PYTHONPATH=tests check ui-module-reuse 1 -p pytest_thread_audit tests/test_pyqt6_ui.py
+          # First validate the three repaired window lifetimes in isolation.
+          check linux-ui-window-teardown 1 tests/test_pyqt6_ui.py::test_quit_asks_while_recording_to_this_computer tests/test_pyqt6_ui.py::test_quit_asks_the_builtin_server_even_when_another_is_selected tests/test_pyqt6_ui.py::test_status_is_repeated_on_the_picture_only_while_a_channel_shows
+          # Then retain the combined suite to test for cross-module contamination.
+          check linux-full-suite-window-teardown 1 tests
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'

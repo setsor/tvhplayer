@@ -19,6 +19,9 @@ concurrency:
 
 jobs:
   test:
+    # This diagnostic branch runs its tests in a dedicated Ubuntu-only
+    # workflow. Do not run the full suite concurrently, including PR events.
+    if: github.ref != 'refs/heads/diagnostic/linux-qt-tasks-fetch' && github.head_ref != 'diagnostic/linux-qt-tasks-fetch'
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30

@@ -3853,6 +3853,9 @@ class ServerCall(QObject):
         self._backend = backend
         self._request = request
         self._thread = threading.Thread(target=self._run, name='server-call', daemon=True)
+        # A completed call must not remain a child of this window forever:
+        # its request closure can retain large HTSP channel snapshots.
+        self.done.connect(self.deleteLater)
 
     def start(self):
         self._thread.start()
