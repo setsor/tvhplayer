@@ -80,7 +80,7 @@ jobs:
           echo "::group::Channel ownership samples"
           for label in channel-refs-isolated channel-refs-module; do
             echo "--- $label ---"
-            grep -E '^(DIAG CHANNEL REFERRERS|DIAG CHANNEL DIRECT REFERRERS|DIAG CHANNEL CONTAINER OWNERS|DIAG HEAP)' "diagnostics/$label.log" || true
+            grep -E '^(DIAG CHANNEL|DIAG BACKEND|DIAG HEAP)' "diagnostics/$label.log" || true
           done
           echo "::endgroup::"
           {
