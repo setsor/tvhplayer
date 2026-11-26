@@ -136,81 +136,128 @@ class StallMeter:
 
 
 def _trace_channel_preparation(monkeypatch, ui, backend):
-    """Record the real worker phases, without changing their results.
+    """Measure channel-preparation phases and real cyclic-GC pauses.
 
-    The three operations run in ServerCall's 'server-call' thread when the
-    initial HTSP channel list is prepared. Every duration measures both
-    wall time and CPU on the thread executing that particular operation.
+    Callbacks are installed for this synthetic benchmark only. They record
+    wall and thread CPU time, GC generation, thread and currently running
+    channel-preparation phase. They are removed in the test's finally block.
     """
+    import gc
+    import os
+
     samples = []
+    gc_events = []
+    active = threading.local()
+    started = threading.local()
     lock = threading.Lock()
 
-    def instrument(owner, name):
-        original = getattr(owner, name)
+    def gc_callback(stage, info):
+        if stage == 'start':
+            started.at = (time.perf_counter(), time.thread_time())
+            started.phase = getattr(active, 'name', 'outside-preparation')
+        elif stage == 'stop':
+            at = getattr(started, 'at', None)
+            if at is None:
+                return
+            wall_ms = (time.perf_counter() - at[0]) * 1000
+            cpu_ms = (time.thread_time() - at[1]) * 1000
+            with lock:
+                gc_events.append((
+                    info.get('generation', -1),
+                    getattr(started, 'phase', 'outside-preparation'),
+                    threading.current_thread().name,
+                    wall_ms, cpu_ms,
+                ))
+            started.at = None
 
-        def measured(*args, **kwargs):
-            # cProfile is deliberately scoped to the background channel
-            # classification phase, not the Qt thread or unrelated tests.
-            import cProfile
-            import gc
-            import io
-            import os
-            import pstats
+    gc.callbacks.append(gc_callback)
 
-            profile = cProfile.Profile() if (
-                name == 'channel_kinds'
-                and threading.current_thread().name == 'server-call'
-            ) else None
-            gc_trial = (profile is not None and
-                        os.getenv('TVHPLAYER_DIAG_NO_GC_IN_KINDS') == '1')
-            gc_was_enabled = gc.isenabled()
-            collections_before = tuple(g['collections'] for g in gc.get_stats())
-            if gc_trial:
-                gc.disable()  # temporary test-only experiment
-                print('DIAG GC temporarily disabled for channel_kinds', flush=True)
-            wall_start = time.perf_counter()
-            cpu_start = time.thread_time()
-            if profile is not None:
-                profile.enable()
-            try:
-                return original(*args, **kwargs)
-            finally:
+    def cleanup():
+        if gc_callback in gc.callbacks:
+            gc.callbacks.remove(gc_callback)
+
+    try:
+        def instrument(owner, name):
+            original = getattr(owner, name)
+
+            def measured(*args, **kwargs):
+                # Keep cProfile optional: it changes the CPU cost substantially.
+                import cProfile
+                import io
+                import pstats
+
+                profile = cProfile.Profile() if (
+                    os.getenv('TVHPLAYER_DIAG_CPROFILE') == '1'
+                    and name == 'channel_kinds'
+                    and threading.current_thread().name == 'server-call'
+                ) else None
+                previous_phase = getattr(active, 'name', 'outside-preparation')
+                active.name = name
+                collections_before = tuple(g['collections'] for g in gc.get_stats())
+                wall_start = time.perf_counter()
+                cpu_start = time.thread_time()
                 if profile is not None:
-                    profile.disable()
-                if gc_trial and gc_was_enabled:
-                    gc.enable()  # restore before returning to application
-                wall_ms = (time.perf_counter() - wall_start) * 1000
-                cpu_ms = (time.thread_time() - cpu_start) * 1000
-                collections_after = tuple(g['collections'] for g in gc.get_stats())
-                collection_deltas = tuple(
-                    new - old for old, new in zip(collections_before, collections_after)
-                )
-                with lock:
-                    samples.append((name, threading.current_thread().name,
-                                    wall_ms, cpu_ms, collection_deltas))
-                if profile is not None:
-                    output = io.StringIO()
-                    pstats.Stats(profile, stream=output).strip_dirs().sort_stats(
-                        'cumulative'
-                    ).print_stats(12)
-                    print('DIAG channel_kinds CPU PROFILE:', flush=True)
-                    print(output.getvalue(), flush=True)
+                    profile.enable()
+                try:
+                    return original(*args, **kwargs)
+                finally:
+                    if profile is not None:
+                        profile.disable()
+                    wall_ms = (time.perf_counter() - wall_start) * 1000
+                    cpu_ms = (time.thread_time() - cpu_start) * 1000
+                    collections_after = tuple(g['collections'] for g in gc.get_stats())
+                    collection_deltas = tuple(
+                        new - old for old, new in zip(collections_before, collections_after)
+                    )
+                    with lock:
+                        samples.append((name, threading.current_thread().name,
+                                        wall_ms, cpu_ms, collection_deltas))
+                    active.name = previous_phase
+                    if profile is not None:
+                        output = io.StringIO()
+                        pstats.Stats(profile, stream=output).strip_dirs().sort_stats(
+                            'cumulative'
+                        ).print_stats(12)
+                        print('DIAG channel_kinds CPU PROFILE:', flush=True)
+                        print(output.getvalue(), flush=True)
 
-        monkeypatch.setattr(owner, name, measured)
+            monkeypatch.setattr(owner, name, measured)
 
-    instrument(backend, 'channel_snapshot')
-    instrument(ui, 'channel_kinds')
-    instrument(ui, 'tag_channel_counts')
-    return samples
+        instrument(backend, 'channel_snapshot')
+        instrument(ui, 'channel_kinds')
+        instrument(ui, 'tag_channel_counts')
+        return samples, gc_events, cleanup
+    except BaseException:
+        cleanup()
+        raise
 
 
-def _print_channel_preparation(samples):
+def _print_channel_preparation(samples, gc_events):
     print('DIAG CHANNEL PREPARATION PHASES:', flush=True)
     for name, thread, wall_ms, cpu_ms, collections in samples:
         print(f'  phase={name} thread={thread} '
               f'wall={wall_ms:.1f}ms cpu={cpu_ms:.1f}ms '
               f'non-cpu={max(0.0, wall_ms - cpu_ms):.1f}ms '
               f'gc-collections={collections}', flush=True)
+    print('DIAG GC EVENTS (per-generation and phase):', flush=True)
+    by_group = {}
+    for generation, phase, thread, wall_ms, cpu_ms in gc_events:
+        key = (generation, phase, thread)
+        group = by_group.setdefault(key, [0, 0.0, 0.0, 0.0])
+        group[0] += 1
+        group[1] += wall_ms
+        group[2] = max(group[2], wall_ms)
+        group[3] += cpu_ms
+    for (generation, phase, thread), (count, total, maximum, cpu) in sorted(by_group.items()):
+        print(f'  GC generation={generation} phase={phase} thread={thread} '
+              f'count={count} total-wall={total:.1f}ms '
+              f'max-wall={maximum:.1f}ms total-thread-cpu={cpu:.1f}ms', flush=True)
+    print('DIAG GC LONGEST:', flush=True)
+    for generation, phase, thread, wall, cpu in sorted(
+        gc_events, key=lambda x: x[3], reverse=True
+    )[:8]:
+        print(f'  GC generation={generation} phase={phase} thread={thread} '
+              f'wall={wall:.1f}ms cpu={cpu:.1f}ms', flush=True)
 
 
 def _later(action):
@@ -1221,7 +1268,7 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     backend._on_async({'method': 'initialSyncCompleted'})
     # Instrument only the background preparation under measurement, not
     # construction of 58,868 synthetic HTSP channel records above.
-    phase_samples = _trace_channel_preparation(monkeypatch, ui, backend)
+    phase_samples, gc_events, cleanup_gc = _trace_channel_preparation(monkeypatch, ui, backend)
     window.show()
     StallMeter().run(1.0)
     try:
@@ -1238,7 +1285,8 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
         assert window._channel_kinds[ui.channel_key(window._channels[0])].kind == 'HD'
         assert meter.worst() < LIST_BURST_BUDGET
     finally:
-        _print_channel_preparation(phase_samples)
+        cleanup_gc()
+        _print_channel_preparation(phase_samples, gc_events)
         window._channel_fetch = None
         backend.close()
         _close(app, window)
