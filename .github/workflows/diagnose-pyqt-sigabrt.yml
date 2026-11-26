@@ -75,7 +75,7 @@ jobs:
           set -e
           # Validate the corrected test-window teardown against the
           # complete Ubuntu test suite, not just the responsiveness module.
-          check linux-full-suite 1 tests
+          TVHPLAYER_DIAG_PRUNE_QT_TOPLEVELS=1 check linux-full-suite-prune-windows 1 tests
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
