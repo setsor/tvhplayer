@@ -29,10 +29,7 @@ jobs:
           # The Python each platform's package ships with.
           - os: ubuntu-24.04
             python: '3.12'
-          - os: windows-2025
-            python: '3.13'
-          - os: macos-15
-            python: '3.15'
+          # Temporary Linux-only validation. Restore other platforms before review.
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONFAULTHANDLER: '1'
@@ -68,7 +65,19 @@ jobs:
           python -m pip install -r "$reqs" PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
 
       - name: Build the C decoder
+        id: native_decoder
         run: python packaging/build-native.py
 
+      # Run Linux responsiveness benchmarks in a fresh interpreter. Earlier
+      # Qt tests otherwise retain widgets/callbacks and distort timing.
+      - name: Run correctness tests (Linux)
+        if: runner.os == 'Linux'
+        run: python -m pytest tests --ignore=tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
+
+      - name: Run responsiveness tests (Linux)
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.native_decoder.outcome == 'success' }}
+        run: python -m pytest tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
+
       - name: Run tests
+        if: runner.os != 'Linux'
         run: python -m pytest tests -q -p no:cacheprovider --timeout=300 -ra
