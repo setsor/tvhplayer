@@ -75,10 +75,9 @@ jobs:
           set -e
           # Retention ownership: one isolated reference sample and the
           # same test after the complete module, in separate interpreters.
-          TVHPLAYER_DIAG_CHANNEL_REFS=1 check channel-refs-isolated 1 tests/test_responsiveness.py -k 'test_a_big_list_arriving_keeps_the_window_answering'
-          TVHPLAYER_DIAG_CHANNEL_REFS=1 check channel-refs-module 1 tests/test_responsiveness.py
+          TVHPLAYER_DIAG_CHANNEL_REFS=1 TVHPLAYER_DIAG_DESTROY_TEST_WINDOWS=1 check channel-refs-module-destroy-windows 1 tests/test_responsiveness.py
           echo "::group::Channel ownership samples"
-          for label in channel-refs-isolated channel-refs-module; do
+          for label in channel-refs-module-destroy-windows; do
             echo "--- $label ---"
             grep -E '^(DIAG CHANNEL|DIAG BACKEND|DIAG HEAP)' "diagnostics/$label.log" || true
           done
