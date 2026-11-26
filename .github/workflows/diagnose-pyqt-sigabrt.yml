@@ -73,15 +73,9 @@ jobs:
             if [ "$code" -ne 0 ]; then failed=1; fi
           }
           set -e
-          # Retention ownership: one isolated reference sample and the
-          # same test after the complete module, in separate interpreters.
-          TVHPLAYER_DIAG_CHANNEL_REFS=1 TVHPLAYER_DIAG_DESTROY_TEST_WINDOWS=1 check channel-refs-module-destroy-windows 1 tests/test_responsiveness.py
-          echo "::group::Channel ownership samples"
-          for label in channel-refs-module-destroy-windows; do
-            echo "--- $label ---"
-            grep -E '^(DIAG CHANNEL|DIAG BACKEND|DIAG HEAP)' "diagnostics/$label.log" || true
-          done
-          echo "::endgroup::"
+          # Validate the corrected test-window teardown against the
+          # complete Ubuntu test suite, not just the responsiveness module.
+          check linux-full-suite 1 tests
           {
             echo "### PyQt6 SIGABRT isolation (${{ matrix.os }})"
             echo '~~~'
