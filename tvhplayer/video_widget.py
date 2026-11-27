@@ -8,9 +8,10 @@ window, so the splash, spinner and fullscreen bar can sit on top as plain widget
 from __future__ import annotations
 
 import ctypes
+import sys
 
 from PyQt6.QtCore import QT_VERSION_STR, Qt, pyqtSignal
-from PyQt6.QtGui import QGuiApplication, QOpenGLContext
+from PyQt6.QtGui import QGuiApplication, QOpenGLContext, QSurfaceFormat
 from PyQt6.QtOpenGLWidgets import QOpenGLWidget
 
 GL_COLOR_BUFFER_BIT = 0x4000
@@ -49,6 +50,18 @@ def use_live_resize(choice, qt_version=None):
     return bool(choice)
 
 
+def configure_macos_opengl(platform_name=None):
+    """Request macOS OpenGL 3.2 Core before Qt creates any shared contexts."""
+    platform_name = sys.platform if platform_name is None else platform_name
+    if platform_name != 'darwin':
+        return None
+    fmt = QSurfaceFormat.defaultFormat()
+    fmt.setVersion(3, 2)
+    fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+    QSurfaceFormat.setDefaultFormat(fmt)
+    return fmt
+
+
 class MpvVideoWidget(QOpenGLWidget):
     """The picture surface. ``MpvPlayer.attach()`` binds the engine to it."""
 
@@ -74,6 +87,13 @@ class MpvVideoWidget(QOpenGLWidget):
         return QGuiApplication.platformName()
 
     def initializeGL(self):
+        if sys.platform == 'darwin':
+            fmt = self.context().format()
+            print(f"Debug: Negotiated video OpenGL {fmt.majorVersion()}.{fmt.minorVersion()} "
+                  f"profile={fmt.profile().name}")
+            if ((fmt.majorVersion(), fmt.minorVersion()) < (3, 2)
+                    or fmt.profile() != QSurfaceFormat.OpenGLContextProfile.CoreProfile):
+                print("Warning: macOS video renderer did not obtain OpenGL 3.2+ Core Profile")
         self.context().aboutToBeDestroyed.connect(self.release)
         self._create_render_context()
 

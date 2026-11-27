@@ -1,6 +1,11 @@
 from types import SimpleNamespace
 
-from tvhplayer.video_widget import MpvVideoWidget, live_splitter_keeps_up, use_live_resize
+import pytest
+from PyQt6.QtGui import QSurfaceFormat
+
+from tvhplayer.video_widget import (
+    MpvVideoWidget, configure_macos_opengl, live_splitter_keeps_up, use_live_resize,
+)
 
 
 def test_paint_does_not_wait_for_mpv_presentation():
@@ -72,3 +77,28 @@ def test_release_keeps_native_callback_alive_until_render_context_is_freed():
     MpvVideoWidget.release(fake)
     assert called == ['makeCurrent', 'free', 'doneCurrent']
     assert fake._render_context is None
+
+
+def test_macos_requests_core_profile_and_preserves_other_format_settings():
+    original = QSurfaceFormat.defaultFormat()
+    try:
+        legacy = QSurfaceFormat(original)
+        legacy.setVersion(2, 1)
+        legacy.setProfile(QSurfaceFormat.OpenGLContextProfile.NoProfile)
+        legacy.setDepthBufferSize(24)
+        QSurfaceFormat.setDefaultFormat(legacy)
+        requested = configure_macos_opengl('darwin')
+        actual = QSurfaceFormat.defaultFormat()
+        for fmt in (requested, actual):
+            assert (fmt.majorVersion(), fmt.minorVersion()) == (3, 2)
+            assert fmt.profile() == QSurfaceFormat.OpenGLContextProfile.CoreProfile
+            assert fmt.depthBufferSize() == 24
+    finally:
+        QSurfaceFormat.setDefaultFormat(original)
+
+
+@pytest.mark.parametrize('platform_name', ['linux', 'win32'])
+def test_non_macos_does_not_change_opengl_format(platform_name):
+    original = QSurfaceFormat.defaultFormat()
+    assert configure_macos_opengl(platform_name) is None
+    assert QSurfaceFormat.defaultFormat() == original

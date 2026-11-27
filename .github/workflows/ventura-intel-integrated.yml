@@ -259,6 +259,7 @@ jobs:
               "test_delayed_reporter_keeps_each_dump_with_its_own_interval",
               "test_closed_synthetic_htsp_fixture_releases_its_channels",
               "test_faulthandler_dump_comes_with_the_late_tick",
+              "test_macos_requests_core_profile_and_preserves_other_format_settings",
           }
           passed_names = {c.get("name") for c in cases if state(c) == "pass"}
           counts = {s: sum(state(c) == s for c in cases) for s in ("pass", "failure", "error", "skipped")}
@@ -272,7 +273,7 @@ jobs:
           print("\n".join(rows))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
               out.write("\n".join(rows) + "\n")
-          assert len(core) == 1214, ("correctness test count changed", len(core))
+          assert len(core) == 1217, ("correctness test count changed", len(core))
           assert len(perf) == 37 and all(state(c) == "pass" for c in perf)
           assert not counts["failure"] and not counts["error"] and not missing
           PY
@@ -369,7 +370,7 @@ jobs:
               raise SystemExit("The full application cannot be certified to target macOS 13")
           PY
 
-      - name: Start the packaged Intel application without Conda library paths
+      - name: Verify packaged Intel application and Cocoa OpenGL Core Profile
         run: |
           set -euo pipefail
           APP="$GITHUB_WORKSPACE/macos/dist/TVHplayer.app"
@@ -379,7 +380,8 @@ jobs:
           (
             unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH PYTHONPATH PYTHONHOME CONDA_PREFIX
             export PATH=/usr/bin:/bin:/usr/sbin:/sbin
-            QT_QPA_PLATFORM=offscreen "$APP/Contents/MacOS/TVHplayer"
+            # Offscreen cannot create a QOpenGLWidget on this runner.
+            QT_QPA_PLATFORM=cocoa "$APP/Contents/MacOS/TVHplayer"
           ) > "$RUNNER_TEMP/ventura-results/packaged-startup.log" 2>&1 &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
@@ -390,12 +392,18 @@ jobs:
             exit 1
           fi
           cat "$LOG"
+          cp "$LOG" "$RUNNER_TEMP/ventura-results/packaged-app.log"
+          grep -q 'Qt platform: cocoa' "$LOG"
+          grep -q 'Requested OpenGL 3.2 profile=CoreProfile before QApplication' "$LOG"
+          grep -Eq 'Negotiated video OpenGL (3\.[2-9]|[4-9]\.[0-9]+) profile=CoreProfile' "$LOG"
           grep -q 'Playback engine: mpv' "$LOG"
           grep -q 'Media player created successfully' "$LOG"
-          ! grep -q 'Error starting application' "$LOG"
+          if grep -Eq 'GLSL version too old|Failed to create context|Error starting (application|TVHplayer)|macOS video renderer did not obtain OpenGL' "$LOG"; then
+            echo "ERROR: Cocoa render initialization did not pass" >&2
+            exit 1
+          fi
           env -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH \
             "$APP/Contents/Frameworks/ffmpeg" -version
-          cp "$LOG" "$RUNNER_TEMP/ventura-results/packaged-app.log"
 
       - name: Package and verify Ventura DMG
         env:
