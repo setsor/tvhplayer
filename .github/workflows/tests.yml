@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   test:
+    # This temporary branch uses the dedicated Intel/13-target workflow.
+    if: github.ref != 'refs/heads/integration/ventura-intel-4.7.6' && github.head_ref != 'integration/ventura-intel-4.7.6'
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30

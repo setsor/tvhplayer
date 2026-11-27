@@ -1,0 +1,394 @@
+name: TVHplayer 4.7.6 - Ventura Intel tests and DMG
+
+on:
+  push:
+    branches:
+      - integration/ventura-intel-4.7.6
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash -el {0}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: '1'
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - name: Checkout integrated TVHplayer
+        uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Confirm baseline and Intel architecture
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = x86_64
+          sw_vers
+          git merge-base --is-ancestor b697fceac25a3dd543b448b0ca5943793428b5cc HEAD
+          git merge-base --is-ancestor 7d078c00ef9f25c6c334f7a3e74888a47a25b934 HEAD
+          grep -q 'version="4.7.6"' setup.py
+          echo "Integrated revision: $(git rev-parse HEAD)"
+          mkdir -p "$RUNNER_TEMP/ventura-results"
+
+      - name: Install macOS 13-compatible conda native mpv and FFmpeg
+        uses: mamba-org/setup-micromamba@v3.2.1
+        with:
+          environment-name: tvhplayer-native
+          create-args: >-
+            python=3.11
+            mpv=0.40.*
+            ffmpeg=7.1.*
+            meson
+            ninja
+            pkgconf
+            expat
+            libiconv
+          init-shell: bash
+
+      - name: Checkout exact MPV 0.41.0 source commit
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: mpv-player/mpv
+          ref: 41f6a645068483470267271e1d09966ca3b9f413
+          path: _vendor/mpv-0.41.0
+          persist-credentials: false
+
+      - name: Build embedded MPV 0.41 for Ventura
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/_vendor/mpv-0.41.0"
+          test -s "$SRC/osdep/utils-mac.c"
+          grep -q "'osdep/utils-mac.c'" "$SRC/meson.build"
+          # TVHplayer embeds libmpv with its own Qt UI. Native MPV clipboard
+          # requires the Swift app bridge but is unused in this libmpv build.
+          # Qt handles the Cocoa UI; libmpv does not need its Cocoa subsystem.
+          # Keep CoreFoundation string helpers and plain-gl render API.
+          python - <<'PY'
+          from pathlib import Path
+          import os
+          source = Path(os.environ['GITHUB_WORKSPACE']) / '_vendor/mpv-0.41.0'
+          meson = source / 'meson.build'
+          original = meson.read_text()
+          old = "'osdep/mac/app_bridge.m',\\n                     'player/clipboard/clipboard-mac.m')".replace('\\n', '\n')
+          new = "'osdep/mac/app_bridge.m')"
+          assert original.count(old) == 1, "Unexpected MPV meson source list"
+          meson.write_text(original.replace(old, new))
+          # CoreAudio uses _cfstr_from_cstr even without the Cocoa UI.
+          # This CoreFoundation-only source must be linked on every macOS build.
+          meson_source = meson.read_text()
+          util_anchor = "    timer_source = files('osdep/timer-darwin.c')\\n".replace('\\n', '\n')
+          assert meson_source.count(util_anchor) == 1
+          meson_source = meson_source.replace(util_anchor, util_anchor + "    sources += files('osdep/utils-mac.c')\\n".replace('\\n', '\n'))
+          cocoa_utils = "'osdep/utils-mac.c',\\n                     'osdep/mac/app_bridge.m'".replace('\\n', '\n')
+          assert meson_source.count(cocoa_utils) == 1
+          meson_source = meson_source.replace(cocoa_utils, "'osdep/mac/app_bridge.m'")
+          meson.write_text(meson_source)
+
+          clipboard = source / 'player/clipboard/clipboard.c'
+          original = clipboard.read_text()
+          old = "#if HAVE_COCOA\\n    &clipboard_backend_mac,\\n#endif".replace('\\n', '\n')
+          new = "#if HAVE_COCOA && HAVE_SWIFT\\n    &clipboard_backend_mac,\\n#endif".replace('\\n', '\n')
+          assert original.count(old) == 1, "Unexpected MPV clipboard backend list"
+          clipboard.write_text(original.replace(old, new))
+
+          bridge = source / 'osdep/mac/app_bridge.m'
+          original = bridge.read_text()
+          anchor = 'int cocoa_main(int argc, char *argv[])\\n{\\n    return [(Application *)[Application sharedApplication] main:argc :argv];\\n}\\n#endif'.replace('\\n', '\n')
+          assert original.count(anchor) == 1, 'Unexpected MPV Cocoa bridge layout'
+          stubs = """
+          int cocoa_main(int argc, char *argv[])
+          {
+              return [(Application *)[Application sharedApplication] main:argc :argv];
+          }
+          #else
+          // Embedded libmpv has no standalone macOS app or remote-key handling.
+          void cocoa_init_media_keys(void) {}
+          void cocoa_uninit_media_keys(void) {}
+          void cocoa_set_input_context(struct input_ctx *ctx) { (void)ctx; }
+          void cocoa_set_mpv_handle(struct mpv_handle *ctx) { (void)ctx; }
+          void cocoa_init_cocoa_cb(void) {}
+          int cocoa_main(int argc, char *argv[]) { (void)argc; (void)argv; return -1; }
+          #endif
+          """.strip().replace('\n          ', '\n')
+          bridge.write_text(original.replace(anchor, stubs))
+          print("MPV 0.41: embedded Qt OpenGL render profile")
+          PY
+          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
+          # pkg-config can report the FFmpeg library but omit the prefix's
+          # top-level include directory on some Conda/clang runner combinations.
+          # Verify the headers and pass the prefix explicitly to the compiler.
+          ls -l "$CONDA_PREFIX/include/libavutil/channel_layout.h" \
+                "$CONDA_PREFIX/include/libavcodec/avcodec.h" \
+                "$CONDA_PREFIX/include/libavformat/avformat.h"
+          pkg-config --cflags libavcodec libavformat libavutil
+          export CFLAGS="-I$CONDA_PREFIX/include -mmacosx-version-min=13.0"
+          export LDFLAGS="-mmacosx-version-min=13.0 -framework CoreFoundation"
+          pkg-config --modversion expat
+          pkg-config --modversion libavcodec
+          meson setup "$RUNNER_TEMP/mpv-build" "$SRC" \
+            --prefix "$CONDA_PREFIX" \
+            --buildtype release \
+            -Dcplayer=false -Dlibmpv=true -Dcocoa=disabled \
+            -Dplain-gl=enabled -Dgl-cocoa=disabled \
+            -Dswift-build=disabled -Dmacos-cocoa-cb=disabled \
+            -Dmacos-media-player=disabled -Dmacos-touchbar=disabled \
+            -Dlua=disabled -Djavascript=disabled -Dmanpage-build=disabled
+          meson compile -C "$RUNNER_TEMP/mpv-build" -j 4
+          meson install -C "$RUNNER_TEMP/mpv-build" --no-rebuild
+          test -f "$CONDA_PREFIX/lib/libmpv.2.dylib"
+          DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib" python - <<'PY'
+          import ctypes
+          import os
+          path = os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'libmpv.2.dylib')
+          lib = ctypes.CDLL(path)
+          lib.mpv_client_api_version.restype = ctypes.c_ulong
+          print("Rebuilt MPV 0.41 dlopen OK, API:", lib.mpv_client_api_version())
+          PY
+
+      - name: Verify embedded libmpv loads MPEG-TS and terminates
+        run: |
+          set -euo pipefail
+          SAMPLE="$RUNNER_TEMP/tvhplayer-mpv-native-smoke.ts"
+          "$CONDA_PREFIX/bin/ffmpeg" -hide_banner -loglevel error -nostdin -y \
+            -f lavfi -i 'testsrc2=size=320x180:rate=25:duration=3' \
+            -an -c:v mpeg2video -b:v 850k -f mpegts "$SAMPLE"
+          export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          python macos/smoke_libmpv.py "$CONDA_PREFIX/lib/libmpv.2.dylib" "$SAMPLE"
+
+      - name: Install official Python 3.15 x86_64 framework
+        run: |
+          set -euo pipefail
+          PKG="$RUNNER_TEMP/python-3.15.0-macos11.pkg"
+          curl --fail --location --retry 3 --retry-delay 2 -o "$PKG" \
+            'https://www.python.org/ftp/python/3.15.0/python-3.15.0-macos11.pkg'
+          echo "7c7e7eca61cbfa5f0c6f80cd594cddbfd492f4e8b3fb87e3d9fa1efebaec43ed  $PKG" | shasum -a 256 -c -
+          sudo installer -pkg "$PKG" -target / >/dev/null
+
+      - name: Install Python test environment
+        run: |
+          set -euo pipefail
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 -m venv "$RUNNER_TEMP/venv"
+          PY="$RUNNER_TEMP/venv/bin/python"
+          "$PY" -m pip install --no-binary=zeroconf -r macos/requirements-build.txt pytest pytest-timeout pyyaml python-dateutil setuptools
+          "$PY" -m pip check
+          "$PY" -m compileall -q tvhplayer tests
+          "$PY" -c 'import platform; assert platform.machine() == "x86_64", platform.machine()'
+          "$PY" packaging/build-native.py
+
+      - name: Run complete Intel test suites
+        run: |
+          set -euo pipefail
+          PY="$RUNNER_TEMP/venv/bin/python"
+          export DYLD_FALLBACK_LIBRARY_PATH="$CONDA_PREFIX/lib"
+          export PATH="$CONDA_PREFIX/bin:$PATH"
+          "$PY" - <<'PY'
+          import ctypes.util
+          import os
+          import shutil
+          from pathlib import Path
+          import mpv
+
+          prefix = Path(os.environ["CONDA_PREFIX"]).resolve()
+          lib = ctypes.util.find_library("mpv")
+          assert lib and Path(lib).resolve().is_relative_to(prefix), lib
+          print("Ventura-target libmpv:", lib, "API:", mpv.MPV_VERSION)
+          for name in ("ffmpeg", "ffprobe"):
+              exe = shutil.which(name)
+              assert exe and Path(exe).resolve().is_relative_to(prefix), (name, exe)
+              print(name, exe)
+          PY
+          results="$RUNNER_TEMP/ventura-results"
+          failed=0
+          if ! "$PY" -m pytest tests --ignore=tests/test_responsiveness.py -vv --tb=short -ra \
+            -p no:cacheprovider --timeout=300 --junitxml="$results/correctness.xml" 2>&1 | tee "$results/correctness.log"; then
+            failed=1
+          fi
+          if ! "$PY" -m pytest tests/test_responsiveness.py -vv --tb=short -ra \
+            -p no:cacheprovider --timeout=300 --junitxml="$results/responsiveness.xml" 2>&1 | tee "$results/responsiveness.log"; then
+            failed=1
+          fi
+          if ! "$PY" - <<'PY'
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          results = Path(os.environ["RUNNER_TEMP"], "ventura-results")
+          core = ET.parse(results / "correctness.xml").getroot().findall(".//testcase")
+          perf = ET.parse(results / "responsiveness.xml").getroot().findall(".//testcase")
+          cases = core + perf
+          def state(c):
+              return next((s for s in ("error", "failure", "skipped") if c.find(s) is not None), "pass")
+
+          required = {
+              "test_real_libmpv_reports_failure_and_playback",
+              "test_real_buffer_recording_contains_rewound_and_new_footage[False]",
+              "test_real_buffer_recording_contains_rewound_and_new_footage[True]",
+              "test_real_conversion_has_a_keyframe_every_second",
+              "test_dump_reader_without_pread_preserves_writer_offset",
+              "test_on_time_ticks_are_not_reported",
+          }
+          passed_names = {c.get("name") for c in cases if state(c) == "pass"}
+          counts = {s: sum(state(c) == s for c in cases) for s in ("pass", "failure", "error", "skipped")}
+          rows = ["## Ventura-target Intel test results", "",
+                  "Runner: macOS 15 x86_64; deployment target: macOS 13.0", "",
+                  str(counts), "", "Skipped tests:"]
+          rows += ["- " + str(c.get("name")) + ": " + str(c.find("skipped").get("message", ""))
+                   for c in cases if state(c) == "skipped"]
+          missing = required - passed_names
+          rows += ["", "Missing required passes: " + str(sorted(missing))]
+          print("\n".join(rows))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(rows) + "\n")
+          assert len(core) == 1212, ("correctness test count changed", len(core))
+          assert len(perf) == 36 and all(state(c) == "pass" for c in perf)
+          assert not counts["failure"] and not counts["error"] and not missing
+          PY
+          then
+            failed=1
+          fi
+          exit "$failed"
+
+      - name: Adapt only packaging script for Ventura native libraries
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('macos/build-macos.sh')
+          source = path.read_text()
+          changes = {
+              'BREW_MPV="$(brew --prefix mpv 2>/dev/null || true)"': 'BREW_MPV="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix mpv 2>/dev/null || true)}"',
+              'BREW_FFMPEG="$(brew --prefix ffmpeg 2>/dev/null || true)"': 'BREW_FFMPEG="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix ffmpeg 2>/dev/null || true)}"',
+              '"$(brew list --versions mpv)"': '"MPV 0.41 rebuilt for Ventura 13"',
+              '--osx-bundle-identifier io.github.mfat.tvhplayer \\': '--osx-bundle-identifier io.github.setsor.tvhplayer \\',
+              '  --add-binary "$LIBMPV:." \\': ('  --add-binary "$TVHPLAYER_NATIVE_PREFIX/lib:." \\' + chr(10) + '  --add-binary "$LIBMPV:." \\'),
+          }
+          for original, replacement in changes.items():
+              assert source.count(original) == 1, f'Unexpected packaging layout: {original}'
+              source = source.replace(original, replacement)
+          path.write_text(source)
+          print('Only packaging script patched in temporary build workspace')
+          PY
+          test -z "$(git diff --name-only HEAD -- tvhplayer)"
+      - name: Build TVHplayer 4.7.6 for Ventura 13 Intel
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer
+          TVHPLAYER_BUNDLE_ID: io.github.setsor.tvhplayer
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+        run: |
+          set -euo pipefail
+          export TVHPLAYER_NATIVE_PREFIX="$CONDA_PREFIX"
+          export PYTHON="$RUNNER_TEMP/venv/bin/python"
+          test -f "$CONDA_PREFIX/lib/libmpv.2.dylib"
+          test -x "$CONDA_PREFIX/bin/ffmpeg"
+          test -x "$CONDA_PREFIX/bin/ffprobe"
+          bash macos/build-macos.sh
+
+      - name: Audit portable x86_64 bundle and Ventura deployment target
+        run: |
+          set -euo pipefail
+          APP="macos/dist/TVHplayer.app"
+          test -x "$APP/Contents/MacOS/TVHplayer"
+          test -f "$APP/Contents/Frameworks/libmpv.2.dylib"
+          file "$APP/Contents/MacOS/TVHplayer"
+          codesign --verify --deep --verbose=2 "$APP"
+          # The application name in Finder, Dock and the macOS menu is TVHplayer.
+          # Version, macOS target and architecture belong to the download name.
+          test "$(plutil -extract CFBundleName raw -o - "$APP/Contents/Info.plist")" = TVHplayer
+          test "$(plutil -extract CFBundleExecutable raw -o - "$APP/Contents/Info.plist")" = TVHplayer
+          test "$(plutil -extract CFBundleIdentifier raw -o - "$APP/Contents/Info.plist")" = io.github.setsor.tvhplayer
+          /Library/Frameworks/Python.framework/Versions/3.15/bin/python3.15 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          app = Path("macos/dist/TVHplayer.app/Contents")
+          binaries = [
+              app / "MacOS/TVHplayer",
+              app / "Frameworks/libmpv.2.dylib",
+              app / "Frameworks/ffmpeg",
+              app / "Frameworks/ffprobe",
+          ]
+          for item in binaries:
+              data = subprocess.check_output(["otool", "-l", str(item)], text=True)
+              versions = re.findall(r"\bminos\s+(\d+\.\d+)", data)
+              versions += re.findall(r"\bversion\s+(\d+\.\d+)\s*\n\s*sdk", data)
+              if not versions:
+                  print("WARNING: No minimum OS command:", item)
+                  continue
+              minimum = max(tuple(map(int, v.split("."))) for v in versions)
+              print(item.name, "minimum macOS", ".".join(map(str, minimum)))
+              if minimum > (13, 0):
+                  raise SystemExit(f"Not compatible with macOS 13: {item} requires {minimum}")
+          PY
+
+          # Inspect every native extension and framework, not just MPV and FFmpeg.
+          # zeroconf is built from source on the runner and must not require macOS 15.
+          python3 macos/audit-native-minos.py "$APP" "$RUNNER_TEMP/ventura-macho-audit.tsv"
+          python3 - <<'PY'
+          from pathlib import Path
+          rows = Path(__import__("os").environ["RUNNER_TEMP"], "ventura-macho-audit.tsv").read_text().splitlines()[1:]
+          native = [(fields[0], fields[1]) for row in rows if (fields := row.split("\t")) and len(fields) >= 2]
+          unknown = [path for path, version in native if version == "UNKNOWN"]
+          too_new = [(path, version) for path, version in native if version != "UNKNOWN" and (tuple(map(int, version.split("."))) + (0, 0, 0))[:3] > (13, 0, 0)]
+          print(f"Full Ventura audit: {len(native)} Mach-O files; too new: {len(too_new)}; unknown: {len(unknown)}")
+          if unknown or too_new or not native:
+              print("Unsupported or unknown native binaries:", (too_new + [(name, "UNKNOWN") for name in unknown])[:30])
+              raise SystemExit("The full application cannot be certified to target macOS 13")
+          PY
+
+      - name: Package and verify Ventura DMG
+        env:
+          TVHPLAYER_APP_NAME: TVHplayer
+        run: |
+          set -euo pipefail
+          # hdiutil can return EBUSY while macOS scans a freshly signed bundle.
+          # Each retry uses a new staging directory and unmounts its temporary image.
+          packaged=0
+          for attempt in 1 2 3 4; do
+            if bash macos/package-dmg.sh; then
+              packaged=1
+              break
+            fi
+            echo "hdiutil/DMG staging attempt $attempt failed; checking mounts and retrying" >&2
+            hdiutil info | tail -n 15 || true
+            sleep 8
+          done
+          if [[ "$packaged" != 1 ]]; then
+            echo "ERROR: all 4 DMG packaging attempts failed" >&2
+            exit 1
+          fi
+          # The installed app and executable are simply TVHplayer.
+          # Only the downloadable DMG carries version and target architecture.
+          mv macos/dist/TVHplayer.dmg macos/dist/TVHplayer-4.7.6-macOS13-Intel.dmg
+          (cd macos/dist && shasum -a 256 "TVHplayer-4.7.6-macOS13-Intel.dmg" > "TVHplayer-4.7.6-macOS13-Intel.dmg.sha256")
+          ls -lh macos/dist/TVHplayer-4.7.6-macOS13-Intel.dmg
+          (cd macos/dist && shasum -a 256 -c "TVHplayer-4.7.6-macOS13-Intel.dmg.sha256")
+
+      - name: Upload validated Ventura Intel DMG
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: TVHplayer-4.7.6-macOS13-Intel-DMG
+          path: |
+            macos/dist/TVHplayer-4.7.6-macOS13-Intel.dmg
+            macos/dist/TVHplayer-4.7.6-macOS13-Intel.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Archive test logs and compatibility audit
+        if: always()
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ventura-intel-test-reports
+          path: |
+            ${{ runner.temp }}/ventura-results/
+            ${{ runner.temp }}/ventura-macho-audit.tsv
+          if-no-files-found: warn
+          retention-days: 14
