@@ -18,6 +18,7 @@ Run with ``-s`` to see the measured pauses.
 import threading
 import time
 import types
+import weakref
 
 import pytest
 
@@ -245,14 +246,62 @@ def _remote_window(monkeypatch, tmp_path):
     return app, ui, window, backend, channel, played
 
 
+def _release_htsp_fixture(window, model, backend, snapshot):
+    """Discard synthetic test payloads only after the native window is gone.
+
+    A Python wrapper or queued callback may survive Qt deletion, retaining a
+    large, otherwise unused channel snapshot until a later test's GC cycle.
+    Never touch the C++ model here, or change the live benchmark's data.
+    """
+    from PyQt6 import sip
+
+    assert sip.isdeleted(window) and sip.isdeleted(model)
+    # The initial list also belongs to the completed preparation callback;
+    # clear its contents even if live updates replaced window._channels.
+    snapshot.get('channels', []).clear()
+    snapshot.get('tags', []).clear()
+    snapshot.clear()
+
+    for name in ('_channels', '_live_channels', '_channel_tags',
+                 '_channel_kinds', '_now_next'):
+        getattr(window, name).clear()
+    window._prepared_tag_counts = None
+    window._prepared_logo_references = None
+
+    for name in ('_channels', '_keys', '_natural', '_position_by_key',
+                 '_free_positions', '_logo_refs', '_order', '_rows',
+                 '_now_next', '_kinds'):
+        getattr(model, name).clear()
+    model._members = None
+    model.describe = lambda channel, is_playing, is_recording: ''
+
+    # The fake HTSP connection was closed by the test, and its synthetic
+    # producer has already been joined. Do not change HtspBackend.close().
+    if backend is not None:
+        assert not backend._ready and not backend._synced
+        with backend._metadata_lock:
+            backend._channels.clear()
+            backend._channel_changes.clear()
+            backend._tags.clear()
+            backend._dvr.clear()
+
+    window._benchmark_payload = None
+
 def _close(app, window):
     from PyQt6.QtCore import QCoreApplication, QEvent
 
+    payload = getattr(window, '_benchmark_payload', None)
+    model = window.channel_model if payload is not None else None
     window.close()
     app.processEvents()
+    closed = getattr(window, '_close_resources_done', False)
     window.deleteLater()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     app.processEvents()
+    if payload is not None:
+        assert closed, 'Synthetic window must finish shutdown before releasing data'
+        backend, snapshot = payload
+        _release_htsp_fixture(window, model, backend, snapshot)
 
 
 # --- Waiting for the server -------------------------------------------------
@@ -975,7 +1024,9 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
         backend._on_async({'method': 'tagAdd', 'tagId': tag, 'tagName': f'Group {tag}',
                            'members': list(range(tag, count + 1, groups))})
     backend._on_async({'method': 'initialSyncCompleted'})
-    _load_channels(window, fetch, {'channels': [], 'tags': [], 'services': [], 'now_next': None})
+    snapshot = {'channels': [], 'tags': [], 'services': [], 'now_next': None}
+    _load_channels(window, fetch, snapshot)
+    window._benchmark_payload = (backend, snapshot)
     assert window.channel_model.rowCount() == count
     if groups:
         assert window.tag_combo.count() == groups + 1
@@ -1124,9 +1175,12 @@ def test_a_big_list_arriving_keeps_the_window_answering(monkeypatch, tmp_path):
     StallMeter().run(1.0)
     try:
         meter = StallMeter()
-        _later(lambda: window._on_channels_loaded(
-            fetch, {'channels': [], 'tags': [], 'services': [], 'now_next': None}))
+        snapshot = {'channels': [], 'tags': [], 'services': [], 'now_next': None}
+        _later(lambda: window._on_channels_loaded(fetch, snapshot))
         meter.run(5.0, until=lambda: window.channel_model.rowCount() == count)
+        # Do not clear a snapshot that a preparation worker is still writing.
+        if window._channel_fetch is None and window.channel_model.rowCount() == count:
+            window._benchmark_payload = (backend, snapshot)
         meter.report(f'{count:,} channels in {groups:,} groups arriving')
         assert window.channel_model.rowCount() == count
         assert window._channel_fetch is None
@@ -1202,3 +1256,23 @@ def test_a_channel_moving_group_still_updates_the_group_counts(monkeypatch, tmp_
         window._channel_fetch = None
         backend.close()
         _close(app, window)
+
+
+def test_closed_synthetic_htsp_fixture_releases_its_channels(monkeypatch, tmp_path):
+    """A deleted Qt wrapper may survive, but must not retain channel data."""
+    app, ui, window, backend = _big_htsp_window(monkeypatch, tmp_path, count=10, groups=2)
+    model = window.channel_model
+    _, snapshot = window._benchmark_payload
+    try:
+        samples = [weakref.ref(channel) for channel in snapshot['channels']]
+        backend._on_async({'method': 'channelUpdate', 'channelId': 1, 'eventId': 999})
+        window._poll_channel_metadata()
+        samples.extend(weakref.ref(channel) for channel in model._channels)
+    finally:
+        window._channel_fetch = None
+        backend.close()
+        _close(app, window)
+
+    # Keep the deleted model and original snapshot alive, without gc.collect().
+    assert all(reference() is None for reference in samples)
+    assert not snapshot and not model._channels and not backend._channels
