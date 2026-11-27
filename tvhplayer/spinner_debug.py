@@ -145,6 +145,7 @@ class SpinnerWatch:
                     self._dump.close()
                     raise
         self._dump_read = 0
+        self._dump_boundary = 0
         self._lock = threading.Lock()
         self._running = False
         self._last = 0.0
@@ -185,11 +186,11 @@ class SpinnerWatch:
             # A stall that the stop ended, as when the window is busy just as
             # the picture comes, has no next tick to report it.
             gap = now - self._last
+            dump_range = self._finish_interval()
             if gap > LATE_SECONDS:
                 self._late.append(gap)
-                self._reports.append((gap, self._samples))
+                self._reports.append((gap, self._samples, dump_range))
             self._samples = []
-            self._disarm()
             took = now - self._run_started
             late = list(self._late)
             ticks = self._ticks
@@ -229,10 +230,11 @@ class SpinnerWatch:
             self._last = now
             self._ticks += 1
             samples, self._samples = self._samples, []
+            dump_range = self._finish_interval()
             self._arm()
             if gap > LATE_SECONDS:
                 self._late.append(gap)
-                self._reports.append((gap, samples))
+                self._reports.append((gap, samples, dump_range))
                 self._wake.set()
 
     def _arm(self):
@@ -243,20 +245,32 @@ class SpinnerWatch:
         if self._dump is not None:
             faulthandler.cancel_dump_traceback_later()
 
-    def _new_dump(self):
-        """What faulthandler wrote since the last call, without moving its file offset."""
+    def _finish_interval(self):
+        """Freeze the completed timer's file range before arming another one."""
+        if self._dump is None:
+            return (0, 0)
+        # CPython cancels and joins the native watchdog. Its dump cannot
+        # still be growing when we record the end of the previous interval.
+        self._disarm()
+        start = self._dump_boundary
+        self._dump_boundary = os.fstat(self._dump.fileno()).st_size
+        return start, self._dump_boundary
+
+    def _new_dump(self, start=None, end=None):
+        """Read only the given dump range, without moving the writer's offset."""
         if self._dump is None:
             return ''
         fd = self._dump.fileno()
-        size = os.fstat(fd).st_size
-        if size <= self._dump_read:
+        start = self._dump_read if start is None else start
+        end = os.fstat(fd).st_size if end is None else end
+        if end <= start:
             return ''
         if self._dump_reader is None:
-            data = os.pread(fd, size - self._dump_read, self._dump_read)
+            data = os.pread(fd, end - start, start)
         else:
-            self._dump_reader.seek(self._dump_read)
-            data = self._dump_reader.read(size - self._dump_read)
-        self._dump_read += len(data)
+            self._dump_reader.seek(start)
+            data = self._dump_reader.read(end - start)
+        self._dump_read = start + len(data)
         return data.decode('utf-8', errors='replace')
 
     def painted(self, seconds):
@@ -292,12 +306,12 @@ class SpinnerWatch:
         while self._reports:
             item = self._reports.pop(0)
             if not isinstance(item, tuple):
-                # A dump here belongs to no late tick.
-                self._new_dump()
+                # Status/paint messages must never consume another report's dump.
                 self._out(item)
                 continue
-            text = format_late(*item)
-            dump = self._new_dump()
+            gap, samples, dump_range = item
+            text = format_late(gap, samples)
+            dump = self._new_dump(*dump_range)
             if dump:
                 text += '\n  faulthandler, all threads while the tick was overdue:\n'
                 text += '\n'.join(f'    {line}' for line in dump.rstrip().splitlines())
