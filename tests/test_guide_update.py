@@ -24,13 +24,17 @@ def xmltv_socket():
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(path)
     listener.listen(4)
+    listener.settimeout(0.1)
     received = []
     done = threading.Event()
+    stopping = threading.Event()
 
     def serve():
-        while True:
+        while not stopping.is_set():
             try:
                 conn, _addr = listener.accept()
+            except socket.timeout:
+                continue
             except OSError:
                 return
             with conn:
@@ -43,11 +47,17 @@ def xmltv_socket():
                 received.append(b''.join(chunks).decode('utf-8'))
                 done.set()
 
-    threading.Thread(target=serve, daemon=True).start()
-    yield path, received
-    listener.close()
-    os.unlink(path)
-    os.rmdir(folder)
+    thread = threading.Thread(target=serve, name='xmltv-socket-serve', daemon=True)
+    thread.start()
+    try:
+        yield path, received
+    finally:
+        stopping.set()
+        listener.close()
+        thread.join(timeout=2)
+        assert not thread.is_alive(), 'XMLTV Unix socket test worker did not stop'
+        os.unlink(path)
+        os.rmdir(folder)
 
 
 class FakeAdmin:

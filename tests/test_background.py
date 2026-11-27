@@ -144,20 +144,34 @@ os._exit(0)
         replacement.close()
 
 
-def test_activation_accepts_only_show_command(qapp, tmp_path):
+def test_activation_accepts_only_show_command(qapp, tmp_path, monkeypatch):
     from PyQt6.QtNetwork import QLocalSocket
     from tvhplayer.app_instance import AppInstance
     owner = AppInstance(tmp_path)
     activated = []
+    received = []
     owner.show_requested.connect(lambda: activated.append(True))
+    original_read = owner._read
+
+    def observe_read(peer):
+        if peer.canReadLine():
+            received.append(bytes(peer.peek(16)))
+        original_read(peer)
+
+    # Observe the actual command at the owner, so a disconnect caused by a
+    # timeout cannot make this negative-protocol test pass.
+    monkeypatch.setattr(owner, '_read', observe_read)
     socket = QLocalSocket()
     try:
         assert owner.acquire()
         socket.connectToServer(owner.name)
         assert socket.waitForConnected(1000)
-        socket.write(b'quit\n')
-        assert socket.waitForBytesWritten(1000)
-        wait_for(qapp, lambda: socket.state() == QLocalSocket.LocalSocketState.UnconnectedState)
+        payload = b'quit\n'
+        assert socket.write(payload) == len(payload)
+        # Qt's blocking waitForBytesWritten can return False on Windows.
+        # Pump the event loop and require delivery to the real server.
+        wait_for(qapp, lambda: received and socket.state() == QLocalSocket.LocalSocketState.UnconnectedState)
+        assert received == [payload]
         assert not activated
         assert owner.server.isListening()
     finally:
@@ -179,4 +193,26 @@ def test_login_launch_does_not_activate_existing_instance(qapp, tmp_path):
         assert owner.server.isListening()
     finally:
         login.close()
+        owner.close()
+
+
+def test_second_launch_activation_does_not_depend_on_wait_for_bytes_written(qapp, tmp_path, monkeypatch):
+    from PyQt6.QtNetwork import QLocalSocket
+    from tvhplayer.app_instance import AppInstance
+
+    # Qt documents that waitForBytesWritten() may fail randomly on Windows.
+    # The activation handshake must rely on bytesWritten/event-loop delivery.
+    monkeypatch.setattr(QLocalSocket, 'waitForBytesWritten', lambda *_args: False)
+    owner = AppInstance(tmp_path)
+    second = AppInstance(tmp_path)
+    activated = []
+    owner.show_requested.connect(lambda: activated.append(True))
+    try:
+        assert owner.acquire()
+        assert not second.acquire()
+        wait_for(qapp, lambda: activated)
+        assert activated == [True]
+        assert owner.server.isListening()
+    finally:
+        second.close()
         owner.close()

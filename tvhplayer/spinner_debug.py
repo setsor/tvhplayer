@@ -126,7 +126,24 @@ class SpinnerWatch:
     def __init__(self, out=note, dump=True):
         self._out = out
         # faulthandler needs a real file; stdout may be the app.log copier.
-        self._dump = tempfile.TemporaryFile() if dump else None
+        # Windows has no pread. Keep an independent reader open for the
+        # lifetime of the named temporary file: closing an O_TEMPORARY
+        # handle can make subsequent opens fail with PermissionError.
+        self._dump = None
+        self._dump_reader = None
+        if dump:
+            if hasattr(os, 'pread'):
+                self._dump = tempfile.TemporaryFile()
+            else:
+                self._dump = tempfile.NamedTemporaryFile()
+                try:
+                    self._dump_reader = open(
+                        self._dump.name, 'rb', buffering=0,
+                        opener=lambda path, flags: os.open(
+                            path, flags | getattr(os, 'O_TEMPORARY', 0)))
+                except Exception:
+                    self._dump.close()
+                    raise
         self._dump_read = 0
         self._lock = threading.Lock()
         self._running = False
@@ -137,10 +154,13 @@ class SpinnerWatch:
         self._ticks = 0
         self._late = []
         self._wake = threading.Event()
+        self._closed = threading.Event()
         self._thread = None
 
     def started(self):
         with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError('SpinnerWatch is closed')
             if self._running:
                 return
             self._running = True
@@ -179,6 +199,27 @@ class SpinnerWatch:
         )
         self._wake.set()
 
+    def close(self):
+        """Dispose of this watcher on its owning thread, after its last run.
+
+        Stop and cancel the process-wide faulthandler timer before joining
+        the reporter. Keep both file handles alive until reporting is done.
+        Unlike stopped(), this is final and the watcher cannot be restarted.
+        """
+        if not self._closed.is_set():
+            self.stopped()
+            self._closed.set()
+            self._wake.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError('Spinner diagnostic watchdog did not stop')
+        if self._dump_reader is not None:
+            self._dump_reader.close()
+        if self._dump is not None:
+            self._dump.close()
+
     def tick(self):
         now = time.monotonic()
         with self._lock:
@@ -210,7 +251,11 @@ class SpinnerWatch:
         size = os.fstat(fd).st_size
         if size <= self._dump_read:
             return ''
-        data = os.pread(fd, size - self._dump_read, self._dump_read)
+        if self._dump_reader is None:
+            data = os.pread(fd, size - self._dump_read, self._dump_read)
+        else:
+            self._dump_reader.seek(self._dump_read)
+            data = self._dump_reader.read(size - self._dump_read)
         self._dump_read += len(data)
         return data.decode('utf-8', errors='replace')
 
@@ -223,6 +268,10 @@ class SpinnerWatch:
         me = threading.get_ident()
         while True:
             self._flush()
+            if self._closed.is_set():
+                # stopped() may have queued its final report during _flush().
+                self._flush()
+                return
             with self._lock:
                 running = self._running
                 overdue = time.monotonic() - self._last
