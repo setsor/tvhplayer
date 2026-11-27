@@ -2,6 +2,8 @@ name: Windows build
 
 on:
   push:
+    branches:
+      - validation/4.7.6-standard-packages
     tags:
       - 'v*'
   pull_request:

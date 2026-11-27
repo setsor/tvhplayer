@@ -134,7 +134,7 @@ jobs:
           if [ "${{ needs.fingerprint.outputs.force_rebuild }}" = "true" ]; then
             args+=(--force-rebuild)
           fi
-          if [ "$can_publish" = 1 ]; then
+          if [ "$can_publish" = 1 ] && [ "${{ github.ref }}" != "refs/heads/validation/4.7.6-standard-packages" ]; then
             args+=(--publish)
           fi
           python windows/backend/ci_artifact.py resolve "${args[@]}"
