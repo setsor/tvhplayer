@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   test:
+    # The temporary media branch has its own focused CI.
+    if: github.ref != 'refs/heads/integration/windows-4.7.6-media' && github.head_ref != 'integration/windows-4.7.6-media'
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30

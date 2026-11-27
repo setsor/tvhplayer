@@ -1,0 +1,129 @@
+name: Windows - Real media tests
+
+on:
+  push:
+    branches:
+      - integration/windows-4.7.6-media
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-media-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  media:
+    runs-on: windows-2025
+    timeout-minutes: 25
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: '1'
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install Python test environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -r windows/requirements-build.txt pytest pytest-timeout pyyaml python-dateutil
+          python packaging/build-native.py
+
+      - name: Fetch and verify pinned multimedia libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          . windows/pins.env
+          root="$(pwd -W)"
+          media="$root/windows/test-media"
+          mkdir -p "$media" media-results
+          fetch() {
+            curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 --max-time 600 -o "$2" "$1"
+            echo "$3  $2" | sha256sum -c -
+          }
+          fetch "$MPV_DEV_URL" "$media/mpv-dev.7z" "$MPV_DEV_SHA256"
+          7z e -y -o"$media" "$media/mpv-dev.7z" libmpv-2.dll
+          fetch "$VULKAN_RT_URL" "$media/vulkan.zip" "$VULKAN_RT_SHA256"
+          7z e -y -o"$media" "$media/vulkan.zip" "*/x64/vulkan-1.dll"
+          fetch "$FFMPEG_URL" "$media/ffmpeg.zip" "$FFMPEG_SHA256"
+          7z e -y -o"$media" "$media/ffmpeg.zip" "*/bin/ffmpeg.exe" "*/bin/ffprobe.exe"
+          test -f "$media/libmpv-2.dll"
+          test -f "$media/vulkan-1.dll"
+          test -f "$media/ffmpeg.exe"
+          test -f "$media/ffprobe.exe"
+
+      - name: Execute four real multimedia tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $media = Join-Path $env:GITHUB_WORKSPACE 'windows/test-media'
+          $env:TVHPLAYER_TEST_MEDIA_DIR = $media
+          $env:PATH = "$media;$env:PATH"
+          New-Item -ItemType Directory -Force media-results | Out-Null
+          @'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          nodes = [
+              "tests/test_mpv_player.py::test_real_libmpv_reports_failure_and_playback",
+              "tests/test_mpv_player.py::test_real_buffer_recording_contains_rewound_and_new_footage[False]",
+              "tests/test_mpv_player.py::test_real_buffer_recording_contains_rewound_and_new_footage[True]",
+              "tests/test_convert.py::test_real_conversion_has_a_keyframe_every_second",
+          ]
+          media = Path(os.environ["TVHPLAYER_TEST_MEDIA_DIR"]).resolve()
+          for name in ("ffmpeg", "ffprobe"):
+              exe = shutil.which(name)
+              assert exe and Path(exe).resolve().parent == media, (name, exe)
+          launcher = """
+          import os, sys
+          with os.add_dll_directory(os.environ["TVHPLAYER_TEST_MEDIA_DIR"]):
+              import mpv
+              import pytest
+              raise SystemExit(int(pytest.main(sys.argv[1:])))
+          """
+          passed = 0
+          rows = ["## Windows real multimedia tests", "", "| Test | Result |", "| --- | --- |"]
+          for i, node in enumerate(nodes, 1):
+              report = Path(f"media-results/{i:02d}.xml")
+              log = Path(f"media-results/{i:02d}.log")
+              args = [sys.executable, "-c", launcher, node, "-vv", "-ra",
+                      "--tb=short", "--timeout=120", "-p", "no:cacheprovider",
+                      f"--junitxml={report}"]
+              with log.open("w", encoding="utf-8") as out:
+                  run = subprocess.run(args, stdout=out, stderr=subprocess.STDOUT,
+                                       text=True, timeout=180)
+              print(log.read_text(encoding="utf-8", errors="replace"), flush=True)
+              result = "FAIL"
+              if report.is_file():
+                  cases = ET.parse(report).getroot().findall(".//testcase")
+                  if len(cases) == 1 and cases[0].get("name") == node.split("::")[1]:
+                      state = next((tag.upper() for tag in ("error", "failure", "skipped")
+                                    if cases[0].find(tag) is not None), None)
+                      result = state or ("PASS" if run.returncode == 0 else "FAIL")
+              passed += result == "PASS"
+              rows.append(f"| {node.split('::')[1]} | {result} |")
+          rows += ["", f"**{passed}/4 passed.**"]
+          print("\n".join(rows))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(rows) + "\n")
+          raise SystemExit(0 if passed == len(nodes) else 1)
+          '@ | Set-Content -Encoding utf8 media-results/run-tests.py
+          python media-results/run-tests.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload real media test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-real-media-results
+          path: media-results/
+          if-no-files-found: warn
+          retention-days: 14
