@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 
@@ -81,3 +82,24 @@ def test_a_stall_that_ends_with_the_stop_is_reported():
     assert report is not None, out
     assert 'test_a_stall_that_ends_with_the_stop_is_reported' in report
     assert '1 late' in out[-1]
+
+
+
+def test_dump_reader_without_pread_preserves_writer_offset(monkeypatch):
+    # Exercise the Windows path on all platforms, using direct fd writes
+    # just as faulthandler does. Reading must not change the writer's offset.
+    monkeypatch.delattr(os, 'pread', raising=False)
+    watch = spinner_debug.SpinnerWatch()
+    fd = watch._dump.fileno()
+    try:
+        first, second = b'first dump\n', b'second dump\n'
+        assert os.write(fd, first) == len(first)
+        assert watch._new_dump() == first.decode()
+        assert os.lseek(fd, 0, os.SEEK_CUR) == len(first)
+        assert watch._new_dump() == ''
+        assert os.write(fd, second) == len(second)
+        assert watch._new_dump() == second.decode()
+        assert os.lseek(fd, 0, os.SEEK_CUR) == len(first) + len(second)
+        assert watch._new_dump() == ''
+    finally:
+        watch._dump.close()

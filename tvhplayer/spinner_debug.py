@@ -126,7 +126,12 @@ class SpinnerWatch:
     def __init__(self, out=note, dump=True):
         self._out = out
         # faulthandler needs a real file; stdout may be the app.log copier.
-        self._dump = tempfile.TemporaryFile() if dump else None
+        # Windows has no pread. A named file lets the watchdog open an
+        # independent reader without moving faulthandler's write offset.
+        self._dump = None
+        if dump:
+            self._dump = (tempfile.TemporaryFile() if hasattr(os, 'pread')
+                          else tempfile.NamedTemporaryFile())
         self._dump_read = 0
         self._lock = threading.Lock()
         self._running = False
@@ -210,7 +215,18 @@ class SpinnerWatch:
         size = os.fstat(fd).st_size
         if size <= self._dump_read:
             return ''
-        data = os.pread(fd, size - self._dump_read, self._dump_read)
+        if hasattr(os, 'pread'):
+            data = os.pread(fd, size - self._dump_read, self._dump_read)
+        else:
+            # Reopen with independent file position and, on Windows, share
+            # delete access with NamedTemporaryFile's delete-on-close handle.
+            flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_TEMPORARY', 0)
+            reader = os.open(self._dump.name, flags)
+            try:
+                os.lseek(reader, self._dump_read, os.SEEK_SET)
+                data = os.read(reader, size - self._dump_read)
+            finally:
+                os.close(reader)
         self._dump_read += len(data)
         return data.decode('utf-8', errors='replace')
 
