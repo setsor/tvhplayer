@@ -56,7 +56,8 @@ def test_configuration_profiles_have_independent_instances(qapp, tmp_path):
         second.close()
 
 
-@pytest.mark.skipif(not shutil.which('dbus-run-session'), reason='needs an isolated D-Bus session')
+@pytest.mark.skipif(not sys.platform.startswith('linux') or not shutil.which('dbus-run-session'),
+                    reason='requires Linux desktop portal and an isolated D-Bus session')
 @pytest.mark.parametrize('mode', ['grant', 'deny', 'cancel', 'unavailable', 'autostart-only',
                                    'startup-grant', 'startup-denied', 'startup-background-denied', 'startup-disable'])
 def test_background_portal_real_dbus_response(mode):

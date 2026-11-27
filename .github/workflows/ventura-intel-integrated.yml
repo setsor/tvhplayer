@@ -20,6 +20,8 @@ jobs:
       QT_QPA_PLATFORM: offscreen
       PYTHONFAULTHANDLER: '1'
       MACOSX_DEPLOYMENT_TARGET: '13.0'
+      # Resolve against the intended OS, not the newer Intel runner.
+      CONDA_OVERRIDE_OSX: '13.0'
     steps:
       - name: Checkout integrated TVHplayer
         uses: actions/checkout@v7.0.1
@@ -36,14 +38,20 @@ jobs:
           echo "Integrated revision: $(git rev-parse HEAD)"
           mkdir -p "$RUNNER_TEMP/ventura-results"
 
-      - name: Install macOS 13-compatible conda native mpv and FFmpeg
+      - name: Resolve Intel FFmpeg 9.1 and libplacebo for macOS 13
         uses: mamba-org/setup-micromamba@v3.2.1
         with:
           environment-name: tvhplayer-native
           create-args: >-
+            -c conda-forge
             python=3.11
-            mpv=0.40.*
-            ffmpeg=7.1.*
+            ffmpeg=9.1.0=gpl_h5b0e0b6_100
+            libplacebo=7.387.0=h5c0a6cf_0
+            libass
+            fontconfig
+            freetype
+            fribidi
+            libarchive
             meson
             ninja
             pkgconf
@@ -51,20 +59,34 @@ jobs:
             libiconv
           init-shell: bash
 
-      - name: Checkout exact MPV 0.41.0 source commit
+      - name: Record resolved native dependencies and hardware capabilities
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/ventura-results"
+          micromamba list --explicit > "$results/native-conda-explicit.txt"
+          "$CONDA_PREFIX/bin/ffmpeg" -version | tee "$results/ffmpeg-version.txt"
+          grep -E '^ffmpeg version 9\.1([. -]|$)' "$results/ffmpeg-version.txt"
+          "$CONDA_PREFIX/bin/ffmpeg" -hide_banner -hwaccels | tee "$results/hwaccels.txt"
+          grep -qx videotoolbox "$results/hwaccels.txt"
+          # This verifies compiled support, not hardware availability in a VM.
+          export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
+          test "$(pkg-config --modversion libplacebo)" = 7.387.0
+          pkg-config --modversion libass libavcodec libavformat libavutil
+
+      - name: Checkout exact MPV 0.42.0 source commit
         uses: actions/checkout@v7.0.1
         with:
           repository: mpv-player/mpv
-          ref: 41f6a645068483470267271e1d09966ca3b9f413
-          path: _vendor/mpv-0.41.0
+          ref: b0841e8c4d156b8403dc1876c4cbd9011eb583f3
+          path: _vendor/mpv-0.42.0
           persist-credentials: false
 
-      - name: Build embedded MPV 0.41 for Ventura
+      - name: Build embedded MPV 0.42 for Ventura
         env:
           MACOSX_DEPLOYMENT_TARGET: '13.0'
         run: |
           set -euo pipefail
-          SRC="$GITHUB_WORKSPACE/_vendor/mpv-0.41.0"
+          SRC="$GITHUB_WORKSPACE/_vendor/mpv-0.42.0"
           test -s "$SRC/osdep/utils-mac.c"
           grep -q "'osdep/utils-mac.c'" "$SRC/meson.build"
           # TVHplayer embeds libmpv with its own Qt UI. Native MPV clipboard
@@ -74,7 +96,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           import os
-          source = Path(os.environ['GITHUB_WORKSPACE']) / '_vendor/mpv-0.41.0'
+          source = Path(os.environ['GITHUB_WORKSPACE']) / '_vendor/mpv-0.42.0'
           meson = source / 'meson.build'
           original = meson.read_text()
           old = "'osdep/mac/app_bridge.m',\\n                     'player/clipboard/clipboard-mac.m')".replace('\\n', '\n')
@@ -119,7 +141,7 @@ jobs:
           #endif
           """.strip().replace('\n          ', '\n')
           bridge.write_text(original.replace(anchor, stubs))
-          print("MPV 0.41: embedded Qt OpenGL render profile")
+          print("MPV 0.42: embedded Qt OpenGL render profile")
           PY
           export PKG_CONFIG_PATH="$CONDA_PREFIX/lib/pkgconfig:$CONDA_PREFIX/share/pkgconfig"
           # pkg-config can report the FFmpeg library but omit the prefix's
@@ -150,7 +172,7 @@ jobs:
           path = os.path.join(os.environ['CONDA_PREFIX'], 'lib', 'libmpv.2.dylib')
           lib = ctypes.CDLL(path)
           lib.mpv_client_api_version.restype = ctypes.c_ulong
-          print("Rebuilt MPV 0.41 dlopen OK, API:", lib.mpv_client_api_version())
+          print("Rebuilt MPV 0.42 dlopen OK, API:", lib.mpv_client_api_version())
           PY
 
       - name: Verify embedded libmpv loads MPEG-TS and terminates
@@ -234,6 +256,9 @@ jobs:
               "test_real_conversion_has_a_keyframe_every_second",
               "test_dump_reader_without_pread_preserves_writer_offset",
               "test_on_time_ticks_are_not_reported",
+              "test_delayed_reporter_keeps_each_dump_with_its_own_interval",
+              "test_closed_synthetic_htsp_fixture_releases_its_channels",
+              "test_faulthandler_dump_comes_with_the_late_tick",
           }
           passed_names = {c.get("name") for c in cases if state(c) == "pass"}
           counts = {s: sum(state(c) == s for c in cases) for s in ("pass", "failure", "error", "skipped")}
@@ -247,8 +272,8 @@ jobs:
           print("\n".join(rows))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
               out.write("\n".join(rows) + "\n")
-          assert len(core) == 1212, ("correctness test count changed", len(core))
-          assert len(perf) == 36 and all(state(c) == "pass" for c in perf)
+          assert len(core) == 1214, ("correctness test count changed", len(core))
+          assert len(perf) == 37 and all(state(c) == "pass" for c in perf)
           assert not counts["failure"] and not counts["error"] and not missing
           PY
           then
@@ -266,7 +291,7 @@ jobs:
           changes = {
               'BREW_MPV="$(brew --prefix mpv 2>/dev/null || true)"': 'BREW_MPV="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix mpv 2>/dev/null || true)}"',
               'BREW_FFMPEG="$(brew --prefix ffmpeg 2>/dev/null || true)"': 'BREW_FFMPEG="${TVHPLAYER_NATIVE_PREFIX:-$(brew --prefix ffmpeg 2>/dev/null || true)}"',
-              '"$(brew list --versions mpv)"': '"MPV 0.41 rebuilt for Ventura 13"',
+              '"$(brew list --versions mpv)"': '"MPV 0.42 rebuilt for Ventura 13"',
               '--osx-bundle-identifier io.github.mfat.tvhplayer \\': '--osx-bundle-identifier io.github.setsor.tvhplayer \\',
               '  --add-binary "$LIBMPV:." \\': ('  --add-binary "$TVHPLAYER_NATIVE_PREFIX/lib:." \\' + chr(10) + '  --add-binary "$LIBMPV:." \\'),
           }
@@ -343,6 +368,34 @@ jobs:
               print("Unsupported or unknown native binaries:", (too_new + [(name, "UNKNOWN") for name in unknown])[:30])
               raise SystemExit("The full application cannot be certified to target macOS 13")
           PY
+
+      - name: Start the packaged Intel application without Conda library paths
+        run: |
+          set -euo pipefail
+          APP="$GITHUB_WORKSPACE/macos/dist/TVHplayer.app"
+          LOG="$HOME/Library/Logs/TVHplayer/app.log"
+          # Isolate this smoke from the build environment and previous logs.
+          rm -f "$LOG"
+          (
+            unset DYLD_LIBRARY_PATH DYLD_FALLBACK_LIBRARY_PATH PYTHONPATH PYTHONHOME CONDA_PREFIX
+            export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+            QT_QPA_PLATFORM=offscreen "$APP/Contents/MacOS/TVHplayer"
+          ) > "$RUNNER_TEMP/ventura-results/packaged-startup.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true' EXIT
+          sleep 25
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$RUNNER_TEMP/ventura-results/packaged-startup.log"
+            test ! -f "$LOG" || cat "$LOG"
+            exit 1
+          fi
+          cat "$LOG"
+          grep -q 'Playback engine: mpv' "$LOG"
+          grep -q 'Media player created successfully' "$LOG"
+          ! grep -q 'Error starting application' "$LOG"
+          env -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH \
+            "$APP/Contents/Frameworks/ffmpeg" -version
+          cp "$LOG" "$RUNNER_TEMP/ventura-results/packaged-app.log"
 
       - name: Package and verify Ventura DMG
         env:
