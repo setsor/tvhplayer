@@ -102,4 +102,5 @@ def test_dump_reader_without_pread_preserves_writer_offset(monkeypatch):
         assert os.lseek(fd, 0, os.SEEK_CUR) == len(first) + len(second)
         assert watch._new_dump() == ''
     finally:
+        watch._dump_reader.close()
         watch._dump.close()

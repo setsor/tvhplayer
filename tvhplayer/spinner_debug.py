@@ -126,12 +126,24 @@ class SpinnerWatch:
     def __init__(self, out=note, dump=True):
         self._out = out
         # faulthandler needs a real file; stdout may be the app.log copier.
-        # Windows has no pread. A named file lets the watchdog open an
-        # independent reader without moving faulthandler's write offset.
+        # Windows has no pread. Keep an independent reader open for the
+        # lifetime of the named temporary file: closing an O_TEMPORARY
+        # handle can make subsequent opens fail with PermissionError.
         self._dump = None
+        self._dump_reader = None
         if dump:
-            self._dump = (tempfile.TemporaryFile() if hasattr(os, 'pread')
-                          else tempfile.NamedTemporaryFile())
+            if hasattr(os, 'pread'):
+                self._dump = tempfile.TemporaryFile()
+            else:
+                self._dump = tempfile.NamedTemporaryFile()
+                try:
+                    self._dump_reader = open(
+                        self._dump.name, 'rb', buffering=0,
+                        opener=lambda path, flags: os.open(
+                            path, flags | getattr(os, 'O_TEMPORARY', 0)))
+                except Exception:
+                    self._dump.close()
+                    raise
         self._dump_read = 0
         self._lock = threading.Lock()
         self._running = False
@@ -215,18 +227,11 @@ class SpinnerWatch:
         size = os.fstat(fd).st_size
         if size <= self._dump_read:
             return ''
-        if hasattr(os, 'pread'):
+        if self._dump_reader is None:
             data = os.pread(fd, size - self._dump_read, self._dump_read)
         else:
-            # Reopen with independent file position and, on Windows, share
-            # delete access with NamedTemporaryFile's delete-on-close handle.
-            flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0) | getattr(os, 'O_TEMPORARY', 0)
-            reader = os.open(self._dump.name, flags)
-            try:
-                os.lseek(reader, self._dump_read, os.SEEK_SET)
-                data = os.read(reader, size - self._dump_read)
-            finally:
-                os.close(reader)
+            self._dump_reader.seek(self._dump_read)
+            data = self._dump_reader.read(size - self._dump_read)
         self._dump_read += len(data)
         return data.decode('utf-8', errors='replace')
 
