@@ -5,7 +5,7 @@ name: Linux - TVHeadend integration tests
 on:
   push:
     branches:
-      - integration/linux-4.7.6-tests-layout
+      - integration/4.7.6-cross-platform
   workflow_dispatch:
 
 permissions:
