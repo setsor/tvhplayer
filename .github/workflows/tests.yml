@@ -1,4 +1,4 @@
-name: macOS - fixture lifetime and GC comparison
+name: macOS - release synthetic channel fixture payloads
 on:
   push:
     branches:
@@ -26,14 +26,14 @@ jobs:
           python -m pip install -r macos/requirements-build.txt PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
           python packaging/build-native.py
           python -m py_compile tests/test_responsiveness.py tests/diagnostic_scheduler_probe.py
-      - name: Compare normal teardown with collection after teardown
+      - name: Compare normal teardown with explicit payload release
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p latency-results
           failed=0
           for trial in 1 2 3 4 5 6 7 8; do
-            if (( trial % 2 == 1 )); then mode=baseline; else mode=collect; fi
+            if (( trial % 2 == 1 )); then mode=baseline; else mode=release; fi
             export TVH_DIAG_CLEANUP="$mode"
             export TVH_DIAG_JSON="$PWD/latency-results/$trial-$mode-trace.jsonl"
             python tests/diagnostic_scheduler_probe.py > "latency-results/$trial-probe.jsonl" &
@@ -71,7 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: macos-fixture-lifetime
+          name: macos-fixture-release
           path: latency-results/
           if-no-files-found: warn
           retention-days: 14
