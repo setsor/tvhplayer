@@ -27,9 +27,9 @@ jobs:
       matrix:
         include:
           # The Python each platform's package ships with.
-          - os: ubuntu-24.04
-            python: '3.12'
-          # Temporary Linux-only validation. Restore other platforms before review.
+          - os: windows-2025
+            python: '3.13'
+          # Temporary Windows-only validation; restore the full matrix later.
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONFAULTHANDLER: '1'
@@ -68,16 +68,16 @@ jobs:
         id: native_decoder
         run: python packaging/build-native.py
 
-      # Run Linux responsiveness benchmarks in a fresh interpreter. Earlier
-      # Qt tests otherwise retain widgets/callbacks and distort timing.
-      - name: Run correctness tests (Linux)
-        if: runner.os == 'Linux'
+      # Validate correctness and timing-sensitive benchmarks independently.
+      # The Windows integration branch uses the same separation as Linux.
+      - name: Run correctness tests (Linux/Windows)
+        if: runner.os != 'macOS'
         run: python -m pytest tests --ignore=tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
 
-      - name: Run responsiveness tests (Linux)
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.native_decoder.outcome == 'success' }}
+      - name: Run responsiveness tests (Linux/Windows)
+        if: ${{ !cancelled() && runner.os != 'macOS' && steps.native_decoder.outcome == 'success' }}
         run: python -m pytest tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
 
-      - name: Run tests
-        if: runner.os != 'Linux'
+      - name: Run tests (macOS)
+        if: runner.os == 'macOS'
         run: python -m pytest tests -q -p no:cacheprovider --timeout=300 -ra
