@@ -1,0 +1,135 @@
+name: Linux - TVHeadend integration tests
+
+# Run the real-server tests separately from the headless GUI benchmarks.
+# The built-in server is compiled from the same verified pins as packages.
+on:
+  push:
+    branches:
+      - validation/4.7.6-standard-packages
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-tvheadend-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONFAULTHANDLER: '1'
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates curl build-essential pkgconf gettext bzip2 cmake \
+            libssl-dev zlib1g-dev libpcre2-dev libdbus-1-dev \
+            libmpv2 ffmpeg libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
+          python -m pip install -r runtime-requirements.txt PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
+          python packaging/build-native.py
+
+      - name: Build pinned, relocatable TVHeadend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p integration-results
+          (
+            set -e
+            packaging/tvheadend/build-tvheadend.sh fetch "$RUNNER_TEMP/tvh-sources"
+            packaging/tvheadend/build-tvheadend.sh build "$RUNNER_TEMP/tvh-sources" "$RUNNER_TEMP/tvh-work" --bundle-dvbcsa --relocatable
+            install -D -m 755 "$RUNNER_TEMP/tvh-work/tvheadend/build.linux/tvheadend" build/tvheadend
+            build/tvheadend --version
+            ffmpeg -version
+            python - <<'PY'
+          from pathlib import Path
+          from tvhplayer.core.builtin_server import find_bundled_binary
+
+          actual = find_bundled_binary()
+          expected = Path("build/tvheadend").resolve()
+          assert actual is not None and actual.resolve() == expected, (actual, expected)
+          print("Testing built-in server:", actual)
+          PY
+          ) 2>&1 | tee integration-results/backend-build.log
+
+      - name: Run all four real-server tests independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p integration-results
+          cases=(
+            tests/test_guide_update.py::test_real_server_shows_the_guide_on_every_channel
+            tests/test_guide_update.py::test_real_server_records_a_series_from_the_guide
+            tests/test_playlist_sync.py::test_real_server_refresh_clears_scan_backlog_and_keeps_update_batches
+            tests/test_playlist_sync.py::test_import_plays_refreshes_and_removes
+          )
+          failed=0
+          for case in "${cases[@]}"; do
+            name="${case##*::}"
+            if ! python -m pytest "$case" --run-slow -vv -ra --tb=short \
+                --timeout=300 -p no:cacheprovider --junitxml="integration-results/$name.xml" \
+                2>&1 | tee "integration-results/$name.log"; then
+              failed=1
+            fi
+          done
+          # A pytest exit code of zero can also mean a skipped test.
+          # Require four actual passes, one report for each named test.
+          if ! python - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          names = [
+              "test_real_server_shows_the_guide_on_every_channel",
+              "test_real_server_records_a_series_from_the_guide",
+              "test_real_server_refresh_clears_scan_backlog_and_keeps_update_batches",
+              "test_import_plays_refreshes_and_removes",
+          ]
+          good = 0
+          rows = ["## Real TVHeadend integration", "", "| Test | Result |", "| --- | --- |"]
+          for name in names:
+              report = Path("integration-results") / (name + ".xml")
+              result = "MISSING REPORT"
+              if report.is_file():
+                  try:
+                      cases = ET.parse(report).getroot().findall(".//testcase")
+                      if len(cases) == 1 and cases[0].get("name") == name:
+                          state = next((tag for tag in ("error", "failure", "skipped")
+                                        if cases[0].find(tag) is not None), None)
+                          result = state.upper() if state else "PASS"
+                      else:
+                          result = "UNEXPECTED REPORT"
+                  except ET.ParseError:
+                      result = "INVALID REPORT"
+              good += result == "PASS"
+              rows.append(f"| {name} | {result} |")
+          rows.extend(["", f"**{good}/4 passed.**"])
+          print("\n".join(rows))
+          import os
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
+              out.write("\n".join(rows) + "\n")
+          if good != len(names):
+              raise SystemExit(1)
+          PY
+          then
+            failed=1
+          fi
+          exit "$failed"
+
+      - name: Archive build log and per-test reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-tvheadend-integration-results
+          path: integration-results/
+          if-no-files-found: warn
+          retention-days: 14
