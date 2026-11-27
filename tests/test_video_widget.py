@@ -1,8 +1,10 @@
+import ctypes
 from types import SimpleNamespace
 
 import pytest
 from PyQt6.QtGui import QSurfaceFormat
 
+from tvhplayer import video_widget
 from tvhplayer.video_widget import (
     MpvVideoWidget, configure_macos_opengl, live_splitter_keeps_up, use_live_resize,
 )
@@ -102,3 +104,66 @@ def test_non_macos_does_not_change_opengl_format(platform_name):
     original = QSurfaceFormat.defaultFormat()
     assert configure_macos_opengl(platform_name) is None
     assert QSurfaceFormat.defaultFormat() == original
+
+
+@pytest.mark.parametrize('codes, expected', [
+    ([0], ((), True)),
+    ([0x0500, 0x0502, 0], ((0x0500, 0x0502), True)),
+])
+def test_gl_error_drain_preserves_all_codes(codes, expected):
+    assert video_widget._read_gl_errors(iter(codes).__next__) == expected
+
+
+def test_gl_error_drain_is_bounded():
+    calls = []
+
+    def always_invalid():
+        calls.append(True)
+        return 0x0500
+
+    assert video_widget._read_gl_errors(always_invalid) == ((0x0500,) * 16, False)
+    assert len(calls) == 16
+
+
+def test_gl_boundary_reports_missing_current_context(monkeypatch, capsys):
+    monkeypatch.setattr(video_widget, '_proc_address', lambda name: 0)
+    assert not video_widget._check_gl_boundary("before libmpv context initialization")
+    assert "OpenGL boundary unavailable before libmpv" in capsys.readouterr().out
+
+
+def test_macos_gl_boundary_records_incoming_errors_and_checks_outgoing_context(monkeypatch, capsys):
+    calls = []
+    codes = iter([0x0500, 0, 0])
+
+    @ctypes.CFUNCTYPE(ctypes.c_uint)
+    def get_error():
+        calls.append("glGetError")
+        return next(codes)
+
+    def proc_address(name):
+        assert name == b'glGetError'
+        return ctypes.cast(get_error, ctypes.c_void_p).value
+
+    renderer = SimpleNamespace(update_cb=None)
+
+    def create_renderer(get_proc_address, wl_display):
+        assert calls == ["glGetError", "glGetError"]
+        assert wl_display is None
+        calls.append("create renderer")
+        return renderer
+
+    monkeypatch.setattr(video_widget.sys, 'platform', 'darwin')
+    monkeypatch.setattr(video_widget, '_proc_address', proc_address)
+    widget = SimpleNamespace(
+        _engine=SimpleNamespace(create_render_context=create_renderer),
+        _render_context=None,
+        _wayland=None,
+        _frame_ready=SimpleNamespace(emit=lambda: None),
+    )
+    MpvVideoWidget._create_render_context(widget)
+    assert calls == ["glGetError", "glGetError", "create renderer", "glGetError"]
+    assert widget._render_context is renderer
+    assert renderer.update_cb is widget._frame_ready.emit
+    log = capsys.readouterr().out
+    assert "OpenGL errors before libmpv context initialization: 0x0500 (recorded and cleared)" in log
+    assert "OpenGL boundary clean after libmpv context initialization" in log

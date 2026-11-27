@@ -103,7 +103,14 @@ class MpvVideoWidget(QOpenGLWidget):
         if self._wayland is None and QGuiApplication.platformName() == 'wayland':
             self._wayland = _WaylandConnection()
         wl_display = self._wayland.display if self._wayland is not None else None
+        if sys.platform == 'darwin':
+            # Qt and libmpv share a current context, including its error flags.
+            # Attribute pending errors to the incoming boundary rather than
+            # allowing libmpv's first glGetError() to report them as its own.
+            _check_gl_boundary("before libmpv context initialization")
         context = self._engine.create_render_context(_proc_address, wl_display)
+        if sys.platform == 'darwin':
+            _check_gl_boundary("after libmpv context initialization")
         context.update_cb = self._frame_ready.emit
         self._render_context = context
 
@@ -156,6 +163,41 @@ def _proc_address(name):
         return 0
     address = context.getProcAddress(name)
     return int(address) if address else 0
+
+
+def _read_gl_errors(get_error, limit=16):
+    """Read sticky GL errors from a current context, with a bounded drain."""
+    errors = []
+    for _ in range(limit):
+        code = get_error()
+        if code == 0:
+            return tuple(errors), True
+        errors.append(code)
+    return tuple(errors), False
+
+
+def _check_gl_boundary(stage):
+    """Record context errors before handing it between Qt and libmpv.
+
+    glGetError clears the error flags it reads. Log every observed code; the
+    caller must not use this to conceal renderer errors or disable diagnostics.
+    A missing function or non-draining context is reported distinctly.
+    """
+    address = _proc_address(b'glGetError')
+    if not address:
+        print(f"Warning: OpenGL boundary unavailable {stage}: no current glGetError")
+        return False
+    get_error = ctypes.CFUNCTYPE(ctypes.c_uint)(address)
+    errors, clean = _read_gl_errors(get_error)
+    if errors:
+        codes = ", ".join(f"0x{code:04X}" for code in errors)
+        if clean:
+            print(f"Warning: OpenGL errors {stage}: {codes} (recorded and cleared)")
+        else:
+            print(f"Warning: OpenGL error drain limit reached {stage}: {codes}")
+    elif clean:
+        print(f"Debug: OpenGL boundary clean {stage}")
+    return clean and not errors
 
 
 class _WaylandConnection:
