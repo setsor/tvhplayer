@@ -27,9 +27,9 @@ jobs:
       matrix:
         include:
           # The Python each platform's package ships with.
-          - os: windows-2025
-            python: '3.13'
-          # Temporary Windows-only validation; restore the full matrix later.
+          - os: macos-15
+            python: '3.15'
+          # Temporary macOS-only validation; restore the full matrix later.
     env:
       QT_QPA_PLATFORM: offscreen
       PYTHONFAULTHANDLER: '1'
@@ -47,9 +47,9 @@ jobs:
           sudo apt-get install -y -q --no-install-recommends \
             libmpv2 ffmpeg libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3
 
-      - name: Install mpv (macOS)
+      - name: Install mpv and FFmpeg (macOS)
         if: runner.os == 'macOS'
-        run: brew install mpv
+        run: brew install mpv ffmpeg
 
       - name: Install Python packages
         shell: bash
@@ -68,16 +68,11 @@ jobs:
         id: native_decoder
         run: python packaging/build-native.py
 
-      # Validate correctness and timing-sensitive benchmarks independently.
-      # The Windows integration branch uses the same separation as Linux.
-      - name: Run correctness tests (Linux/Windows)
-        if: runner.os != 'macOS'
+      # Keep correctness and timing-sensitive benchmarks in fresh processes,
+      # consistent with the successful Linux and Windows validation.
+      - name: Run correctness tests
         run: python -m pytest tests --ignore=tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
 
-      - name: Run responsiveness tests (Linux/Windows)
-        if: ${{ !cancelled() && runner.os != 'macOS' && steps.native_decoder.outcome == 'success' }}
+      - name: Run responsiveness tests
+        if: ${{ !cancelled() && steps.native_decoder.outcome == 'success' }}
         run: python -m pytest tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
-
-      - name: Run tests (macOS)
-        if: runner.os == 'macOS'
-        run: python -m pytest tests -q -p no:cacheprovider --timeout=300 -ra
