@@ -7,6 +7,7 @@ the OpenGL context and asks this engine for a render context once it has one.
 from __future__ import annotations
 
 import locale
+import platform
 from pathlib import Path
 from time import monotonic
 
@@ -76,7 +77,13 @@ class MpvPlayer(Player):
         hide_http_proxy()
         # QApplication sets the numeric locale from the desktop; libmpv refuses anything but C.
         locale.setlocale(locale.LC_NUMERIC, 'C')
-        self._mpv = mpv.MPV(log_handler=_log, loglevel='warn', **MPV_OPTIONS)
+        options = dict(MPV_OPTIONS)
+        # Ventura Intel diagnostic: change only libavcodec hardware threading.
+        if (platform.system() == 'Darwin' and platform.machine() == 'x86_64'
+                and platform.release().split('.')[0] == '22'):
+            options['hwdec_threads'] = 1
+            print('Debug: Ventura Intel diagnostic: hwdec-threads=1')
+        self._mpv = mpv.MPV(log_handler=_log, loglevel='warn', **options)
         # Set after creation: an unknown option at creation leaves a running mpv behind.
         for name, value in LUA_SCRIPT_OPTIONS.items():
             try:

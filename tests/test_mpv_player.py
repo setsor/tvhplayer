@@ -115,6 +115,25 @@ def test_mpv_draws_only_through_the_render_api(engine):
     assert mpv.options['input_default_bindings'] is False
 
 
+@pytest.mark.parametrize(('system', 'machine', 'release', 'expected'), [
+    ('Darwin', 'x86_64', '22.6.0', 1),
+    ('Darwin', 'arm64', '22.6.0', None),
+    ('Darwin', 'x86_64', '23.6.0', None),
+    ('Linux', 'x86_64', '6.8.0', None),
+    ('Windows', 'AMD64', '10', None),
+])
+def test_ventura_intel_hardware_thread_diagnostic(engine, monkeypatch, system, machine, release, expected):
+    from tvhplayer.core import mpv_player
+
+    monkeypatch.setattr(mpv_player, 'platform', types.SimpleNamespace(
+        system=lambda: system, machine=lambda: machine, release=lambda: release,
+    ))
+    player = mpv_player.MpvPlayer()
+    assert player._mpv.options.get('hwdec_threads') == expected
+    assert player._mpv.options['hwdec'] == mpv_player.MPV_OPTIONS['hwdec']
+    assert 'hwdec_threads' not in mpv_player.MPV_OPTIONS
+
+
 class _MpvWithoutLua(_Mpv):
     """libmpv built without Lua, as in the Flatpak: no osc or ytdl options."""
 
