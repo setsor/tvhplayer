@@ -1,6 +1,7 @@
 import os
 import threading
 import time
+from types import SimpleNamespace
 
 from tvhplayer import spinner_debug
 
@@ -38,19 +39,33 @@ def test_faulthandler_dump_comes_with_the_late_tick():
     assert 'test_faulthandler_dump_comes_with_the_late_tick' in report
 
 
-def test_on_time_ticks_are_not_reported():
+def test_on_time_ticks_are_not_reported(monkeypatch):
+    # Exercise the classification of known on-time ticks, not the CI
+    # scheduler's ability to wake a sleeping thread within 50 ms.
+    # Keep the actual watchdog/report delivery; the other tests exercise
+    # real faulthandler timeouts and stalls.
+    clock = [100.0]
+    monkeypatch.setattr(spinner_debug, 'time', SimpleNamespace(
+        monotonic=lambda: clock[0], sleep=time.sleep))
     out = []
-    watch = spinner_debug.SpinnerWatch(out=out.append)
+    reported = threading.Event()
+
+    def collect(message):
+        out.append(message)
+        if message.startswith('spinner stopped after'):
+            reported.set()
+
+    watch = spinner_debug.SpinnerWatch(out=collect, dump=False)
     watch.started()
-    for _ in range(5):
-        time.sleep(0.016)
-        watch.tick()
-    watch.stopped()
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline and not any('stopped after' in line for line in out):
-        time.sleep(0.01)
-    assert not any(line.startswith('tick late') for line in out)
-    assert '0 late' in out[-1]
+    try:
+        for gap in (0.016, 0.016, 0.049, 0.016, 0.016):
+            clock[0] += gap
+            watch.tick()
+    finally:
+        watch.stopped()
+    assert reported.wait(2), out
+    assert not any(line.startswith('tick late') for line in out), out
+    assert '5 ticks, 0 late' in out[-1]
 
 
 def test_threads_in_blocking_calls_are_marked_waiting():
