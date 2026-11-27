@@ -41,3 +41,18 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if 'slow' in item.keywords:
             item.add_marker(skip)
+
+
+# Diagnostic branch: observe the completed test after normal pytest fixture
+# teardown, including restoration of monkeypatches. Do not force collection
+# during any benchmark or alter any threshold.
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    if (os.environ.get('TVH_DIAG_JSON')
+            and item.path.name == 'test_responsiveness.py'):
+        module = item.module
+        module._lifetime_test = item.name
+        yield
+        module._lifetime_after_teardown(item.name)
+    else:
+        yield

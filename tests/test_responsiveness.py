@@ -22,6 +22,7 @@ import os
 import threading
 import time
 import types
+import weakref
 
 import pytest
 
@@ -50,6 +51,70 @@ SEARCH_BUDGET = 0.2
 LIST_BURST_BUDGET = 0.25
 BIG_LIST = 60_000
 
+
+
+# Diagnostic-only lifetime sampling. The registry stores weak references,
+# never the large channel lists, callbacks, or Qt wrappers themselves.
+_lifetime_refs = []
+_lifetime_test = None
+
+
+def _track_lifetime(label, obj):
+    if obj is not None:
+        try:
+            _lifetime_refs.append((_lifetime_test, label, weakref.ref(obj)))
+        except TypeError:
+            pass
+
+
+def _live_lifetime_refs():
+    counts = {}
+    for test, label, reference in _lifetime_refs:
+        if reference() is not None:
+            key = (test, label)
+            counts[key] = counts.get(key, 0) + 1
+    return [{'test': test, 'object': label, 'alive': count}
+            for (test, label), count in counts.items()]
+
+
+def _track_big_window(window, backend):
+    if not os.environ.get('TVH_DIAG_JSON'):
+        return
+    _track_lifetime('window', window)
+    _track_lifetime('backend', backend)
+    model = window.channel_model
+    _track_lifetime('model', model)
+    for label, channels in (('window channel', window._channels),
+                            ('model channel', model._channels)):
+        if channels:
+            for index in sorted({0, len(channels)//2, len(channels)-1}):
+                _track_lifetime(label, channels[index])
+    # A ServerCall's request may retain the completed snapshot in its closure.
+    import tvhplayer.tvhplayer as ui
+    for call in window.findChildren(ui.ServerCall):
+        _track_lifetime('ServerCall', call)
+        _track_lifetime('ServerCall request', call._request)
+
+
+def _lifetime_after_teardown(node_name):
+    """Called after fixture teardown, never during a measured heartbeat."""
+    if not os.environ.get('TVH_DIAG_JSON'):
+        return
+    before = _live_lifetime_refs()
+    collected = None
+    elapsed = None
+    if os.environ.get('TVH_DIAG_CLEANUP') == 'collect':
+        started = time.perf_counter()
+        collected = gc.collect()
+        elapsed = (time.perf_counter()-started)*1000
+    after = _live_lifetime_refs()
+    _lifetime_refs[:] = [entry for entry in _lifetime_refs if entry[2]() is not None]
+    with open(os.environ['TVH_DIAG_JSON'] + '.lifetime', 'a', encoding='utf-8') as stream:
+        stream.write(json.dumps({
+            'test': node_name, 'mode': os.environ.get('TVH_DIAG_CLEANUP', 'baseline'),
+            'before': before, 'after': after, 'collected': collected,
+            'collection_ms': elapsed, 'gc_count': gc.get_count(),
+        }) + '\n')
 
 
 class StallMeter:
@@ -370,6 +435,8 @@ def _remote_window(monkeypatch, tmp_path):
 def _close(app, window):
     from PyQt6.QtCore import QCoreApplication, QEvent
 
+    if len(getattr(window, '_channels', ())) >= 10_000:
+        _track_big_window(window, getattr(window, '_backend', None))
     window.close()
     app.processEvents()
     window.deleteLater()
