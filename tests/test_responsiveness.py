@@ -1035,6 +1035,22 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
     return app, ui, window, backend
 
 
+def _assert_programme_changes_applied(window, expected):
+    """Verify the model received the last programme of every changed channel."""
+    from tvhplayer.core.channel_info import channel_key
+
+    model = window.channel_model
+    for number, (event_id, next_event_id) in expected.items():
+        channel = window._live_channels[number]
+        # A search can hide a channel. Check its source slot, not just
+        # visible rows: hidden channels must get programme updates too.
+        position = model._position_by_key[channel_key(channel)]
+        listed = model._channels[position]
+        assert listed.htsp_id == number
+        assert listed.raw['eventId'] == event_id
+        assert listed.raw['nextEventId'] == next_event_id
+
+
 @pytest.mark.parametrize('groups', [0, 1_034])
 def test_programme_changes_on_a_big_list_keep_the_window_answering(monkeypatch, tmp_path, groups):
     # Tvheadend sends a channelUpdate whenever a channel's programme changes.
@@ -1044,17 +1060,20 @@ def test_programme_changes_on_a_big_list_keep_the_window_answering(monkeypatch, 
     from PyQt6.QtCore import QTimer
 
     app, ui, window, backend = _big_htsp_window(monkeypatch, tmp_path, groups=groups)
+    feeder = QTimer()
     try:
         sent = [0]
+        expected = {}
 
         def send():
             for _ in range(5):
                 sent[0] += 1
                 number = sent[0] * 97 % BIG_LIST + 1
+                event_id = number * 10 + sent[0]
+                expected[number] = (event_id, event_id + 1)
                 backend._on_async({'method': 'channelUpdate', 'channelId': number,
-                                   'eventId': number * 10 + sent[0], 'nextEventId': number * 10 + sent[0] + 1})
+                                   'eventId': event_id, 'nextEventId': event_id + 1})
 
-        feeder = QTimer()
         feeder.setInterval(100)
         feeder.timeout.connect(send)
         feeder.start()
@@ -1063,10 +1082,21 @@ def test_programme_changes_on_a_big_list_keep_the_window_answering(monkeypatch, 
         feeder.stop()
         meter.report(f'Programme changes, {BIG_LIST:,} channels in {groups:,} groups, 50 a second')
         assert sent[0] >= 100
-        assert backend.take_channel_changes()[0] == {}
         assert meter.busy() < LIST_BUSY_BUDGET
         assert meter.worst() < LIST_BUDGET
+        # The last producer tick can precede the end of the measurement
+        # but follow the UI's 50 ms metadata poll. Let the real consumer
+        # finish within five poll intervals; observing the queue must not
+        # remove any of its messages. Keep measuring the final drain.
+        if backend.pending_channel_count:
+            drain = StallMeter()
+            drain.run(0.25, until=lambda: backend.pending_channel_count == 0)
+            drain.report('Final programme changes drain')
+            assert drain.worst() < LIST_BUDGET
+        assert backend.pending_channel_count == 0
+        _assert_programme_changes_applied(window, expected)
     finally:
+        feeder.stop()
         window._channel_fetch = None
         backend.close()
         _close(app, window)
@@ -1082,14 +1112,20 @@ def test_a_burst_of_programme_changes_on_a_big_list_keeps_the_window_answering(m
     try:
         window.search_box.setText(search)
         StallMeter().run(1.0)
+        expected = {}
         for number in range(1, 2001):
             number = number * 29 % BIG_LIST + 1
+            expected[number] = (number * 10 + 5, number * 10 + 6)
             backend._on_async({'method': 'channelUpdate', 'channelId': number,
                                'eventId': number * 10 + 5, 'nextEventId': number * 10 + 6})
         meter = StallMeter()
-        meter.run(1.0, until=lambda: backend.take_channel_changes()[0] == {} and len(meter.ticks) > 20)
+        # take_channel_changes() is destructive: polling it from the test
+        # could consume the burst before the UI timer ever processed it.
+        meter.run(1.0, until=lambda: backend.pending_channel_count == 0 and len(meter.ticks) > 20)
         meter.report(f'2,000 programme changes at once, {BIG_LIST:,} channels, search {search!r}')
+        assert backend.pending_channel_count == 0
         assert meter.worst() < LIST_BURST_BUDGET
+        _assert_programme_changes_applied(window, expected)
     finally:
         window._channel_fetch = None
         backend.close()
