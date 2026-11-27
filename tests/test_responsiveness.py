@@ -15,6 +15,7 @@ Two kinds of work are measured:
 Run with ``-s`` to see the measured pauses.
 """
 
+import functools
 import gc
 import json
 import os
@@ -59,16 +60,22 @@ class StallMeter:
 
         self.interval = interval_ms / 1000
         self.ticks = []
+        self.cpu_ticks = []
         self.timer = QTimer()
         self.timer.setInterval(interval_ms)
-        self.timer.timeout.connect(lambda: self.ticks.append(time.perf_counter()))
+        self.timer.timeout.connect(self._tick)
+
+    def _tick(self):
+        self.ticks.append(time.perf_counter())
+        clock = getattr(time, 'thread_time', None)
+        self.cpu_ticks.append(clock() if clock is not None else None)
 
     def run(self, seconds, until=None):
         """Run the event loop for ``seconds``, or until ``until()`` is true after at least one tick."""
         from PyQt6.QtCore import QEventLoop, QTimer
 
         loop = QEventLoop()
-        self.ticks.append(time.perf_counter())
+        self._tick()
         self.timer.start()
         deadline = time.monotonic() + seconds
         check = QTimer()
@@ -83,7 +90,7 @@ class StallMeter:
         loop.exec()
         check.stop()
         self.timer.stop()
-        self.ticks.append(time.perf_counter())
+        self._tick()
 
     def gaps(self):
         return sorted(b - a for a, b in zip(self.ticks, self.ticks[1:]))
@@ -109,6 +116,118 @@ class StallMeter:
         print(f"\n{what}: worst pause {self.worst() * 1000:.0f} ms, busy {self.busy():.0%}, "
               f"p95 {self.percentile(0.95) * 1000:.0f} ms, "
               f"p99 {self.percentile(0.99) * 1000:.0f} ms, {len(self.ticks)} ticks")
+
+
+@pytest.fixture(autouse=True)
+def _latency_trace(request, monkeypatch):
+    """Diagnostic branch only: attribute wall-clock stalls to application work."""
+    path = os.environ.get('TVH_DIAG_JSON')
+    selected = ('test_programme_changes_on_a_big_list_keep_the_window_answering',
+                'test_a_big_list_arriving_keeps_the_window_answering')
+    if not path or not request.node.name.startswith(selected):
+        yield
+        return
+    import tvhplayer.tvhplayer as ui
+    from tvhplayer.channel_view import ChannelTableModel
+    from tvhplayer.core.htsp_backend import HtspBackend
+
+    spans = []
+    gc_started = {}
+    main_ident = threading.get_ident()
+    clock = getattr(time, 'thread_time', lambda: None)
+
+    def instrument(owner, name):
+        original = getattr(owner, name)
+        label = getattr(owner, '__name__', type(owner).__name__) + '.' + name
+
+        @functools.wraps(original)
+        def timed(*args, **kwargs):
+            start = time.perf_counter()
+            cpu = clock()
+            try:
+                return original(*args, **kwargs)
+            finally:
+                end = time.perf_counter()
+                if end - start >= .001:
+                    cpu_end = clock()
+                    spans.append({
+                        'name': label, 'start': start, 'end': end,
+                        'cpu_ms': (cpu_end - cpu) * 1000 if cpu is not None else None,
+                        'main': threading.get_ident() == main_ident,
+                    })
+        monkeypatch.setattr(owner, name, timed)
+
+    for name in (
+        '_poll_channel_metadata', '_on_channels_loaded', '_channels_prepared',
+        '_fill_channel_rows', '_refresh_tag_combo', '_apply_channel_filter',
+        '_mark_playing_channel', '_show_channel_list', '_guide_channels_changed',
+        '_channel_list_settled', '_request_visible_logos', '_mark_failed_channels',
+        'channel_recordings_changed', '_check_conflicts', '_sync_record_controls',
+    ):
+        instrument(ui.TVHeadendClient, name)
+    for name in ('set_channels', 'update_channels', '_update_in_place',
+                 '_filtered', '_sorted', '_relayout', 'set_kinds', 'set_logos',
+                 'set_programmes', 'set_marks'):
+        instrument(ChannelTableModel, name)
+    for name in ('refresh', '_apply_server_entries', '_redraw'):
+        instrument(ui.TasksPanel, name)
+    for name in ('channel_snapshot', 'take_channel_changes'):
+        instrument(HtspBackend, name)
+    for name in ('tag_channel_counts', 'channel_kinds', 'recording_channel_keys',
+                 'read_tuner_use'):
+        instrument(ui, name)
+
+    def gc_event(phase, info):
+        ident = threading.get_ident()
+        now = time.perf_counter()
+        if phase == 'start':
+            gc_started[ident] = (now, clock())
+        elif ident in gc_started:
+            start, cpu = gc_started.pop(ident)
+            cpu_end = clock()
+            if now - start >= .001:
+                spans.append({
+                    'name': 'GC generation ' + str(info.get('generation')),
+                    'start': start, 'end': now, 'main': ident == main_ident,
+                    'cpu_ms': (cpu_end - cpu) * 1000 if cpu is not None else None,
+                    'collected': info.get('collected'),
+                })
+
+    original_report = StallMeter.report
+
+    def report(meter, what):
+        original_report(meter, what)
+        gaps = sorted(
+            ((end-start, start, end, i) for i, (start, end) in
+             enumerate(zip(meter.ticks, meter.ticks[1:]))), reverse=True)[:5]
+        # Copy the list before sorting: a worker may append a span concurrently.
+        measured_spans = list(spans)
+        def describe(span):
+            return dict(span, wall_ms=(span['end']-span['start'])*1000)
+
+        result = {
+            'test': request.node.name, 'what': what,
+            'worst_ms': meter.worst()*1000, 'p99_ms': meter.percentile(.99)*1000,
+            'busy': meter.busy(), 'gaps': [],
+        }
+        for gap, start, end, i in gaps:
+            before, after = meter.cpu_ticks[i:i+2]
+            overlap = [s for s in measured_spans if s['start'] <= end and s['end'] >= start]
+            overlap.sort(key=lambda s: s['end']-s['start'], reverse=True)
+            result['gaps'].append({
+                'ms': gap*1000, 'start': start, 'end': end,
+                'main_cpu_ms': (after-before)*1000 if before is not None else None,
+                'operations': [describe(s) for s in overlap[:12]],
+            })
+        with open(path, 'a', encoding='utf-8') as stream:
+            stream.write(json.dumps(result) + '\n')
+
+    monkeypatch.setattr(StallMeter, 'report', report)
+    gc.callbacks.append(gc_event)
+    try:
+        yield
+    finally:
+        gc.callbacks.remove(gc_event)
 
 
 def _later(action):
@@ -959,29 +1078,6 @@ def _big_htsp_window(monkeypatch, tmp_path, count=BIG_LIST, groups=0):
     server = {'name': 'HTSP', 'url': 'http://127.0.0.1:9981', 'protocol': 'htsp'}
     # Synthetic HTSP benchmarks do not query DVR metadata.
     window.synced_recordings = lambda _server: ('synced', [])
-    # A/B diagnostic only: in B, supply the tuner inventory of this synthetic
-    # server before loading it. Preserve the actual conflict-check code path.
-    tuner_events = []
-    original_start = ui.TunerUseFetch.start
-    original_read = ui.read_tuner_use
-
-    def start_tuner(fetch):
-        tuner_events.append(('start', time.perf_counter()))
-        return original_start(fetch)
-
-    def read_tuner(admin):
-        started = time.perf_counter()
-        try:
-            return original_read(admin)
-        finally:
-            tuner_events.append(('read', started, time.perf_counter()))
-
-    monkeypatch.setattr(ui.TunerUseFetch, 'start', start_tuner)
-    monkeypatch.setattr(ui, 'read_tuner_use', read_tuner)
-    window._diag_tuner_events = tuner_events
-    if os.environ.get('TVH_DIAG_TUNERS') == 'cached':
-        from tvhplayer.core.conflicts import TunerUse
-        window._tuner_use[ui.server_key(server)] = (time.monotonic(), TunerUse())
     window.servers = [server]
     window.server_combo.blockSignals(True)
     window.server_combo.addItem('HTSP')
@@ -1034,52 +1130,8 @@ def test_programme_changes_on_a_big_list_keep_the_window_answering(monkeypatch, 
         feeder.timeout.connect(send)
         feeder.start()
         meter = StallMeter()
-        # Keep normal garbage collection enabled. Correlate the longest
-        # heartbeat gaps with GC callbacks and tuner fetches, without printing
-        # or doing file I/O while the heartbeat is being measured.
-        collections = []
-        gc_started = {}
-        main_thread = threading.get_ident()
-
-        def gc_event(phase, info):
-            ident = threading.get_ident()
-            now = time.perf_counter()
-            if phase == 'start':
-                gc_started[ident] = now
-            elif ident in gc_started:
-                collections.append({
-                    'generation': info.get('generation'),
-                    'start': gc_started.pop(ident),
-                    'end': now, 'main_thread': ident == main_thread,
-                    'collected': info.get('collected'),
-                })
-
-        threads_before = [thread.name for thread in threading.enumerate()]
-        gc.callbacks.append(gc_event)
-        try:
-            meter.run(3.0)
-        finally:
-            gc.callbacks.remove(gc_event)
-            feeder.stop()
-        worst_gaps = sorted(
-            ((end - start, start, end) for start, end in zip(meter.ticks, meter.ticks[1:])),
-            reverse=True)[:5]
-        diagnostic = {
-            'groups': groups, 'mode': os.environ.get('TVH_DIAG_TUNERS', 'original'),
-            'worst_ms': meter.worst() * 1000, 'busy': meter.busy(),
-            'p99_ms': meter.percentile(.99) * 1000, 'sent': sent[0],
-            'threads_before': threads_before,
-            'tuner_events': list(window._diag_tuner_events),
-            'gaps': [{'ms': gap * 1000, 'start': start, 'end': end,
-                      'gc_overlap': [dict(event, duration_ms=(event['end'] - event['start']) * 1000)
-                                     for event in collections if event['start'] <= end and event['end'] >= start]}
-                     for gap, start, end in worst_gaps],
-            'long_gc': [dict(event, duration_ms=(event['end'] - event['start']) * 1000)
-                        for event in collections if event['end'] - event['start'] >= .01],
-        }
-        if os.environ.get('TVH_DIAG_JSON'):
-            with open(os.environ['TVH_DIAG_JSON'], 'a', encoding='utf-8') as report:
-                report.write(json.dumps(diagnostic) + '\n')
+        meter.run(3.0)
+        feeder.stop()
         meter.report(f'Programme changes, {BIG_LIST:,} channels in {groups:,} groups, 50 a second')
         assert sent[0] >= 100
         assert backend.take_channel_changes()[0] == {}

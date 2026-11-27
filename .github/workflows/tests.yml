@@ -1,14 +1,11 @@
-name: macOS - EPG latency A/B diagnostic
-
+name: macOS - EPG and list latency attribution
 on:
   push:
     branches:
       - diagnostic/macos-epg-latency-4.7.6
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   diagnostic:
     runs-on: macos-15
@@ -28,32 +25,41 @@ jobs:
           brew install mpv ffmpeg
           python -m pip install -r macos/requirements-build.txt PyQt6 pytest pytest-timeout pyyaml python-dateutil setuptools
           python packaging/build-native.py
-      - name: Compare six complete responsiveness runs on one runner
+          python -m py_compile tests/test_responsiveness.py tests/diagnostic_scheduler_probe.py
+      - name: Attribute stalls in six complete responsiveness suites
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p latency-results
           failed=0
           for trial in 1 2 3 4 5 6; do
-            if (( trial % 2 == 1 )); then mode=original; else mode=cached; fi
-            export TVH_DIAG_TUNERS="$mode"
-            export TVH_DIAG_JSON="$PWD/latency-results/$trial-$mode.jsonl"
-            echo "::group::Trial $trial ($mode)"
-            if ! python -m pytest tests/test_responsiveness.py -vv --tb=short -ra -p no:cacheprovider --timeout=300 --junitxml="latency-results/$trial-$mode.xml" 2>&1 | tee "latency-results/$trial-$mode.log"; then
+            export TVH_DIAG_JSON="$PWD/latency-results/$trial-trace.jsonl"
+            python tests/diagnostic_scheduler_probe.py > "latency-results/$trial-probe.jsonl" &
+            probe=$!
+            echo "::group::Trial $trial"
+            if ! python -m pytest tests/test_responsiveness.py -vv --tb=short -ra -p no:cacheprovider --timeout=300 --junitxml="latency-results/$trial.xml" 2>&1 | tee "latency-results/$trial.log"; then
               failed=1
             fi
+            kill "$probe" 2>/dev/null || true
+            wait "$probe" 2>/dev/null || true
             cat "$TVH_DIAG_JSON" || true
             echo "::endgroup::"
           done
           python - <<'PY'
           import json, os
           from pathlib import Path
-          rows = ["## EPG benchmark (unchanged 50 ms threshold)", "", "| Trial | Mode | Groups | Worst ms | p99 ms | Tuner starts |", "| --- | --- | ---: | ---: | ---: | ---: |"]
-          for path in sorted(Path("latency-results").glob("*.jsonl")):
+          rows = ["## Stall attribution (original thresholds)", "", "| Trial | Test | Worst ms | Main CPU ms in worst gap | Largest overlapping main operation | Independent process gap ms |", "|---|---|---:|---:|---|---:|"]
+          for path in sorted(Path("latency-results").glob("*-trace.jsonl")):
+              trial = path.name.split("-")[0]
+              probe_path = path.with_name(trial + "-probe.jsonl")
+              probe = [json.loads(line) for line in probe_path.read_text().splitlines()]
               for line in path.read_text().splitlines():
                   d = json.loads(line)
-                  starts = sum(event[0] == "start" for event in d["tuner_events"])
-                  rows.append("| %s | %s | %d | %.2f | %.2f | %d |" % (path.stem, d["mode"], d["groups"], d["worst_ms"], d["p99_ms"], starts))
+                  gap = d["gaps"][0]
+                  main = [op for op in gap["operations"] if op["main"]]
+                  operation = ("%s %.1f ms (CPU %s)" % (main[0]["name"], main[0]["wall_ms"], main[0]["cpu_ms"])) if main else "-"
+                  overlap = [p["ms"] for p in probe if p["start"] <= gap["end"] and p["end"] >= gap["start"]]
+                  rows.append("| %s | %s | %.2f | %s | %s | %.2f |" % (trial, d["test"], d["worst_ms"], gap["main_cpu_ms"], operation, max(overlap, default=0)))
           print("\n".join(rows))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
               f.write("\n".join(rows) + "\n")
@@ -62,7 +68,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: macos-epg-latency-results
+          name: macos-latency-attribution
           path: latency-results/
           if-no-files-found: warn
           retention-days: 14
