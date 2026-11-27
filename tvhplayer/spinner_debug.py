@@ -154,10 +154,13 @@ class SpinnerWatch:
         self._ticks = 0
         self._late = []
         self._wake = threading.Event()
+        self._closed = threading.Event()
         self._thread = None
 
     def started(self):
         with self._lock:
+            if self._closed.is_set():
+                raise RuntimeError('SpinnerWatch is closed')
             if self._running:
                 return
             self._running = True
@@ -195,6 +198,27 @@ class SpinnerWatch:
             f'spinner stopped after {took:.1f} s: {ticks} ticks, {len(late)} late{worst}'
         )
         self._wake.set()
+
+    def close(self):
+        """Dispose of this watcher on its owning thread, after its last run.
+
+        Stop and cancel the process-wide faulthandler timer before joining
+        the reporter. Keep both file handles alive until reporting is done.
+        Unlike stopped(), this is final and the watcher cannot be restarted.
+        """
+        if not self._closed.is_set():
+            self.stopped()
+            self._closed.set()
+            self._wake.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise RuntimeError('Spinner diagnostic watchdog did not stop')
+        if self._dump_reader is not None:
+            self._dump_reader.close()
+        if self._dump is not None:
+            self._dump.close()
 
     def tick(self):
         now = time.monotonic()
@@ -244,6 +268,10 @@ class SpinnerWatch:
         me = threading.get_ident()
         while True:
             self._flush()
+            if self._closed.is_set():
+                # stopped() may have queued its final report during _flush().
+                self._flush()
+                return
             with self._lock:
                 running = self._running
                 overdue = time.monotonic() - self._last

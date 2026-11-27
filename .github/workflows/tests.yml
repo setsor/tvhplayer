@@ -74,6 +74,7 @@ jobs:
       # Keep correctness and timing-sensitive benchmarks in fresh processes,
       # consistent with the successful Linux and Windows validation.
       - name: Run correctness tests
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -88,6 +89,17 @@ jobs:
             command -v ffprobe
           fi
           python -m pytest tests --ignore=tests/test_responsiveness.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
+
+      # faulthandler uses a process-wide native timer and inspects every
+      # thread. Run its diagnostic tests away from unrelated GUI/network
+      # fixtures on Windows; every test still runs and failure is gating.
+      - name: Run correctness tests (Windows)
+        if: runner.os == 'Windows'
+        run: python -m pytest tests --ignore=tests/test_responsiveness.py --ignore=tests/test_spinner_debug.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
+
+      - name: Run spinner diagnostics (Windows)
+        if: ${{ !cancelled() && runner.os == 'Windows' && steps.native_decoder.outcome == 'success' }}
+        run: python -m pytest tests/test_spinner_debug.py -vv --tb=short -p no:cacheprovider --timeout=300 -ra
 
       - name: Run responsiveness tests
         if: ${{ !cancelled() && steps.native_decoder.outcome == 'success' }}
