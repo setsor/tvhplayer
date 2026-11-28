@@ -184,6 +184,8 @@ jobs:
                 "$CONDA_PREFIX/include/libavformat/avformat.h"
           pkg-config --cflags libavcodec libavformat libavutil
           export CFLAGS="-I$CONDA_PREFIX/include -mmacosx-version-min=13.0"
+          # Objective-C VideoToolbox/libplacebo sources need the same headers.
+          export OBJCFLAGS="$CFLAGS"
           export LDFLAGS="-mmacosx-version-min=13.0 -framework CoreFoundation"
           pkg-config --modversion expat
           pkg-config --modversion libavcodec
