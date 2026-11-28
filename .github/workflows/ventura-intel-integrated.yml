@@ -276,7 +276,7 @@ jobs:
           print("\n".join(rows))
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as out:
               out.write("\n".join(rows) + "\n")
-          assert len(core) == 1222, ("correctness test count changed", len(core))
+          assert len(core) == 1227, ("correctness test count changed", len(core))
           assert len(perf) == 37 and all(state(c) == "pass" for c in perf)
           assert not counts["failure"] and not counts["error"] and not missing
           PY
