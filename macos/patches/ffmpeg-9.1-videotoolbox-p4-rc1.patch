@@ -1,0 +1,121 @@
+--- a/libavcodec/videotoolbox.c
++++ b/libavcodec/videotoolbox.c
+@@ -723,6 +723,11 @@
+                                           CMTime duration)
+ {
+     VTContext *vtctx = opaque;
++
++    vtctx->dropped_without_error =
++        vtctx->h264_field_picture &&
++        status == noErr && !image_buffer &&
++        (flags & kVTDecodeInfo_FrameDropped);
+ 
+     if (vtctx->frame) {
+         CVPixelBufferRelease(vtctx->frame);
+@@ -731,7 +736,8 @@
+ 
+     if (!image_buffer) {
+         // kVTVideoDecoderReferenceMissingErr, defined since the macOS 12 SDKs
+-        if (status != -17694)
++        if (status != -17694 &&
++            !vtctx->dropped_without_error)
+             vtctx->reconfig_needed = true;
+ 
+         av_log(vtctx->logctx, status ? AV_LOG_WARNING : AV_LOG_DEBUG,
+@@ -1059,6 +1065,9 @@
+     AVVideotoolboxContext *videotoolbox = videotoolbox_get_context(avctx);
+     VTContext *vtctx = avctx->internal->hwaccel_priv_data;
+ 
++    vtctx->dropped_without_error = false;
++    vtctx->h264_field_picture = false;
++
+     if (vtctx->reconfig_needed == true) {
+         vtctx->reconfig_needed = false;
+         av_log(avctx, AV_LOG_VERBOSE, "VideoToolbox decoder needs reconfig, restarting..\n");
+@@ -1071,6 +1080,11 @@
+     if (!videotoolbox->session || !vtctx->bitstream || !vtctx->bitstream_size)
+         return AVERROR_INVALIDDATA;
+ 
++    if (avctx->codec_id == AV_CODEC_ID_H264) {
++        H264Context *h = avctx->priv_data;
++        vtctx->h264_field_picture = FIELD_PICTURE(h);
++    }
++
+     status = videotoolbox_session_decode_frame(avctx);
+     if (status != noErr) {
+         if (status == kVTVideoDecoderMalfunctionErr || status == kVTInvalidSessionErr)
+@@ -1079,8 +1093,18 @@
+         return AVERROR_UNKNOWN;
+     }
+ 
+-    if (!vtctx->frame)
++    if (!vtctx->frame) {
++        if (avctx->codec_id == AV_CODEC_ID_H264 &&
++            vtctx->dropped_without_error &&
++            !vtctx->reconfig_needed) {
++            H264Context *h = avctx->priv_data;
++
++            if (FIELD_PICTURE(h) && h->first_field)
++                return 0;
++        }
++
+         return AVERROR_UNKNOWN;
++    }
+ 
+     return videotoolbox_buffer_create(avctx, frame);
+ }
+@@ -1090,7 +1114,40 @@
+     H264Context *h = avctx->priv_data;
+     AVFrame *frame = h->cur_pic_ptr->f;
+     VTContext *vtctx = avctx->internal->hwaccel_priv_data;
+-    int ret = ff_videotoolbox_common_end_frame(avctx, frame);
++    int ret;
++
++    if (!vtctx->p3_restart_done &&
++        vtctx->p3_recovery_pending &&
++        FIELD_PICTURE(h) &&
++        h->first_field &&
++        (h->picture_idr ||
++         (h->cur_pic_ptr->sei_recovery_frame_cnt == 0 &&
++          h->slice_ctx[0].slice_type_nos == AV_PICTURE_TYPE_I))) {
++
++        vtctx->p3_restart_done = true;
++        vtctx->p3_recovery_pending = false;
++        vtctx->reconfig_needed = true;
++
++        av_log(avctx, AV_LOG_INFO,
++               "VT_P4_RC1: controlled H264 recovery at frame_num=%d\n",
++               h->cur_pic_ptr->frame_num);
++    }
++
++    ret = ff_videotoolbox_common_end_frame(avctx, frame);
++
++    if (ret == 0 &&
++        !vtctx->p3_restart_done &&
++        !vtctx->p3_recovery_pending &&
++        FIELD_PICTURE(h) &&
++        h->first_field &&
++        vtctx->dropped_without_error) {
++
++        vtctx->p3_recovery_pending = true;
++
++        av_log(avctx, AV_LOG_VERBOSE,
++               "VT_P4_RC1: H264 field recovery pending\n");
++    }
++
+     vtctx->bitstream_size = 0;
+     return ret;
+ }
+--- a/libavcodec/vt_internal.h
++++ b/libavcodec/vt_internal.h
+@@ -45,6 +45,10 @@
+     // Current H264 parameters (used to trigger decoder restart on SPS changes).
+     uint8_t                     sps[3];
+     bool                        reconfig_needed;
++    bool                        h264_field_picture;
++    bool                        dropped_without_error;
++    bool                        p3_recovery_pending;
++    bool                        p3_restart_done;
+ 
+     void *logctx;
+ } VTContext;
