@@ -132,6 +132,14 @@ def test_ventura_intel_hardware_thread_diagnostic(engine, monkeypatch, system, m
     assert player._mpv.options.get('hwdec_threads') == expected
     assert player._mpv.options['hwdec'] == mpv_player.MPV_OPTIONS['hwdec']
     assert 'hwdec_threads' not in mpv_player.MPV_OPTIONS
+    expected_probe = 2.0 if expected == 1 else None
+    assert player._mpv.options.get('demuxer_lavf_analyzeduration') == expected_probe
+    assert 'demuxer_lavf_analyzeduration' not in mpv_player.MPV_OPTIONS
+    for fast_start in (True, False):
+        player.set_fast_start(fast_start)
+        assert player._mpv.props['demuxer-lavf-analyzeduration'] == (
+            2.0 if expected == 1 else (mpv_player.FAST_START_ANALYZE_SECONDS if fast_start else 0)
+        )
 
 
 class _MpvWithoutLua(_Mpv):

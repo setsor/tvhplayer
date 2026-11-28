@@ -78,11 +78,13 @@ class MpvPlayer(Player):
         # QApplication sets the numeric locale from the desktop; libmpv refuses anything but C.
         locale.setlocale(locale.LC_NUMERIC, 'C')
         options = dict(MPV_OPTIONS)
-        # Ventura Intel diagnostic: change only libavcodec hardware threading.
-        if (platform.system() == 'Darwin' and platform.machine() == 'x86_64'
-                and platform.release().split('.')[0] == '22'):
+        # Ventura Intel diagnostic: retain one hardware thread and probe for 2 s.
+        self._ventura_intel = (platform.system() == 'Darwin' and platform.machine() == 'x86_64'
+                               and platform.release().split('.')[0] == '22')
+        if self._ventura_intel:
             options['hwdec_threads'] = 1
-            print('Debug: Ventura Intel diagnostic: hwdec-threads=1')
+            options['demuxer_lavf_analyzeduration'] = 2.0
+            print('Debug: Ventura Intel diagnostic: hwdec-threads=1, analyzeduration=2.0s')
         self._mpv = mpv.MPV(log_handler=_log, loglevel='warn', **options)
         # Set after creation: an unknown option at creation leaves a running mpv behind.
         for name, value in LUA_SCRIPT_OPTIONS.items():
@@ -242,7 +244,10 @@ class MpvPlayer(Player):
         self._hardware_decoding = mode
 
     def set_fast_start(self, on):
-        self._mpv['demuxer-lavf-analyzeduration'] = FAST_START_ANALYZE_SECONDS if on else 0
+        # Keep the diagnostic probe duration independent of the Fast Start toggle.
+        self._mpv['demuxer-lavf-analyzeduration'] = (
+            2.0 if self._ventura_intel else (FAST_START_ANALYZE_SECONDS if on else 0)
+        )
 
     def _buffered(self):
         """``(position, start, end)`` of the buffered stretch being played, or None.
